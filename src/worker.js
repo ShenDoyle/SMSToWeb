@@ -706,6 +706,37 @@ async function handleDeleteDevice(idParam, env) {
   return json({ success: true, deleted: res.meta ? res.meta.changes : 0 });
 }
 
+/* 来源清单：聚合 messages.source 及条数，供管理页动态生成「来源筛选」下拉（替代写死的三项） */
+async function handleListSources(env) {
+  const rows = await env.DB.prepare(
+    "SELECT source, COUNT(*) AS n FROM messages GROUP BY source ORDER BY n DESC"
+  ).all();
+  return json({ success: true, list: (rows.results || []).map(function (r) {
+    return { source: r.source, count: r.n };
+  }) });
+}
+
+/* 合并设备标签：把 from 的全部消息迁移到 to，成功后删除 from。
+   目标已有同（设备+发件人+正文+时间）的重复消息时，UPDATE OR IGNORE 跳过，随后清掉残留（去重索引约束），不报错 */
+async function handleMergeDevices(request, env) {
+  let body;
+  try { body = await request.json(); } catch { return json({ success: false, error: "invalid json" }, 400); }
+  const from = parseInt(body && body.from, 10);
+  const to = parseInt(body && body.to, 10);
+  if (!Number.isInteger(from) || from <= 0 || !Number.isInteger(to) || to <= 0 || from === to) {
+    return json({ success: false, error: "invalid device ids" }, 400);
+  }
+  const devs = await env.DB.prepare("SELECT id FROM devices WHERE id IN (?1, ?2)").bind(from, to).all();
+  const ids = (devs.results || []).map(function (r) { return r.id; });
+  if (ids.indexOf(from) === -1 || ids.indexOf(to) === -1) {
+    return json({ success: false, error: "device not found" }, 404);
+  }
+  const moved = await env.DB.prepare("UPDATE OR IGNORE messages SET device_id = ?1 WHERE device_id = ?2").bind(to, from).run();
+  await env.DB.prepare("DELETE FROM messages WHERE device_id = ?1").bind(from).run();
+  await env.DB.prepare("DELETE FROM devices WHERE id = ?1").bind(from).run();
+  return json({ success: true, moved: moved.meta ? moved.meta.changes : 0 });
+}
+
 /* 长轮询：最多挂起 25s，期间每 2s 查一次是否有比 last_id 更新的消息；
    有则立即返回 changed=true（前端收到后刷新列表），实现推送式自动刷新 */
 async function handleWait(url, env) {
@@ -813,6 +844,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .pager button:disabled { opacity: .4; cursor: default; }
   .tabx { margin-left: 2px; color: var(--tabx); font-weight: 700; padding: 0 2px; }
   .tabx:hover { color: var(--del-hover); }
+  .tabop { margin-left: 2px; color: var(--faint); font-weight: 700; padding: 0 2px; font-size: 12px; }
+  .tabop:hover { color: var(--accent); }
   .toast { position: fixed; left: 50%; bottom: 48px; transform: translate(-50%, 12px);
            background: #111827; color: #fff; padding: 9px 18px; border-radius: 999px;
            font-size: 13px; opacity: 0; pointer-events: none; transition: all .25s ease; z-index: 99; }
@@ -1065,6 +1098,42 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       tabs.appendChild(mk("全部", 0, "(" + (res.list || []).reduce(function (s, d) { return s + d.msg_count; }, 0) + ")"));
       (res.list || []).forEach(function (d) {
         var el = mk(d.display_name, d.id, "(" + d.msg_count + ")");
+        /* 设备标签操作：✎ 重命名（设别名）、⇄ 合并到其他设备（后端 /api/devices/alias、/api/devices/merge） */
+        if (d.id) {
+          var ed = document.createElement("span");
+          ed.className = "tabop"; ed.textContent = "✎"; ed.title = "重命名设备";
+          ed.onclick = function (ev) {
+            ev.stopPropagation();
+            var nm = prompt("重命名设备「" + d.display_name + "」\n留空则恢复默认名", d.alias || d.display_name);
+            if (nm === null) return;
+            fetch("/api/devices/alias", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: d.id, alias: String(nm).trim() }) })
+              .then(function (r) { return r.json(); })
+              .then(function (res2) { if (!res2.success) { alert(res2.error || "重命名失败"); return; } refreshAll(); });
+          };
+          el.appendChild(ed);
+          var mg = document.createElement("span");
+          mg.className = "tabop"; mg.textContent = "⇄"; mg.title = "合并到其他设备";
+          mg.onclick = function (ev) {
+            ev.stopPropagation();
+            var others = (res.list || []).filter(function (x) { return x.id && x.id !== d.id; });
+            if (!others.length) { alert("没有可合并的其他设备"); return; }
+            var lines = others.map(function (x, i) { return (i + 1) + ". " + x.display_name + "（" + x.msg_count + " 条）"; });
+            var pick = prompt("把「" + d.display_name + "」的全部消息合并到哪台设备？\n" + lines.join("\n") + "\n输入序号：");
+            if (pick === null) return;
+            var idx = parseInt(pick, 10);
+            if (!(idx >= 1 && idx <= others.length)) { alert("序号无效"); return; }
+            var target = others[idx - 1];
+            if (!confirm("确认把「" + d.display_name + "」的全部消息合并到「" + target.display_name + "」？\n合并后本标签将被删除。")) return;
+            fetch("/api/devices/merge", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ from: d.id, to: target.id }) })
+              .then(function (r) { return r.json(); })
+              .then(function (res2) {
+                if (!res2.success) { alert(res2.error === "device not found" ? "目标设备不存在" : (res2.error || "合并失败")); return; }
+                if (state.device === d.id) { state.device = target.id; }
+                refreshAll();
+              });
+          };
+          el.appendChild(mg);
+        }
         /* 无短信的设备标签显示 × 可手动删除；有短信时后端拒绝删除 */
         if (!d.msg_count && d.id) {
           var x = document.createElement("span");
@@ -1139,7 +1208,26 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       })
       .catch(function (e) { $("list").innerHTML = '<div class="empty">加载失败：' + esc(e.message) + '</div>'; });
   }
-  function refreshAll() { return loadDevices().then(load); }
+  /* 来源下拉：从 /api/sources 动态聚合所有来源（含自定义 cron/alert 等），替代原先写死的三项 */
+  function srcLabel(s) {
+    if (s === "sms") return "短信";
+    if (s === "notify") return "通知";
+    return s;
+  }
+  function loadSources() {
+    return fetch("/api/sources").then(function (r) { return r.json(); }).then(function (res) {
+      var sel = $("src"), cur = state.src || "", list = (res && res.list) || [], seen = {};
+      var html = '<option value="">全部来源</option>';
+      list.forEach(function (it) {
+        seen[it.source] = true;
+        html += '<option value="' + esc(it.source) + '">' + esc(srcLabel(it.source)) + " (" + it.count + ")</option>";
+      });
+      if (cur && !seen[cur]) html += '<option value="' + esc(cur) + '">' + esc(srcLabel(cur)) + "</option>";
+      sel.innerHTML = html;
+      sel.value = cur;
+    }).catch(function () {});
+  }
+  function refreshAll() { return Promise.all([loadSources(), loadDevices()]).then(load); }
   $("q").addEventListener("input", function () {
     clearTimeout(state.deb);
     state.deb = setTimeout(function () { state.q = $("q").value.trim(); state.page = 1; load(); }, 300);
@@ -1341,6 +1429,12 @@ export default {
       }
       if (path === "/api/devices/alias" && request.method === "POST") {
         return await handleSetAlias(request, env);
+      }
+      if (path === "/api/devices/merge" && request.method === "POST") {
+        return await handleMergeDevices(request, env);
+      }
+      if (path === "/api/sources" && request.method === "GET") {
+        return await handleListSources(env);
       }
       if ((path === "/" || path === "/index.html") && request.method === "GET") {
         return new Response(renderHtml(PAGE_HTML, env), {

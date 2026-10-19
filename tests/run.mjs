@@ -96,6 +96,36 @@ async function main() {
   r = await handleCronRequest(R("GET", "/api/cron?token=tok", {}), e0);
   check(r.status === 200, "/api/cron 带 token → 200");
 
+  group("设备别名 / 合并 / 动态来源");
+  await call("POST", "/api/push?token=tok", e0, { body: { name: "手机A", content: "a-one", time: "2026-10-18 09:00:00" } });
+  await call("POST", "/api/push?token=tok", e0, { body: { name: "手机B", content: "b-one", time: "2026-10-18 09:01:00" } });
+  await call("POST", "/api/push?token=tok", e0, { body: { name: "手机A", source: "alert", content: "a-two", time: "2026-10-18 09:02:00" } });
+  let devs = (await call("GET", "/api/devices", e0)).data.list;
+  const devA = devs.find(d => d.display_name === "手机A");
+  const devB = devs.find(d => d.display_name === "手机B");
+  check(!!devA && !!devB, "创建两个设备标签");
+
+  r = await call("POST", "/api/devices/alias", e0, { body: { id: devB.id, alias: "备用机" } });
+  check(r.data && r.data.success === true, "设置设备别名成功");
+  devs = (await call("GET", "/api/devices", e0)).data.list;
+  check(devs.find(d => d.id === devB.id).display_name === "备用机", "别名生效（display_name 变为备用机）");
+
+  r = await call("GET", "/api/sources", e0);
+  check(r.data && r.data.list.some(s => s.source === "alert" && s.count >= 1), "来源清单含自定义来源 alert");
+  r = await call("GET", "/api/messages?source=alert", e0);
+  check(r.data && r.data.list.length === 1 && r.data.list[0].source === "alert", "自定义来源 alert 可单独筛选");
+
+  const aBefore = (await call("GET", "/api/messages?device_id=" + devA.id, e0)).data.total;
+  const bBefore = (await call("GET", "/api/messages?device_id=" + devB.id, e0)).data.total;
+  r = await call("POST", "/api/devices/merge", e0, { body: { from: devA.id, to: devB.id } });
+  check(r.data && r.data.success === true && r.data.moved === aBefore, "合并设备成功，迁移条数一致");
+  const bAfter = (await call("GET", "/api/messages?device_id=" + devB.id, e0)).data.total;
+  check(bAfter === bBefore + aBefore, "合并后目标设备消息数 = 原B + 原A");
+  devs = (await call("GET", "/api/devices", e0)).data.list;
+  check(!devs.some(d => d.id === devA.id), "合并后源设备标签已删除");
+  r = await call("POST", "/api/devices/merge", e0, { body: { from: devB.id, to: devB.id } });
+  check(r.status === 400, "合并到自身 → 400");
+
   group("登录鉴权 / http cookie 降级 / 防锁死");
   const eAuth = env({ ENABLE_AUTH: "true", ADMIN_PASSWORD: "secret" });
   r = await call("GET", "/api/messages", eAuth);
