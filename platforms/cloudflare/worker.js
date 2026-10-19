@@ -620,6 +620,8 @@ async function handleListMessages(url, env) {
   const source = (url.searchParams.get("source") || "").trim();
   const range = (url.searchParams.get("range") || "").trim();
   const rangeDays = { "1d": 1, "7d": 7, "30d": 30 }[range] || 0;
+  const starredOnly = url.searchParams.get("starred") === "1";
+  const unreadOnly = url.searchParams.get("unread") === "1";
 
   const where = ["m.deleted_at IS NULL"];
   const params = [];
@@ -639,6 +641,8 @@ async function handleListMessages(url, env) {
     where.push("(m.content LIKE ? OR m.sender LIKE ?)");
     params.push(`%${q}%`, `%${q}%`);
   }
+  if (starredOnly) where.push("m.starred = 1");
+  if (unreadOnly) where.push("m.read_at IS NULL");
   const whereSql = where.length ? "WHERE " + where.join(" AND ") : "";
 
   const totalRow = await env.DB.prepare(
@@ -648,10 +652,11 @@ async function handleListMessages(url, env) {
 
   const list = await env.DB.prepare(
     `SELECT m.id, m.sender, m.content, m.received_at, m.device_id, m.source,
+            m.starred, m.read_at,
             COALESCE(NULLIF(d.alias, ''), d.device) AS device_name, d.sim, d.device
      FROM messages m JOIN devices d ON d.id = m.device_id
      ${whereSql}
-     ORDER BY m.received_at DESC, m.id DESC
+     ORDER BY m.starred DESC, m.received_at DESC, m.id DESC
      LIMIT ? OFFSET ?`
   ).bind(...params, limit, (page - 1) * limit).all();
 
@@ -790,6 +795,72 @@ async function handleClearMessages(request, env) {
   if (q) { where.push("(content LIKE ? OR sender LIKE ?)"); params.push("%" + q + "%", "%" + q + "%"); }
   const res = await env.DB.prepare("UPDATE messages SET deleted_at = datetime('now') WHERE " + where.join(" AND ")).bind(...params).run();
   return json({ success: true, removed: res.meta ? res.meta.changes : 0 });
+}
+
+/* 收藏 / 已读（幂等，可取消） */
+async function handleStarMessage(request, env) {
+  let body; try { body = await request.json(); } catch { return json({ success: false, error: "invalid json" }, 400); }
+  const id = parseInt(body && body.id, 10);
+  if (!Number.isInteger(id) || id <= 0) return json({ success: false, error: "invalid id" }, 400);
+  const starred = body && (body.starred === true || body.starred === 1 || body.starred === "1") ? 1 : 0;
+  await env.DB.prepare("UPDATE messages SET starred = ?1 WHERE id = ?2").bind(starred, id).run();
+  return json({ success: true, starred: starred });
+}
+async function handleReadMessage(request, env) {
+  let body; try { body = await request.json(); } catch { return json({ success: false, error: "invalid json" }, 400); }
+  const id = parseInt(body && body.id, 10);
+  if (!Number.isInteger(id) || id <= 0) return json({ success: false, error: "invalid id" }, 400);
+  const read = body && (body.read === true || body.read === 1 || body.read === "1");
+  if (read) await env.DB.prepare("UPDATE messages SET read_at = datetime('now') WHERE id = ?1").bind(id).run();
+  else await env.DB.prepare("UPDATE messages SET read_at = NULL WHERE id = ?1").bind(id).run();
+  return json({ success: true, read: read });
+}
+/* 统计：总量 / 未读 / 收藏 / 来源分布 / 近 7 天（按北京日期） */
+async function handleStats(env) {
+  const base = "FROM messages WHERE deleted_at IS NULL";
+  const tot = await env.DB.prepare(
+    "SELECT COUNT(*) AS total, SUM(CASE WHEN read_at IS NULL THEN 1 ELSE 0 END) AS unread, " +
+    "SUM(CASE WHEN starred = 1 THEN 1 ELSE 0 END) AS starred " + base
+  ).first();
+  const sources = await env.DB.prepare(
+    "SELECT source, COUNT(*) AS n " + base + " GROUP BY source ORDER BY n DESC"
+  ).all();
+  const days = await env.DB.prepare(
+    "SELECT date(datetime(received_at, '+8 hours')) AS d, COUNT(*) AS n " + base +
+    " AND received_at >= datetime('now', '-7 days') GROUP BY d ORDER BY d"
+  ).all();
+  return json({
+    success: true,
+    total: (tot && tot.total) || 0,
+    unread: (tot && tot.unread) || 0,
+    starred: (tot && tot.starred) || 0,
+    sources: sources.results || [],
+    days: (days.results || []).map(function (r) { return { d: r.d, n: r.n }; }),
+  });
+}
+/* PWA：manifest 与 service worker（公开路由，不受登录影响） */
+function handleManifest(env) {
+  const name = siteName(env);
+  const icon = siteIcon(env);
+  const m = {
+    name: name, short_name: name, start_url: "/", display: "standalone",
+    background_color: "#f5f6f7", theme_color: "#15803d",
+    icons: [
+      { src: icon, sizes: "192x192", type: "image/x-icon" },
+      { src: icon, sizes: "512x512", type: "image/x-icon" }
+    ]
+  };
+  return new Response(JSON.stringify(m), {
+    headers: { "Content-Type": "application/manifest+json; charset=utf-8", "Cache-Control": "no-cache", ...CORS },
+  });
+}
+function handleSW() {
+  const js = "self.addEventListener('install',function(e){self.skipWaiting();});" +
+    "self.addEventListener('activate',function(e){e.waitUntil(self.clients.claim());});" +
+    "self.addEventListener('fetch',function(e){if(e.request.method!=='GET')return;e.respondWith(fetch(e.request).catch(function(){return caches.match(e.request);}));});";
+  return new Response(js, {
+    headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-cache", ...CORS },
+  });
 }
 
 async function handleListDevices(env) {
@@ -935,6 +1006,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="__SITE_ICON__">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#15803d">
 <title>__SITE_NAME__</title>
 <style>
   :root {
@@ -1097,6 +1170,42 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   @media (prefers-reduced-motion: reduce) {
     .card, .card.flash, .toast, .tab, .switch, .switch::after { animation: none !important; transition: none !important; }
   }
+  .headacts { display: flex; gap: 6px; flex: none; }
+  .selbar[hidden] { display: none; }
+  /* 弹层 */
+  .modal { position: fixed; inset: 0; background: rgba(0,0,0,.42); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 16px; }
+  .modal[hidden] { display: none; }
+  .sheet { position: relative; background: var(--card); color: var(--text); border-radius: 14px; width: 100%; max-width: 560px; max-height: 86vh; overflow: auto; padding: 18px 18px 22px; border: 1px solid var(--border); }
+  .mx { position: absolute; top: 8px; right: 10px; border: none; background: none; color: var(--muted); font-size: 22px; line-height: 1; cursor: pointer; }
+  .mx:hover { color: var(--text); }
+  .sheet h3 { font-size: 16px; margin: 0 20px 10px 0; }
+  .drow { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--row-border); font-size: 13px; }
+  .drow span:first-child { color: var(--muted); flex: none; }
+  .drow span:last-child { text-align: right; word-break: break-all; }
+  .detail-content { margin-top: 10px; white-space: pre-wrap; word-break: break-word; line-height: 1.7; }
+  .detail-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+  /* 收藏 / 未读 */
+  .star { border: none; background: none; color: var(--faint); cursor: pointer; font-size: 15px; padding: 0 2px; margin-left: 2px; }
+  .star.on { color: #d97706; }
+  .undot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); margin-left: 6px; vertical-align: middle; }
+  .tbtn.on { border-color: var(--accent); color: var(--accent); background: var(--badge-bg); }
+  mark { background: var(--code-bg); color: var(--code-text); border-radius: 3px; padding: 0 2px; }
+  /* 统计 */
+  .statgrid { display: flex; gap: 10px; margin: 6px 0 14px; }
+  .statbox { flex: 1; background: var(--bg); border-radius: 10px; padding: 10px; text-align: center; }
+  .statbox b { display: block; font-size: 20px; }
+  .statbox span { font-size: 12px; color: var(--muted); }
+  .barrow { display: flex; align-items: center; gap: 8px; font-size: 12px; margin: 4px 0; }
+  .barrow .bl { width: 64px; color: var(--muted); flex: none; text-align: right; }
+  .barrow .bt { flex: 1; background: var(--row-border); border-radius: 4px; height: 10px; overflow: hidden; }
+  .barrow .bf { height: 100%; background: var(--accent); border-radius: 4px; }
+  .barrow .bn { width: 34px; text-align: right; color: var(--muted); flex: none; }
+  /* 移动端安全区 */
+  body { padding-bottom: calc(40px + env(safe-area-inset-bottom)); }
+  @media (max-width: 560px) {
+    .modal { align-items: flex-end; padding: 0; }
+    .sheet { border-radius: 16px 16px 0 0; max-height: 88vh; }
+  }
 </style>
 </head>
 <body>
@@ -1104,13 +1213,14 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   <svg viewBox="0 0 16 16" width="26" height="26" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
 </a>
 <div class="wrap">
-  <div class="head"><h1>__SITE_NAME__</h1><button class="tbtn" id="themebtn" title="切换主题（自动 / 浅色 / 深色）">自动</button></div>
+  <div class="head"><h1>__SITE_NAME__</h1><span class="headacts"><button class="tbtn" id="statsbtn" title="统计">统计</button><button class="tbtn" id="setbtn" title="设置">设置</button><button class="tbtn" id="themebtn" title="切换主题（自动 / 浅色 / 深色）">自动</button></span></div>
   <div class="tabs" id="tabs" role="tablist" aria-label="设备标签"></div>
   <div class="toolbar">
     <div class="searchwrap">
-      <input type="search" id="q" placeholder="搜索发件人或内容…">
+      <input type="search" id="q" list="qhist" placeholder="搜索发件人或内容…">
       <button class="clr" id="clearq" hidden title="清除搜索" aria-label="清除搜索">×</button>
     </div>
+    <datalist id="qhist"></datalist>
     <select id="src" title="按来源筛选">
       <option value="">全部来源</option>
       <option value="sms">短信</option>
@@ -1128,6 +1238,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     <label class="opt"><input type="checkbox" id="notifyon"><span class="switch"></span><span>后台通知</span></label>
     <label class="opt"><input type="checkbox" id="soundon"><span class="switch"></span><span>提示音</span></label>
     <span class="spacer"></span>
+    <button class="tbtn" id="staronly" title="只看收藏">★ 收藏</button>
+    <button class="tbtn" id="unreadonly" title="只看未读">● 未读</button>
     <button class="tbtn" id="selectbtn" title="进入批量选择">选择</button>
     <button class="tbtn" id="clearbtn" title="清空当前筛选结果（软删除）">清空</button>
     <button class="tbtn" id="exportcsv" title="按当前筛选导出 CSV">导出 CSV</button>
@@ -1155,6 +1267,12 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   <button class="tbtn" id="seldel" disabled>删除</button>
   <button class="tbtn" id="selcancel">取消</button>
 </div>
+<div class="modal" id="modal" hidden>
+  <div class="sheet">
+    <button class="mx" id="modalx" type="button" aria-label="关闭">×</button>
+    <div id="modalbody"></div>
+  </div>
+</div>
 <footer class="foot">© 2026 <a href="https://cbm.im/" target="_blank" rel="noopener noreferrer">左立方</a> · <a href="https://github.com/ShenDoyle/SMSToWeb" target="_blank" rel="noopener noreferrer">SMSToWeb</a></footer>
 <script>
 (function () {
@@ -1171,7 +1289,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   var state = {
     device: 0, src: "", q: "", page: 1, pages: 1, total: 0, lastId: 0, deb: null,
     inited: false, unread: 0, limit: 20, range: "", notifiedId: 0,
-    selectMode: false, selected: {}, lastQ: "",
+    selectMode: false, selected: {}, lastQ: "", starOnly: false, unreadOnly: false, lastList: [],
+    labels: (function () { try { return JSON.parse(localStorage.getItem("sms_labels") || "{}") || {}; } catch (e) { return {}; } })(),
     autoCopy: (function () { try { return localStorage.getItem("sms_autocopy") !== "0"; } catch (e) { return true; } })(),
     notify: (function () { try { return localStorage.getItem("sms_notify") !== "0"; } catch (e) { return true; } })(),
     sound: (function () { try { return localStorage.getItem("sms_sound") === "1"; } catch (e) { return false; } })()
@@ -1320,7 +1439,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   }
   function numLabel(s) {
     var d = normalizeNum(s);
-    return (d && NUM_LABELS[d]) || "";
+    if (!d) return "";
+    return state.labels[d] || NUM_LABELS[d] || "";
   }
   /* 归属地：仅对 11 位手机号按需查后端 /api/phone；前端按号码缓存，最多 3 并发 */
   var areaCache = {};
@@ -1411,7 +1531,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   }
   /* 提示音：短促正弦波；首次调用在用户手势（开关切换）内，规避浏览器自动播放限制 */
   var audioCtx = null;
-  function beep() {
+  function beep(freq) {
     try {
       var AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) return;
@@ -1419,7 +1539,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       if (audioCtx.state === "suspended") audioCtx.resume();
       var o = audioCtx.createOscillator(), g = audioCtx.createGain();
       o.connect(g); g.connect(audioCtx.destination);
-      o.type = "sine"; o.frequency.value = 880;
+      o.type = "sine"; o.frequency.value = freq || 800;
       var t0 = audioCtx.currentTime;
       g.gain.setValueAtTime(0.0001, t0);
       g.gain.exponentialRampToValueAtTime(0.09, t0 + 0.012);
@@ -1450,7 +1570,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (document.hidden) {
       state.unread += fresh.length;
       document.title = "(" + state.unread + ") " + SITE_NAME;
-      if (state.notify && window.Notification && Notification.permission === "granted") {
+      if (state.notify && !isDND() && window.Notification && Notification.permission === "granted") {
         var body = (code ? "验证码 " + code + "  " : "") + String(latest.content || "");
         try {
           new Notification(String(latest.sender || "新短信"), { body: body.slice(0, 140), tag: "sms-" + latest.id });
@@ -1458,7 +1578,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       }
     } else {
       if (!(code && state.autoCopy)) toast("收到 " + fresh.length + " 条新消息");
-      if (state.sound) beep();
+      if (state.sound && !isDND()) beep(code ? 960 : 760);
       if (window.scrollY > 260) showNewPill(fresh.length);
     }
   }
@@ -1468,6 +1588,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (state.src) p.set("source", state.src);
     if (state.range) p.set("range", state.range);
     if (state.q) p.set("q", state.q);
+    if (state.starOnly) p.set("starred", "1");
+    if (state.unreadOnly) p.set("unread", "1");
     p.set("page", state.page);
     p.set("limit", state.limit);
     return p.toString();
@@ -1579,18 +1701,20 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var needFold = String(m.content || "").length > 220;
     var lbl = isSms ? numLabel(m.sender) : "";
     var snum = isSms ? normalizeNum(m.sender) : "";
+    var undot = m.read_at ? "" : '<span class="undot" title="未读"></span>';
     var senderHtml = isSms
       ? '<span class="sender">' + esc(m.sender || "未知号码") + '</span>' +
         (lbl ? '<span class="nlabel" title="常见号码库（仅供参考）">' + esc(lbl) + '</span>' : '') +
-        (!lbl && /^1[3-9]\d{9}$/.test(snum) ? '<span class="area" data-num="' + snum + '"></span>' : '')
-      : '<span class="srctag ' + srcClass(m.source) + '">' + esc(m.source || "通知") + '</span><span class="sender">' + esc(m.sender || m.device_name || "通知") + '</span>';
+        (!lbl && /^1[3-9]\d{9}$/.test(snum) ? '<span class="area" data-num="' + snum + '"></span>' : '') + undot
+      : '<span class="srctag ' + srcClass(m.source) + '">' + esc(m.source || "通知") + '</span><span class="sender">' + esc(m.sender || m.device_name || "通知") + '</span>' + undot;
     return '<div class="card' + (isFresh ? " flash" : "") + '" data-id="' + m.id + '" data-day="' + esc(dayLabel(m.received_at)) + '">' +
       '<label class="selwrap" title="选择"><input type="checkbox" class="selbox" data-id="' + m.id + '"></label>' +
       '<div class="row1">' + senderHtml +
+        '<button class="star' + (m.starred ? " on" : "") + '" data-id="' + m.id + '" title="收藏/置顶">' + (m.starred ? "★" : "☆") + '</button>' +
         '<button class="del" data-id="' + m.id + '">删除</button>' +
       '</div>' +
       (code ? '<div class="code-line">验证码：<b>' + esc(code) + '</b><button class="copy" data-code="' + esc(code) + '">复制</button></div>' : '') +
-      '<div class="line"><span class="content' + (needFold ? " fold" : "") + '">' + linkify(esc(m.content)) + '</span>' +
+      '<div class="line"><span class="content' + (needFold ? " fold" : "") + '">' + linkify(highlight(esc(m.content), state.q)) + '</span>' +
         (needFold ? '<button class="more" type="button">展开全文</button>' : '') + '</div>' +
       '<div class="line foot-line"><span class="time-line" title="' + esc(fmtTime(m.received_at)) + '">' + esc(relTime(m.received_at)) + '</span>' +
         (isSms && recv ? '<span class="recv" title="双击复制收件号">' + esc(recv) + '</span>' : '') +
@@ -1670,6 +1794,167 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var b = $("retrybtn");
     if (b) b.onclick = function () { load(); };
   }
+  /* 搜索高亮：在已转义文本上包裹 <mark>（关键词转义正则特殊字符） */
+  function highlight(escaped, q) {
+    var s = String(escaped || "");
+    if (!q) return s;
+    var safe = String(q).replace(/[.*+?^{}$()|[\]\\]/g, "\\$&");
+    try { return s.replace(new RegExp("(" + safe + ")", "gi"), "<mark>$1</mark>"); } catch (e) { return s; }
+  }
+  /* 搜索历史（localStorage，最多 6 条） */
+  function loadQHist() {
+    var arr = [];
+    try { arr = JSON.parse(localStorage.getItem("sms_qhist") || "[]") || []; } catch (e) { arr = []; }
+    var dl = $("qhist");
+    if (dl) dl.innerHTML = arr.map(function (x) { return '<option value="' + esc(x) + '"></option>'; }).join("");
+  }
+  function pushQHist(q) {
+    if (!q || q.length < 2) return;
+    var arr = [];
+    try { arr = JSON.parse(localStorage.getItem("sms_qhist") || "[]") || []; } catch (e) { arr = []; }
+    arr = [q].concat(arr.filter(function (x) { return x !== q; })).slice(0, 6);
+    try { localStorage.setItem("sms_qhist", JSON.stringify(arr)); } catch (e) {}
+    loadQHist();
+  }
+  /* 通用弹层 */
+  function openModal(html) { $("modalbody").innerHTML = html; $("modal").hidden = false; }
+  function closeModal() { $("modal").hidden = true; $("modalbody").innerHTML = ""; }
+  function drow(label, val) {
+    return '<div class="drow"><span>' + esc(label) + '</span><span>' + esc(val == null ? "" : val) + '</span></div>';
+  }
+  function msgById(id) {
+    var list = state.lastList || [];
+    for (var i = 0; i < list.length; i++) if (list[i].id === id) return list[i];
+    return null;
+  }
+  function toggleStar(id, starred) {
+    return fetch("/api/messages/star", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: id, starred: starred }) })
+      .then(function (r) { return r.json(); }).then(function () { load(); });
+  }
+  function toggleRead(id, read) {
+    return fetch("/api/messages/read", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: id, read: read }) })
+      .then(function (r) { return r.json(); }).then(function () { load(); });
+  }
+  function doDelete(ids) {
+    fetch("/api/messages/remove", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: ids }) })
+      .then(function (r) { return r.json(); })
+      .then(function (d) { if (d && d.success) { undoToast(ids); load(); } });
+  }
+  function saveLabel(num, label) {
+    num = normalizeNum(num);
+    if (!num) return;
+    if (label) state.labels[num] = label; else delete state.labels[num];
+    try { localStorage.setItem("sms_labels", JSON.stringify(state.labels)); } catch (e) {}
+  }
+  function openDetail(id) {
+    var m = msgById(id);
+    if (!m) return;
+    var isSms = (m.source || "sms") === "sms";
+    var code = extractCode(m.content);
+    var snum = normalizeNum(m.sender);
+    var wasRead = !!m.read_at;
+    var html = '<h3>' + esc(isSms ? (m.sender || "未知号码") : (m.sender || m.device_name || "通知")) + '</h3>' +
+      '<div class="dl">' +
+        drow("来源", isSms ? "短信" : (m.source || "通知")) +
+        drow("设备标签", m.device_name || "") +
+        (isSms ? drow("收件号", m.sim_number || m.sim || "") : "") +
+        drow("时间", fmtTime(m.received_at)) +
+        drow("号码标签", numLabel(m.sender) || "（未设置）") +
+        drow("状态", (m.starred ? "★ 收藏 · " : "") + (wasRead ? "已读" : "未读")) +
+      '</div>' +
+      (code ? '<div class="code-line">验证码：<b>' + esc(code) + '</b><button class="copy" data-code="' + esc(code) + '">复制</button></div>' : '') +
+      '<div class="detail-content">' + linkify(esc(m.content)) + '</div>' +
+      '<div class="detail-actions">' +
+        '<button class="tbtn" id="dstar">' + (m.starred ? "取消收藏" : "收藏置顶") + '</button>' +
+        '<button class="tbtn" id="dread">标为未读</button>' +
+        '<button class="tbtn" id="dcopy">复制全文</button>' +
+        (isSms && snum ? '<a class="tbtn" href="tel:' + esc(snum) + '">拨号</a>' : '') +
+        (isSms && snum ? '<button class="tbtn" id="dlabel">号码标签</button>' : '') +
+        '<button class="tbtn" id="ddel">删除</button>' +
+      '</div>';
+    openModal(html);
+    if (!wasRead) {
+      m.read_at = "now";
+      fetch("/api/messages/read", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: m.id, read: true }) }).catch(function () {});
+      var card = $("list").querySelector('.card[data-id="' + m.id + '"]');
+      if (card) { var dot = card.querySelector(".undot"); if (dot) dot.parentNode.removeChild(dot); }
+    }
+    $("dstar").onclick = function () { toggleStar(m.id, !m.starred).then(closeModal); };
+    $("dread").onclick = function () { toggleRead(m.id, false).then(closeModal); };
+    $("dcopy").onclick = function () { doCopy(m.content, $("dcopy")); };
+    $("ddel").onclick = function () { closeModal(); doDelete([m.id]); };
+    var lb = $("dlabel");
+    if (lb) lb.onclick = function () {
+      var cur = state.labels[snum] || "";
+      var nm = prompt("给 " + snum + " 设置标签（留空清除）", cur);
+      if (nm === null) return;
+      saveLabel(snum, String(nm).trim());
+      closeModal(); load();
+    };
+  }
+  /* 免打扰：sms_dnd = {on,start,end}（小时，支持跨夜） */
+  function getDND() {
+    try { var d = JSON.parse(localStorage.getItem("sms_dnd") || ""); if (d && typeof d === "object") return d; } catch (e) {}
+    return { on: false, start: 22, end: 8 };
+  }
+  function isDND() {
+    var d = getDND();
+    if (!d.on) return false;
+    var h = new Date().getHours();
+    var s = parseInt(d.start, 10) || 0, e = parseInt(d.end, 10) || 0;
+    if (s === e) return false;
+    return s < e ? (h >= s && h < e) : (h >= s || h < e);
+  }
+  function openSettings() {
+    var d = getDND();
+    var html = '<h3>设置</h3>' +
+      '<div class="dl">' +
+        '<div class="drow"><span>主题</span><span><button class="tbtn" id="thauto">自动</button> <button class="tbtn" id="thlight">浅色</button> <button class="tbtn" id="thdark">深色</button></span></div>' +
+        '<div class="drow"><span>新消息提示音</span><span><input type="checkbox" id="stsound"' + (state.sound ? " checked" : "") + '></span></div>' +
+        '<div class="drow"><span>免打扰</span><span><input type="checkbox" id="stdnd"' + (d.on ? " checked" : "") + '></span></div>' +
+        '<div class="drow"><span>免打扰时段</span><span><input type="number" id="dnds" min="0" max="23" value="' + (parseInt(d.start, 10) || 0) + '" style="width:56px"> 至 <input type="number" id="dnde" min="0" max="23" value="' + (parseInt(d.end, 10) || 0) + '" style="width:56px"> 点</span></div>' +
+      '</div>' +
+      '<div class="detail-actions"><button class="tbtn" id="dsave">保存</button></div>';
+    openModal(html);
+    $("thauto").onclick = function () { try { localStorage.setItem("sms_theme", "auto"); } catch (e) {} applyTheme("auto"); };
+    $("thlight").onclick = function () { try { localStorage.setItem("sms_theme", "light"); } catch (e) {} applyTheme("light"); };
+    $("thdark").onclick = function () { try { localStorage.setItem("sms_theme", "dark"); } catch (e) {} applyTheme("dark"); };
+    $("dsave").onclick = function () {
+      var on = $("stdnd").checked;
+      var start = Math.min(23, Math.max(0, parseInt($("dnds").value, 10) || 0));
+      var end = Math.min(23, Math.max(0, parseInt($("dnde").value, 10) || 0));
+      try { localStorage.setItem("sms_dnd", JSON.stringify({ on: on, start: start, end: end })); } catch (e) {}
+      state.sound = $("stsound").checked;
+      try { localStorage.setItem("sms_sound", state.sound ? "1" : "0"); } catch (e) {}
+      if ($("soundon")) $("soundon").checked = state.sound;
+      closeModal(); toast("设置已保存");
+    };
+  }
+  function openStats() {
+    openModal('<h3>统计</h3><div id="statbody">加载中…</div>');
+    fetch("/api/stats").then(function (r) { return r.json(); }).then(function (d) {
+      if (!d || !d.success) { $("statbody").textContent = "统计加载失败"; return; }
+      var maxS = 1, maxD = 1;
+      (d.sources || []).forEach(function (x) { if (x.n > maxS) maxS = x.n; });
+      (d.days || []).forEach(function (x) { if (x.n > maxD) maxD = x.n; });
+      var html = '<div class="statgrid">' +
+        '<div class="statbox"><b>' + d.total + '</b><span>总消息</span></div>' +
+        '<div class="statbox"><b>' + d.unread + '</b><span>未读</span></div>' +
+        '<div class="statbox"><b>' + d.starred + '</b><span>收藏</span></div></div>';
+      html += '<h3 style="font-size:13px;margin:6px 0">来源分布</h3>';
+      (d.sources || []).forEach(function (x) {
+        html += '<div class="barrow"><span class="bl">' + esc(x.source) + '</span><span class="bt"><span class="bf" style="width:' + Math.round(x.n / maxS * 100) + '%"></span></span><span class="bn">' + x.n + '</span></div>';
+      });
+      html += '<h3 style="font-size:13px;margin:12px 0 6px">近 7 天</h3>';
+      (d.days || []).forEach(function (x) {
+        html += '<div class="barrow"><span class="bl">' + esc(String(x.d || "").slice(5)) + '</span><span class="bt"><span class="bf" style="width:' + Math.round(x.n / maxD * 100) + '%"></span></span><span class="bn">' + x.n + '</span></div>';
+      });
+      $("statbody").innerHTML = html;
+    }).catch(function () { var b = $("statbody"); if (b) b.textContent = "统计加载失败"; });
+  }
+  function registerSW() {
+    try { if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(function () {}); } catch (e) {}
+  }
   function load(incremental) {
     var q = qs();
     return fetch("/api/messages?" + q)
@@ -1678,6 +1963,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         if (!res.success) throw new Error(res.error || "load failed");
         state.total = res.total; state.pages = res.pages;
         var list = res.list || [];
+        state.lastList = list;
         var freshSet = {};
         /* 新消息识别：lastId 为轮询游标（防忙循环），notifiedId 为已通知基线 */
         if (!state.inited) {
@@ -1730,7 +2016,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   $("q").addEventListener("input", function () {
     syncClear();
     clearTimeout(state.deb);
-    state.deb = setTimeout(function () { state.q = $("q").value.trim(); state.page = 1; load(); }, 300);
+    state.deb = setTimeout(function () { state.q = $("q").value.trim(); state.page = 1; pushQHist(state.q); load(); }, 300);
   });
   $("clearq").onclick = function () { $("q").value = ""; state.q = ""; state.page = 1; syncClear(); load(); $("q").focus(); };
   $("prev").onclick = function () { if (state.page > 1) { state.page--; load(); } };
@@ -1825,6 +2111,18 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (!document.hidden) { state.unread = 0; document.title = SITE_NAME; }
   });
   $("list").addEventListener("click", function (ev) {
+    var starBtn = ev.target.closest ? ev.target.closest(".star") : null;
+    if (starBtn) {
+      var sid = parseInt(starBtn.getAttribute("data-id"), 10);
+      var sm = msgById(sid);
+      if (sm) toggleStar(sid, !sm.starred);
+      return;
+    }
+    var senderEl = ev.target.closest ? ev.target.closest(".sender") : null;
+    if (senderEl) {
+      var sc = senderEl.closest(".card");
+      if (sc) { openDetail(parseInt(sc.getAttribute("data-id"), 10)); return; }
+    }
     var moreBtn = ev.target.closest ? ev.target.closest(".more") : null;
     if (moreBtn) {
       var card = moreBtn.closest(".card");
@@ -1922,6 +2220,15 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (e.key === "/" && !typing) { e.preventDefault(); $("q").focus(); }
     if (e.key === "Escape" && state.selectMode) { setSelectMode(false); }
   });
+  /* 收藏 / 未读筛选 + 头部按钮 + 弹层 + PWA + 搜索历史 */
+  $("staronly").onclick = function () { state.starOnly = !state.starOnly; $("staronly").classList.toggle("on", state.starOnly); state.page = 1; load(); };
+  $("unreadonly").onclick = function () { state.unreadOnly = !state.unreadOnly; $("unreadonly").classList.toggle("on", state.unreadOnly); state.page = 1; load(); };
+  $("statsbtn").onclick = openStats;
+  $("setbtn").onclick = openSettings;
+  $("modalx").onclick = closeModal;
+  $("modal").addEventListener("click", function (ev) { if (ev.target === $("modal")) closeModal(); });
+  loadQHist();
+  registerSW();
   refreshAll();
 })();
 </script>
@@ -2023,7 +2330,8 @@ export default {
     try {
       /* 登录开关：开启后，除推送接口与登录/登出外，页面与管理 API 均需登录 */
       const isPage = path === "/" || path === "/index.html";
-      const isPublicApi = path === "/api/receive" || path === "/api/push" || path === "/api/login" || path === "/api/logout";
+      const isPublicApi = path === "/api/receive" || path === "/api/push" || path === "/api/login" || path === "/api/logout" ||
+        path === "/manifest.webmanifest" || path === "/sw.js";
       if (!isPublicApi && !(await isAuthed(request, env))) {
         if (isPage && request.method === "GET") {
           return new Response(renderHtml(LOGIN_HTML, env), {
@@ -2059,6 +2367,21 @@ export default {
       }
       if (path === "/api/messages/clear" && request.method === "POST") {
         return await handleClearMessages(request, env);
+      }
+      if (path === "/api/messages/star" && request.method === "POST") {
+        return await handleStarMessage(request, env);
+      }
+      if (path === "/api/messages/read" && request.method === "POST") {
+        return await handleReadMessage(request, env);
+      }
+      if (path === "/api/stats" && request.method === "GET") {
+        return await handleStats(env);
+      }
+      if (path === "/manifest.webmanifest" && request.method === "GET") {
+        return handleManifest(env);
+      }
+      if (path === "/sw.js" && request.method === "GET") {
+        return handleSW();
       }
       const msgMatch = path.match(/^\/api\/messages\/(\d+)$/);
       if (msgMatch && request.method === "DELETE") {
