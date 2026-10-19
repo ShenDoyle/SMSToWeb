@@ -167,6 +167,8 @@ export class LocalDatabase {
     /* 首次启动自动建表：执行同目录 schema.sql（全部 IF NOT EXISTS，幂等） */
     const schema = readFileSync(new URL("./schema.sql", import.meta.url), "utf8");
     this.sqlite.exec(schema);
+    /* 旧库兼容：新库建表已含 deleted_at，旧库在此补列（已存在则忽略错误） */
+    try { this.sqlite.exec("ALTER TABLE messages ADD COLUMN deleted_at TEXT"); } catch (e) {}
     this.stmts = new Map(); /* sql → StatementSync 缓存 */
   }
 

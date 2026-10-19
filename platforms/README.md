@@ -89,6 +89,6 @@ platforms/
 
 ## 通用说明
 
-- API 路径全平台一致：`/api/receive`、`/api/push`、`/api/messages`（支持 `device_id`/`source`/`range`/`q`/`limit`/`page`）、`/api/export`（CSV/JSON）、`/api/sources`、`/api/phone`（归属地）、`/api/devices`、`/api/devices/alias`、`/api/devices/merge`、`/api/wait`、`/api/login`、`/api/logout`、`/api/cron`
+- API 路径全平台一致：`/api/receive`、`/api/push`、`/api/messages`（支持 `device_id`/`source`/`range`/`q`/`limit`/`page`）、`/api/messages/remove`、`/api/messages/restore`、`/api/messages/clear`、`/api/export`（CSV/JSON）、`/api/sources`、`/api/phone`（归属地）、`/api/devices`、`/api/devices/alias`、`/api/devices/merge`、`/api/wait`、`/api/login`、`/api/logout`、`/api/cron`
 - `/api/cron` 供外部调度器触发清理，鉴权：`?token=<RECEIVE_TOKEN>` 或 `Authorization: Bearer <RECEIVE_TOKEN>`
 - `/api/receive` 与 `/api/push` 不受登录开关影响

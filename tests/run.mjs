@@ -161,6 +161,26 @@ async function main() {
   const page2 = await (await fetchApp(R("GET", "/", {}), e0)).text();
   check(/NUM_LABELS/.test(page2) && /fillAreas/.test(page2), "管理页内置号码库与归属地填充逻辑存在");
 
+  group("批量删除 / 恢复 / 清空（软删除）");
+  await call("POST", "/api/push?token=tok", e0, { body: { name: "批量设备", content: "batch-1", time: "2026-10-19 08:00:00" } });
+  await call("POST", "/api/push?token=tok", e0, { body: { name: "批量设备", content: "batch-2", time: "2026-10-19 08:01:00" } });
+  const batchMsgs = (await call("GET", "/api/messages?q=batch-&limit=100", e0)).data.list;
+  const batchIds = batchMsgs.map(function (m) { return m.id; });
+  check(batchIds.length === 2, "准备两条批量消息");
+  r = await call("POST", "/api/messages/remove", e0, { body: { ids: batchIds } });
+  check(r.data && r.data.success && r.data.removed === 2, "批量软删除 2 条");
+  r = await call("GET", "/api/messages?q=batch-&limit=100", e0);
+  check(r.data && r.data.list.length === 0, "软删除后列表不再返回");
+  r = await call("POST", "/api/messages/restore", e0, { body: { ids: batchIds } });
+  check(r.data && r.data.restored === 2, "恢复 2 条");
+  r = await call("GET", "/api/messages?q=batch-&limit=100", e0);
+  check(r.data && r.data.list.length === 2, "恢复后重新可见");
+  const devBatch = (await call("GET", "/api/devices", e0)).data.list.find(function (d) { return d.display_name === "批量设备"; });
+  r = await call("POST", "/api/messages/clear", e0, { body: { device_id: devBatch.id } });
+  check(r.data && r.data.success && r.data.removed === 2, "按设备清空 2 条");
+  r = await call("GET", "/api/messages?device_id=" + devBatch.id, e0);
+  check(r.data && r.data.total === 0, "清空后该设备无消息");
+
   group("登录鉴权 / http cookie 降级 / 防锁死");
   const eAuth = env({ ENABLE_AUTH: "true", ADMIN_PASSWORD: "secret" });
   r = await call("GET", "/api/messages", eAuth);

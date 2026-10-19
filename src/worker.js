@@ -621,7 +621,7 @@ async function handleListMessages(url, env) {
   const range = (url.searchParams.get("range") || "").trim();
   const rangeDays = { "1d": 1, "7d": 7, "30d": 30 }[range] || 0;
 
-  const where = [];
+  const where = ["m.deleted_at IS NULL"];
   const params = [];
   if (Number.isInteger(deviceId) && deviceId > 0) {
     where.push("m.device_id = ?");
@@ -696,7 +696,7 @@ async function handleExport(url, env) {
   const rangeDays = { "1d": 1, "7d": 7, "30d": 30 }[range] || 0;
   const format = (url.searchParams.get("format") || "csv").toLowerCase() === "json" ? "json" : "csv";
 
-  const where = [];
+  const where = ["m.deleted_at IS NULL"];
   const params = [];
   if (Number.isInteger(deviceId) && deviceId > 0) { where.push("m.device_id = ?"); params.push(deviceId); }
   if (source) { where.push("m.source = ?"); params.push(source); }
@@ -743,11 +743,53 @@ async function handleExport(url, env) {
   });
 }
 
+/* 删除改为软删除（置 deleted_at），7 天内可通过 restore 撤销；cron 会清理超期软删记录 */
 async function handleDeleteMessage(idParam, env) {
   const id = parseInt(idParam, 10);
   if (!Number.isInteger(id) || id <= 0) return json({ success: false, error: "invalid id" }, 400);
-  const res = await env.DB.prepare("DELETE FROM messages WHERE id = ?1").bind(id).run();
+  const res = await env.DB.prepare("UPDATE messages SET deleted_at = datetime('now') WHERE id = ?1 AND deleted_at IS NULL").bind(id).run();
   return json({ success: true, deleted: res.meta ? res.meta.changes : 0 });
+}
+
+/* 批量软删除 / 恢复：ids 上限 500，IN 占位符均为 ?，无注入面 */
+function parseIds(body) {
+  if (!body || !Array.isArray(body.ids)) return [];
+  const out = [];
+  for (const v of body.ids) { const n = parseInt(v, 10); if (Number.isInteger(n) && n > 0) out.push(n); }
+  return out.slice(0, 500);
+}
+async function handleRemoveMessages(request, env) {
+  let body; try { body = await request.json(); } catch { return json({ success: false, error: "invalid json" }, 400); }
+  const ids = parseIds(body);
+  if (!ids.length) return json({ success: false, error: "no ids" }, 400);
+  const ph = ids.map(function () { return "?"; }).join(",");
+  const res = await env.DB.prepare("UPDATE messages SET deleted_at = datetime('now') WHERE id IN (" + ph + ") AND deleted_at IS NULL").bind(...ids).run();
+  return json({ success: true, removed: res.meta ? res.meta.changes : 0, ids: ids });
+}
+async function handleRestoreMessages(request, env) {
+  let body; try { body = await request.json(); } catch { return json({ success: false, error: "invalid json" }, 400); }
+  const ids = parseIds(body);
+  if (!ids.length) return json({ success: false, error: "no ids" }, 400);
+  const ph = ids.map(function () { return "?"; }).join(",");
+  const res = await env.DB.prepare("UPDATE messages SET deleted_at = NULL WHERE id IN (" + ph + ") AND deleted_at IS NOT NULL").bind(...ids).run();
+  return json({ success: true, restored: res.meta ? res.meta.changes : 0 });
+}
+/* 清空当前筛选结果（软删除）；range 与列表一致用 UTC 截止时间戳 */
+async function handleClearMessages(request, env) {
+  let body; try { body = await request.json(); } catch { return json({ success: false, error: "invalid json" }, 400); }
+  const deviceId = parseInt(body && body.device_id, 10);
+  const source = String((body && body.source) || "").trim();
+  const range = String((body && body.range) || "").trim();
+  const q = String((body && body.q) || "").trim();
+  const rangeDays = { "1d": 1, "7d": 7, "30d": 30 }[range] || 0;
+  const where = ["deleted_at IS NULL"];
+  const params = [];
+  if (Number.isInteger(deviceId) && deviceId > 0) { where.push("device_id = ?"); params.push(deviceId); }
+  if (source) { where.push("source = ?"); params.push(source); }
+  if (rangeDays) { where.push("received_at >= ?"); params.push(new Date(Date.now() - rangeDays * 86400000).toISOString().replace("T", " ").slice(0, 19)); }
+  if (q) { where.push("(content LIKE ? OR sender LIKE ?)"); params.push("%" + q + "%", "%" + q + "%"); }
+  const res = await env.DB.prepare("UPDATE messages SET deleted_at = datetime('now') WHERE " + where.join(" AND ")).bind(...params).run();
+  return json({ success: true, removed: res.meta ? res.meta.changes : 0 });
 }
 
 async function handleListDevices(env) {
@@ -781,8 +823,9 @@ async function handleSetAlias(request, env) {
 async function handleDeleteDevice(idParam, env) {
   const id = parseInt(idParam, 10);
   if (!Number.isInteger(id) || id <= 0) return json({ success: false, error: "invalid id" }, 400);
-  const cnt = await env.DB.prepare("SELECT COUNT(*) AS n FROM messages WHERE device_id = ?1").bind(id).first();
+  const cnt = await env.DB.prepare("SELECT COUNT(*) AS n FROM messages WHERE device_id = ?1 AND deleted_at IS NULL").bind(id).first();
   if (cnt && cnt.n > 0) return json({ success: false, error: "has messages" }, 400);
+  await env.DB.prepare("DELETE FROM messages WHERE device_id = ?1").bind(id).run();
   const res = await env.DB.prepare("DELETE FROM devices WHERE id = ?1").bind(id).run();
   return json({ success: true, deleted: res.meta ? res.meta.changes : 0 });
 }
@@ -790,7 +833,7 @@ async function handleDeleteDevice(idParam, env) {
 /* 来源清单：聚合 messages.source 及条数，供管理页动态生成「来源筛选」下拉（替代写死的三项） */
 async function handleListSources(env) {
   const rows = await env.DB.prepare(
-    "SELECT source, COUNT(*) AS n FROM messages GROUP BY source ORDER BY n DESC"
+    "SELECT source, COUNT(*) AS n FROM messages WHERE deleted_at IS NULL GROUP BY source ORDER BY n DESC"
   ).all();
   return json({ success: true, list: (rows.results || []).map(function (r) {
     return { source: r.source, count: r.n };
@@ -812,7 +855,7 @@ async function handleMergeDevices(request, env) {
   if (ids.indexOf(from) === -1 || ids.indexOf(to) === -1) {
     return json({ success: false, error: "device not found" }, 404);
   }
-  const moved = await env.DB.prepare("UPDATE OR IGNORE messages SET device_id = ?1 WHERE device_id = ?2").bind(to, from).run();
+  const moved = await env.DB.prepare("UPDATE OR IGNORE messages SET device_id = ?1 WHERE device_id = ?2 AND deleted_at IS NULL").bind(to, from).run();
   await env.DB.prepare("DELETE FROM messages WHERE device_id = ?1").bind(from).run();
   await env.DB.prepare("DELETE FROM devices WHERE id = ?1").bind(from).run();
   return json({ success: true, moved: moved.meta ? moved.meta.changes : 0 });
@@ -874,8 +917,8 @@ async function handleWait(url, env) {
   const deadline = Date.now() + 25000;
   for (;;) {
     const sql = filter
-      ? "SELECT MAX(id) AS n FROM messages WHERE device_id = ?1"
-      : "SELECT MAX(id) AS n FROM messages";
+      ? "SELECT MAX(id) AS n FROM messages WHERE device_id = ?1 AND deleted_at IS NULL"
+      : "SELECT MAX(id) AS n FROM messages WHERE deleted_at IS NULL";
     const row = await (filter ? env.DB.prepare(sql).bind(deviceId) : env.DB.prepare(sql)).first();
     if (row && row.n > lastId) return json({ success: true, changed: true, id: row.n });
     if (Date.now() > deadline) return json({ success: true, changed: false });
@@ -1011,6 +1054,49 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .area { color: var(--faint); font-size: 12px; }
   .pager input, .pager select { padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; font-size: 13px; background: var(--card); color: var(--text); }
   #jump { width: 64px; }
+  /* 主题三态（data-theme 覆盖系统偏好） */
+  html[data-theme="dark"] {
+    --bg: #14171a; --card: #1d2126; --text: #e6e9ec; --muted: #9aa3ab; --faint: #6b7480;
+    --border: #33393f; --card-border: #2a3036; --row-border: #262c31;
+    --accent: #22a04f; --accent-deep: #1a8a41;
+    --badge-bg: #12351f; --sender: #4fd1a5; --link: #6ea8ff;
+    --code-bg: #3a2f14; --code-border: #6b5518; --code-text: #fbd46d; --code-hover: #4a3c1a;
+    --del: #6b7480; --del-hover: #f87171; --tabx: #8a4a4a; --sw-off: #3a424a;
+  }
+  html[data-theme="light"] {
+    --bg: #f5f6f7; --card: #fff; --text: #20242a; --muted: #6b7280; --faint: #9aa3ab;
+    --border: #d8dce0; --card-border: #e3e6e9; --row-border: #eef1f3;
+    --accent: #15803d; --accent-deep: #116632;
+    --badge-bg: #e7f4ec; --sender: #0f766e; --link: #2563eb;
+    --code-bg: #fef3c7; --code-border: #fcd34d; --code-text: #92400e; --code-hover: #fde68a;
+    --del: #9aa3ab; --del-hover: #b91c1c; --tabx: #e8b4b4; --sw-off: #c7ced4;
+  }
+  /* 头部 */
+  .head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 0 12px; }
+  .head h1 { margin: 0; }
+  /* 批量选择 */
+  .card { position: relative; }
+  .selwrap { display: none; }
+  body.selecting .selwrap { display: block; position: absolute; top: 11px; left: 10px; }
+  body.selecting .card { padding-left: 36px; }
+  .selwrap input { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
+  .selbar { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); display: flex; align-items: center; gap: 8px;
+            background: var(--card); border: 1px solid var(--border); border-radius: 999px; padding: 8px 12px; z-index: 97; }
+  .selbar span { font-size: 13px; color: var(--muted); }
+  /* 来源徽章配色 */
+  .srctag.s-notify { background: #2563eb; color: #fff; }
+  .srctag.s-alert { background: #b45309; color: #fff; }
+  .srctag.s-cron { background: #7c3aed; color: #fff; }
+  .srctag.s-other { background: #475569; color: #fff; }
+  /* Toast 堆叠 */
+  .toastroot { position: fixed; left: 50%; bottom: 48px; transform: translateX(-50%); display: flex; flex-direction: column-reverse;
+               gap: 8px; align-items: center; z-index: 99; pointer-events: none; }
+  .toastroot .toast { position: static; transform: translateY(12px); opacity: 0; pointer-events: auto; }
+  .toastroot .toast.show { opacity: 1; transform: none; }
+  .undo-btn { margin-left: 8px; border: 1px solid currentColor; background: none; color: inherit; border-radius: 6px; padding: 2px 8px; font-size: 12px; cursor: pointer; }
+  @media (prefers-reduced-motion: reduce) {
+    .card, .card.flash, .toast, .tab, .switch, .switch::after { animation: none !important; transition: none !important; }
+  }
 </style>
 </head>
 <body>
@@ -1018,8 +1104,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   <svg viewBox="0 0 16 16" width="26" height="26" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
 </a>
 <div class="wrap">
-  <h1>__SITE_NAME__</h1>
-  <div class="tabs" id="tabs"></div>
+  <div class="head"><h1>__SITE_NAME__</h1><button class="tbtn" id="themebtn" title="切换主题（自动 / 浅色 / 深色）">自动</button></div>
+  <div class="tabs" id="tabs" role="tablist" aria-label="设备标签"></div>
   <div class="toolbar">
     <div class="searchwrap">
       <input type="search" id="q" placeholder="搜索发件人或内容…">
@@ -1042,6 +1128,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     <label class="opt"><input type="checkbox" id="notifyon"><span class="switch"></span><span>后台通知</span></label>
     <label class="opt"><input type="checkbox" id="soundon"><span class="switch"></span><span>提示音</span></label>
     <span class="spacer"></span>
+    <button class="tbtn" id="selectbtn" title="进入批量选择">选择</button>
+    <button class="tbtn" id="clearbtn" title="清空当前筛选结果（软删除）">清空</button>
     <button class="tbtn" id="exportcsv" title="按当前筛选导出 CSV">导出 CSV</button>
     <button class="tbtn" id="exportjson" title="按当前筛选导出 JSON">导出 JSON</button>
   </div>
@@ -1061,6 +1149,12 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   </div>
 </div>
 <button class="newpill" id="newpill" hidden></button>
+<div class="selbar" id="selbar" hidden>
+  <span id="selcount">已选 0 条</span>
+  <button class="tbtn" id="selall">全选本页</button>
+  <button class="tbtn" id="seldel" disabled>删除</button>
+  <button class="tbtn" id="selcancel">取消</button>
+</div>
 <footer class="foot">© 2026 <a href="https://cbm.im/" target="_blank" rel="noopener noreferrer">左立方</a> · <a href="https://github.com/ShenDoyle/SMSToWeb" target="_blank" rel="noopener noreferrer">SMSToWeb</a></footer>
 <script>
 (function () {
@@ -1077,6 +1171,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   var state = {
     device: 0, src: "", q: "", page: 1, pages: 1, total: 0, lastId: 0, deb: null,
     inited: false, unread: 0, limit: 20, range: "", notifiedId: 0,
+    selectMode: false, selected: {}, lastQ: "",
     autoCopy: (function () { try { return localStorage.getItem("sms_autocopy") !== "0"; } catch (e) { return true; } })(),
     notify: (function () { try { return localStorage.getItem("sms_notify") !== "0"; } catch (e) { return true; } })(),
     sound: (function () { try { return localStorage.getItem("sms_sound") === "1"; } catch (e) { return false; } })()
@@ -1277,17 +1372,42 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       navigator.clipboard.writeText(text).then(done, function () { fallbackCopy(text); done(); });
     } else { fallbackCopy(text); done(); }
   }
-  /* 轻提示（底部浮现，2.6 秒后消失） */
+  /* 轻提示：统一放进堆叠容器，多条不重叠；2.6s 自动消失 */
+  function toastRoot() {
+    var r = document.getElementById("toastroot");
+    if (!r) { r = document.createElement("div"); r.id = "toastroot"; r.className = "toastroot"; document.body.appendChild(r); }
+    return r;
+  }
   function toast(msg) {
     var t = document.createElement("div");
     t.className = "toast";
     t.textContent = msg;
-    document.body.appendChild(t);
+    toastRoot().appendChild(t);
     setTimeout(function () { t.classList.add("show"); }, 10);
     setTimeout(function () {
       t.classList.remove("show");
       setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, 300);
     }, 2600);
+  }
+  /* 删除后 5 秒内可撤销（软删除 → restore） */
+  function undoToast(ids) {
+    var t = document.createElement("div");
+    t.className = "toast undo";
+    var span = document.createElement("span");
+    span.textContent = ids.length > 1 ? "已删除 " + ids.length + " 条" : "已删除";
+    var btn = document.createElement("button");
+    btn.className = "undo-btn"; btn.type = "button"; btn.textContent = "撤销";
+    t.appendChild(span); t.appendChild(btn);
+    toastRoot().appendChild(t);
+    setTimeout(function () { t.classList.add("show"); }, 10);
+    var done = function () { t.classList.remove("show"); setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, 300); };
+    var timer = setTimeout(done, 5000);
+    btn.onclick = function () {
+      clearTimeout(timer); done();
+      fetch("/api/messages/restore", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: ids }) })
+        .then(function (r) { return r.json(); })
+        .then(function () { load(); });
+    };
   }
   /* 提示音：短促正弦波；首次调用在用户手势（开关切换）内，规避浏览器自动播放限制 */
   var audioCtx = null;
@@ -1359,6 +1479,9 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       var mk = function (label, id, extra) {
         var el = document.createElement("div");
         el.className = "tab" + (state.device === id ? " active" : "");
+        el.setAttribute("role", "tab");
+        el.setAttribute("aria-selected", state.device === id ? "true" : "false");
+        el.tabIndex = 0;
         el.textContent = label + (extra ? " " + extra : "");
         el.onclick = function () { state.device = id; state.page = 1; renderTabs(res.list || []); load(); };
         return el;
@@ -1429,73 +1552,159 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     });
   }
   function renderTabs(list) { loadDevices(); }
-  function load() {
-    return fetch("/api/messages?" + qs())
+  function updateMeta(res) {
+    $("stat").textContent = "共 " + res.total + " 条";
+    $("pageinfo").textContent = res.pages > 1 ? "第 " + res.page + " / " + res.pages + " 页" : "";
+    $("pagenum").textContent = res.pages > 1 ? res.page + " / " + res.pages : "";
+    $("prev").disabled = res.page <= 1;
+    $("next").disabled = res.page >= res.pages;
+  }
+  function updateSelBar() {
+    var n = Object.keys(state.selected).length;
+    if ($("selcount")) $("selcount").textContent = "已选 " + n + " 条";
+    if ($("seldel")) $("seldel").disabled = n === 0;
+  }
+  function srcClass(s) {
+    s = String(s || "").toLowerCase();
+    if (s === "sms") return "s-sms";
+    if (s === "notify") return "s-notify";
+    if (s === "alert") return "s-alert";
+    if (s === "cron") return "s-cron";
+    return "s-other";
+  }
+  function cardHtml(m, isFresh) {
+    var code = extractCode(m.content);
+    var isSms = (m.source || "sms") === "sms";
+    var recv = m.sim_number || m.sim || "";
+    var needFold = String(m.content || "").length > 220;
+    var lbl = isSms ? numLabel(m.sender) : "";
+    var snum = isSms ? normalizeNum(m.sender) : "";
+    var senderHtml = isSms
+      ? '<span class="sender">' + esc(m.sender || "未知号码") + '</span>' +
+        (lbl ? '<span class="nlabel" title="常见号码库（仅供参考）">' + esc(lbl) + '</span>' : '') +
+        (!lbl && /^1[3-9]\d{9}$/.test(snum) ? '<span class="area" data-num="' + snum + '"></span>' : '')
+      : '<span class="srctag ' + srcClass(m.source) + '">' + esc(m.source || "通知") + '</span><span class="sender">' + esc(m.sender || m.device_name || "通知") + '</span>';
+    return '<div class="card' + (isFresh ? " flash" : "") + '" data-id="' + m.id + '" data-day="' + esc(dayLabel(m.received_at)) + '">' +
+      '<label class="selwrap" title="选择"><input type="checkbox" class="selbox" data-id="' + m.id + '"></label>' +
+      '<div class="row1">' + senderHtml +
+        '<button class="del" data-id="' + m.id + '">删除</button>' +
+      '</div>' +
+      (code ? '<div class="code-line">验证码：<b>' + esc(code) + '</b><button class="copy" data-code="' + esc(code) + '">复制</button></div>' : '') +
+      '<div class="line"><span class="content' + (needFold ? " fold" : "") + '">' + linkify(esc(m.content)) + '</span>' +
+        (needFold ? '<button class="more" type="button">展开全文</button>' : '') + '</div>' +
+      '<div class="line foot-line"><span class="time-line" title="' + esc(fmtTime(m.received_at)) + '">' + esc(relTime(m.received_at)) + '</span>' +
+        (isSms && recv ? '<span class="recv" title="双击复制收件号">' + esc(recv) + '</span>' : '') +
+      '</div>' +
+    '</div>';
+  }
+  function syncSelBoxes() {
+    if (!state.selectMode) return;
+    var boxes = $("list").querySelectorAll(".selbox");
+    var present = {}, i;
+    for (i = 0; i < boxes.length; i++) {
+      var id = boxes[i].getAttribute("data-id");
+      present[id] = true;
+      boxes[i].checked = !!state.selected[id];
+    }
+    for (var k in state.selected) if (!present[k]) delete state.selected[k];
+    updateSelBar();
+  }
+  function renderFull(list, freshSet, res) {
+    updateMeta(res);
+    if (!list.length) {
+      var hasFilter = state.device || state.src || state.range || state.q;
+      $("list").innerHTML = '<div class="empty">' + (hasFilter ? "没有符合条件的消息" : "还没有收到消息<br><small>在手机端配置 SmsForwarder，或调用 /api/push 推送一条试试</small>") + '</div>';
+      return;
+    }
+    var html = "", lastDay = "";
+    list.forEach(function (m) {
+      var day = dayLabel(m.received_at);
+      if (day !== lastDay) { html += '<div class="daysep">' + esc(day) + '</div>'; lastDay = day; }
+      html += cardHtml(m, freshSet[m.id]);
+    });
+    $("list").innerHTML = html;
+    fillAreas();
+    syncSelBoxes();
+  }
+  function trimToLimit(listEl) {
+    var limit = state.limit || 20;
+    while (listEl.querySelectorAll(".card").length > limit) {
+      var cards = listEl.querySelectorAll(".card");
+      var last = cards[cards.length - 1];
+      var prev = last.previousElementSibling;
+      last.parentNode.removeChild(last);
+      if (prev && prev.classList && prev.classList.contains("daysep") && !prev.nextElementSibling) prev.parentNode.removeChild(prev);
+    }
+  }
+  /* 增量：仅同日新消息时 prepend，避免整页重绘导致滚动跳动；跨天/异常回退全量 */
+  function prependFresh(fresh, res) {
+    var listEl = $("list");
+    var top = listEl.querySelector(".card");
+    if (!top) return false;
+    var oldDay = top.getAttribute("data-day") || "";
+    var newestDay = dayLabel(fresh[0].received_at);
+    var oldestDay = dayLabel(fresh[fresh.length - 1].received_at);
+    if (newestDay !== oldestDay) return false;
+    var block = "", lastDay = null;
+    fresh.forEach(function (m) {
+      var d = dayLabel(m.received_at);
+      if (d !== lastDay) { block += '<div class="daysep">' + esc(d) + '</div>'; lastDay = d; }
+      block += cardHtml(m, true);
+    });
+    if (oldDay && oldestDay === oldDay) {
+      block = block.replace(/^<div class="daysep">.*?<\/div>/, "");
+      var firstSep = listEl.querySelector(".daysep");
+      if (firstSep) firstSep.insertAdjacentHTML("afterend", block);
+      else listEl.insertAdjacentHTML("afterbegin", block);
+    } else {
+      listEl.insertAdjacentHTML("afterbegin", block);
+    }
+    trimToLimit(listEl);
+    updateMeta(res);
+    fillAreas();
+    syncSelBoxes();
+    return true;
+  }
+  function showRetry(e) {
+    $("list").innerHTML = '<div class="empty">加载失败：' + esc(e && e.message) + '<br><button class="tbtn" id="retrybtn" type="button">重试</button></div>';
+    var b = $("retrybtn");
+    if (b) b.onclick = function () { load(); };
+  }
+  function load(incremental) {
+    var q = qs();
+    return fetch("/api/messages?" + q)
       .then(function (r) { return r.json(); })
       .then(function (res) {
         if (!res.success) throw new Error(res.error || "load failed");
         state.total = res.total; state.pages = res.pages;
         var list = res.list || [];
         var freshSet = {};
-        /* 新消息识别：lastId 为轮询游标（防忙循环），notifiedId 为已通知基线；
-           首次加载建立基线，之后把比 notifiedId 新的交给 notifyNew */
+        /* 新消息识别：lastId 为轮询游标（防忙循环），notifiedId 为已通知基线 */
         if (!state.inited) {
           state.inited = true;
           if (list.length) {
             state.lastId = Math.max(state.lastId, list[0].id);
             state.notifiedId = Math.max(state.notifiedId, list[0].id);
           }
-        } else {
-          var fresh = list.filter(function (m) { return m.id > state.notifiedId; });
-          if (fresh.length) {
-            state.notifiedId = fresh[0].id;
-            fresh.forEach(function (m) { freshSet[m.id] = true; });
-            notifyNew(fresh);
-          }
-          if (list.length) state.lastId = Math.max(state.lastId, list[0].id);
-        }
-        $("stat").textContent = "共 " + res.total + " 条";
-        $("pageinfo").textContent = res.pages > 1 ? "第 " + res.page + " / " + res.pages + " 页" : "";
-        $("pagenum").textContent = res.pages > 1 ? res.page + " / " + res.pages : "";
-        $("prev").disabled = res.page <= 1;
-        $("next").disabled = res.page >= res.pages;
-        if (!list.length) {
-          var hasFilter = state.device || state.src || state.range || state.q;
-          $("list").innerHTML = '<div class="empty">' + (hasFilter ? "没有符合条件的消息" : "还没有收到消息<br><small>在手机端配置 SmsForwarder，或调用 /api/push 推送一条试试</small>") + '</div>';
+          renderFull(list, freshSet, res);
+          state.lastQ = q;
           return;
         }
-        /* 按日期分组渲染：今天 / 昨天 / M月D日 分隔行；来源徽章区分短信与通知；长文折叠；新消息高亮 */
-        var html = "", lastDay = "";
-        list.forEach(function (m) {
-          var day = dayLabel(m.received_at);
-          if (day !== lastDay) { html += '<div class="daysep">' + esc(day) + '</div>'; lastDay = day; }
-          var code = extractCode(m.content);
-          var isSms = (m.source || "sms") === "sms";
-          var recv = m.sim_number || m.sim || "";
-          var needFold = String(m.content || "").length > 220;
-          var lbl = isSms ? numLabel(m.sender) : "";
-          var snum = isSms ? normalizeNum(m.sender) : "";
-          var senderHtml = isSms
-            ? '<span class="sender">' + esc(m.sender || "未知号码") + '</span>' +
-              (lbl ? '<span class="nlabel" title="常见号码库（仅供参考）">' + esc(lbl) + '</span>' : '') +
-              (!lbl && /^1[3-9]\d{9}$/.test(snum) ? '<span class="area" data-num="' + snum + '"></span>' : '')
-            : '<span class="srctag">' + esc(m.source || "通知") + '</span><span class="sender">' + esc(m.sender || m.device_name || "通知") + '</span>';
-          html += '<div class="card' + (freshSet[m.id] ? " flash" : "") + '">' +
-            '<div class="row1">' + senderHtml +
-              '<button class="del" data-id="' + m.id + '">删除</button>' +
-            '</div>' +
-            (code ? '<div class="code-line">验证码：<b>' + esc(code) + '</b><button class="copy" data-code="' + esc(code) + '">复制</button></div>' : '') +
-            '<div class="line"><span class="content' + (needFold ? " fold" : "") + '">' + linkify(esc(m.content)) + '</span>' +
-              (needFold ? '<button class="more" type="button">展开全文</button>' : '') + '</div>' +
-            '<div class="line foot-line"><span class="time-line" title="' + esc(fmtTime(m.received_at)) + '">' + esc(relTime(m.received_at)) + '</span>' +
-              (isSms && recv ? '<span class="recv" title="双击复制收件号">' + esc(recv) + '</span>' : '') +
-            '</div>' +
-          '</div>';
-        });
-        $("list").innerHTML = html;
-        fillAreas();
+        var fresh = list.filter(function (m) { return m.id > state.notifiedId; });
+        if (fresh.length) {
+          state.notifiedId = fresh[0].id;
+          fresh.forEach(function (m) { freshSet[m.id] = true; });
+          notifyNew(fresh);
+        }
+        if (list.length) state.lastId = Math.max(state.lastId, list[0].id);
+        if (incremental && fresh.length && state.page === 1 && !state.q && q === state.lastQ && prependFresh(fresh, res)) {
+          state.lastQ = q;
+          return;
+        }
+        renderFull(list, freshSet, res);
+        state.lastQ = q;
       })
-      .catch(function (e) { $("list").innerHTML = '<div class="empty">加载失败：' + esc(e.message) + '</div>'; });
+      .catch(function (e) { showRetry(e); });
   }
   /* 来源下拉：从 /api/sources 动态聚合所有来源（含自定义 cron/alert 等），替代原先写死的三项 */
   function srcLabel(s) {
@@ -1580,7 +1789,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       .then(function (d) {
         if (d && d.changed) {
           if (d.id) state.lastId = Math.max(state.lastId, d.id);
-          if (state.page === 1) { load(); } else { showNewPill(); }
+          if (state.page === 1) { load(true); } else { showNewPill(); }
         }
       })
       .catch(function () {})
@@ -1628,8 +1837,9 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var btn = ev.target.closest ? ev.target.closest(".del") : null;
     if (!btn) return;
     var id = btn.getAttribute("data-id");
-    if (!confirm("确认删除这条短信？")) return;
-    fetch("/api/messages/" + id, { method: "DELETE" }).then(load);
+    fetch("/api/messages/" + id, { method: "DELETE" })
+      .then(function (r) { return r.json(); })
+      .then(function (d) { if (d && d.success) { undoToast([parseInt(id, 10)]); load(); } });
   });
   /* 双击收件号直接复制 */
   $("list").addEventListener("dblclick", function (ev) {
@@ -1640,6 +1850,77 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).then(fin, function () { fallbackCopy(text); fin(); });
     } else { fallbackCopy(text); fin(); }
+  });
+  /* ---------- 批量选择 / 清空 / 主题 / 无障碍 ---------- */
+  function setSelectMode(on) {
+    state.selectMode = !!on;
+    document.body.classList.toggle("selecting", state.selectMode);
+    $("selbar").hidden = !state.selectMode;
+    $("selectbtn").textContent = state.selectMode ? "完成" : "选择";
+    if (!state.selectMode) state.selected = {};
+    syncSelBoxes();
+    updateSelBar();
+  }
+  $("selectbtn").onclick = function () { setSelectMode(!state.selectMode); };
+  $("selcancel").onclick = function () { setSelectMode(false); };
+  $("selall").onclick = function () {
+    var boxes = $("list").querySelectorAll(".selbox");
+    var allOn = boxes.length > 0, i;
+    for (i = 0; i < boxes.length; i++) if (!boxes[i].checked) { allOn = false; break; }
+    for (i = 0; i < boxes.length; i++) {
+      boxes[i].checked = !allOn;
+      var id = boxes[i].getAttribute("data-id");
+      if (!allOn) state.selected[id] = true; else delete state.selected[id];
+    }
+    updateSelBar();
+  };
+  $("seldel").onclick = function () {
+    var ids = Object.keys(state.selected).map(function (k) { return parseInt(k, 10); }).filter(function (n) { return n > 0; });
+    if (!ids.length) return;
+    if (!confirm("确认删除选中的 " + ids.length + " 条？")) return;
+    fetch("/api/messages/remove", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: ids }) })
+      .then(function (r) { return r.json(); })
+      .then(function (d) { if (d && d.success) { setSelectMode(false); undoToast(ids); load(); } });
+  };
+  $("list").addEventListener("change", function (ev) {
+    var box = ev.target.closest ? ev.target.closest(".selbox") : null;
+    if (!box) return;
+    var id = box.getAttribute("data-id");
+    if (box.checked) state.selected[id] = true; else delete state.selected[id];
+    updateSelBar();
+  });
+  $("clearbtn").onclick = function () {
+    var scope = state.device ? "当前设备" : (state.src || state.range || state.q ? "当前筛选结果" : "全部消息");
+    if (!confirm("确认清空" + scope + "？将软删除匹配的所有消息（此操作不可撤销）。")) return;
+    if (!confirm("再次确认：真的要清空" + scope + "吗？")) return;
+    fetch("/api/messages/clear", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ device_id: state.device, source: state.src, range: state.range, q: state.q }) })
+      .then(function (r) { return r.json(); })
+      .then(function (d) { if (d && d.success) { toast("已清空 " + d.removed + " 条"); state.selected = {}; load(); } });
+  };
+  /* 主题三态：auto → light → dark */
+  var THEMES = ["auto", "light", "dark"];
+  function currentTheme() { try { return localStorage.getItem("sms_theme") || "auto"; } catch (e) { return "auto"; } }
+  function applyTheme(t) {
+    if (t === "auto") document.documentElement.removeAttribute("data-theme");
+    else document.documentElement.setAttribute("data-theme", t);
+    $("themebtn").textContent = t === "auto" ? "自动" : (t === "light" ? "浅色" : "深色");
+  }
+  (function initTheme() {
+    var t = currentTheme(); if (THEMES.indexOf(t) === -1) t = "auto";
+    applyTheme(t);
+    $("themebtn").onclick = function () {
+      var cur = currentTheme(); if (THEMES.indexOf(cur) === -1) cur = "auto";
+      var next = THEMES[(THEMES.indexOf(cur) + 1) % THEMES.length];
+      try { localStorage.setItem("sms_theme", next); } catch (e) {}
+      applyTheme(next);
+    };
+  })();
+  /* 键盘：/ 聚焦搜索；Esc 退出批量选择 */
+  document.addEventListener("keydown", function (e) {
+    var tag = (e.target && e.target.tagName) || "";
+    var typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+    if (e.key === "/" && !typing) { e.preventDefault(); $("q").focus(); }
+    if (e.key === "Escape" && state.selectMode) { setSelectMode(false); }
   });
   refreshAll();
 })();
@@ -1724,7 +2005,10 @@ async function handleCron(env) {
   const res = await env.DB.prepare(
     `DELETE FROM messages WHERE received_at < datetime('now', ?1)`
   ).bind(`-${days} days`).run();
-  console.log(`[cron] cleaned ${res.meta ? res.meta.changes : 0} messages older than ${days} days`);
+  const purged = await env.DB.prepare(
+    `DELETE FROM messages WHERE deleted_at IS NOT NULL AND deleted_at < datetime('now', '-7 days')`
+  ).run();
+  console.log(`[cron] cleaned ${res.meta ? res.meta.changes : 0} old, purged ${purged.meta ? purged.meta.changes : 0} deleted`);
 }
 
 /* ---------------- 路由 ---------------- */
@@ -1766,6 +2050,15 @@ export default {
       }
       if (path === "/api/export" && request.method === "GET") {
         return await handleExport(url, env);
+      }
+      if (path === "/api/messages/remove" && request.method === "POST") {
+        return await handleRemoveMessages(request, env);
+      }
+      if (path === "/api/messages/restore" && request.method === "POST") {
+        return await handleRestoreMessages(request, env);
+      }
+      if (path === "/api/messages/clear" && request.method === "POST") {
+        return await handleClearMessages(request, env);
       }
       const msgMatch = path.match(/^\/api\/messages\/(\d+)$/);
       if (msgMatch && request.method === "DELETE") {
