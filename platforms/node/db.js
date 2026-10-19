@@ -169,6 +169,8 @@ export class LocalDatabase {
     this.sqlite.exec(schema);
     /* 旧库兼容：新库建表已含 deleted_at，旧库在此补列（已存在则忽略错误） */
     try { this.sqlite.exec("ALTER TABLE messages ADD COLUMN deleted_at TEXT"); } catch (e) {}
+    try { this.sqlite.exec("ALTER TABLE messages ADD COLUMN starred INTEGER NOT NULL DEFAULT 0"); } catch (e) {}
+    try { this.sqlite.exec("ALTER TABLE messages ADD COLUMN read_at TEXT"); } catch (e) {}
     this.stmts = new Map(); /* sql → StatementSync 缓存 */
   }
 

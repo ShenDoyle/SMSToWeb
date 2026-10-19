@@ -18,7 +18,9 @@ CREATE TABLE IF NOT EXISTS messages (
   received_at TEXT    NOT NULL,
   source      TEXT    NOT NULL DEFAULT 'sms',
   created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
-  deleted_at  TEXT
+  deleted_at  TEXT,
+  starred     INTEGER NOT NULL DEFAULT 0,
+  read_at     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_messages_device_time ON messages(device_id, received_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_time ON messages(received_at);
@@ -32,3 +34,5 @@ CREATE INDEX IF NOT EXISTS idx_messages_source ON messages(source, received_at D
 -- ALTER TABLE messages ADD COLUMN source TEXT NOT NULL DEFAULT 'sms';
 -- 已有库升级（软删除）：为旧 messages 表补 deleted_at 列（新库建表已包含；D1/Turso 旧库需手动执行一次）
 -- ALTER TABLE messages ADD COLUMN deleted_at TEXT;
+-- ALTER TABLE messages ADD COLUMN starred INTEGER NOT NULL DEFAULT 0;
+-- ALTER TABLE messages ADD COLUMN read_at TEXT;
