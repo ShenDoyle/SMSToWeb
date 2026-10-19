@@ -10,6 +10,8 @@
 - **安全可选**：管理页登录开关、多格式验证码识别（码前/码后/分隔式/混合码，防误报）与一键复制、暗色模式
 - **数据与提醒**：按当前筛选一键导出 CSV / JSON；页面可见时新消息有 toast / 可选提示音 / 悬浮提醒，后台时浏览器通知 + 标题未读；超长消息自动折叠
 - **号码识别**：内置常见机构号码库（运营商 / 银行 / 快递 / 政务等）自动标注；未知手机号可选显示归属地（默认开启，可关）
+- **中英双语**：管理页与登录页内置中文 / 英文，头部「EN / 中文」一键切换（`?lang=en` 可直连，选择记在本地）；日期、相对时间、号码机构名同步切换
+- **移动端友好**：`viewport-fit` 安全区适配刘海屏与手势条、输入框 16px 防 iOS 自动放大、触控目标加大、底部抽屉式弹层、PWA 可添加到主屏幕
 - **批量与撤销**：批量选择删除、按当前筛选一键清空；删除后 5 秒内可撤销（软删除）；暗色模式支持自动 / 浅色 / 深色三态
 - **收藏 / 未读 / 统计**：星标置顶、只看收藏 / 未读、统计面板（来源分布 + 近 7 天）；自定义号码标签；搜索高亮与历史；设置里可配免打扰与提示音；可添加到主屏幕（PWA）
 
@@ -31,6 +33,23 @@
 
 > 每个平台目录**完全自包含**（代码 + schema + 独立文档，零 npm 依赖、无需构建），点上表「详细教程」即可按步骤部署。功能与数据表结构全平台一致，可随时互相迁移。
 > 平台对比与通用准备（Turso 数据库）见 [platforms/README.md](platforms/README.md)。
+
+### 各平台运行时差异（部署前看一眼）
+
+业务代码六平台逐字节一致，但**运行时的超时/后台任务/定时器**能力不同，必要时用环境变量适配：
+
+| 平台 | 函数超时 | 后台通知 | 定时清理 | 建议 |
+|---|---|---|---|---|
+| Cloudflare | 无固定墙钟（CPU 受限） | `ctx.waitUntil` 响应后继续 | 平台 cron | 默认配置即可 |
+| Vercel Edge | 单次请求约 25s 上限 | 响应前内联完成 | 平台 cron | `WAIT_MAX_SECONDS=20` |
+| Netlify Functions | 默认 10s（可调） | 响应前内联完成 | scheduled function | `WAIT_MAX_SECONDS=8` |
+| Deno Deploy | 视套餐 | 响应前内联完成 | 需外部触发 | 外部 cron 调 `/api/cron?token=` |
+| EdgeOne Makers | 视套餐 | 响应前内联完成 | 需外部触发 | `WAIT_MAX_SECONDS` 按套餐下调 |
+| Node / Docker | 自定 | 响应前内联完成 | 需外部触发 | 本地 SQLite 需 Node ≥ 22.13 |
+
+> - **长轮询**：前端对失败自动**指数退避**（1→30s），并在页面重新可见时立即补拉，平台强杀请求也不会打爆函数。
+> - **通知转发**：Cloudflare 走 `waitUntil`；其余平台为「响应前把通知发完」（单渠道 10s 超时），因此配了很多慢渠道时会略微增加接口延迟。
+> - **定时清理**：无平台 cron 的部署，用任意定时器请求 `GET /api/cron?token=<RECEIVE_TOKEN>` 即可。
 
 ---
 
@@ -57,6 +76,7 @@ POST https://<你的域名>/api/push?token=<RECEIVE_TOKEN>
 | `ENABLE_AUTH` | 否 | `"true"` 管理页需登录（**安全强烈建议开启**，见下方安全建议）；默认免登录 |
 | `ADMIN_PASSWORD` | 否 | 登录密码（`ENABLE_AUTH="true"` 时配置；漏配不会锁死——按免登录运行并告警） |
 | `RETENTION_DAYS` | 否 | 数据保留天数，默认 30 |
+| `WAIT_MAX_SECONDS` | 否 | 长轮询 `/api/wait` 最长挂起秒数，默认 25（范围 3–25）。部署在 **Netlify Functions**（默认 10s 上限）或其它短超时平台时设成 `8`，避免请求被平台强杀 |
 | `PHONE_AREA_ENABLED` / `PHONE_AREA_API` | 否 | 号码归属地：默认开启（360 免费接口、无 key、后端缓存 24h，仅查 11 位手机号）；设 `false` 关闭；自定义源用 `PHONE_AREA_API`（URL 含 `{number}` 占位） |
 | 通知渠道变量 | 否 | `FEISHU_WEBHOOK`（飞书）/ `WECOM_WEBHOOK`（企微）/ `DINGTALK_WEBHOOK`（钉钉，可选 `DINGTALK_SECRET` 加签）/ `SERVERCHAN_SENDKEY` / `PUSHPLUS_TOKEN` / `TELEGRAM_BOT_TOKEN`+`TELEGRAM_CHAT_ID` / `BARK_DEVICE_KEY`（可选 `BARK_URL`）/ `NTFY_URL`（可选 `NTFY_TOKEN`）/ `GOTIFY_URL`+`GOTIFY_TOKEN` / `RESEND_API_KEY`+`MAIL_TO`（邮件，可选 `MAIL_FROM`）/ `GENERIC_WEBHOOKS`（通用 Webhook，可选 `GENERIC_WEBHOOK_TEMPLATE` 请求体 / `GENERIC_WEBHOOK_HEADERS` 请求头）。配置哪个转发哪个，全部不配置则不转发 |
 | `SITE_NAME` / `SITE_ICON` | 否 | 网站名 / 图标 URL，未设置用默认值 |
