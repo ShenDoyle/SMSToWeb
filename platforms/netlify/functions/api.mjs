@@ -5,8 +5,8 @@
  *
  * 说明：
  *  - 运行于 Node 且原生支持 Web 标准 Request/Response，与核心应用零转换；
- *  - 长轮询 /api/wait 最长挂起 25s：免费版函数执行上限较低，请求可能被提前截断，
- *    前端轮询循环会自动重试，不影响使用；
+ *  - 长轮询 /api/wait：免费版函数执行上限约 10s，本入口默认把 WAIT_MAX_SECONDS 设为 8，
+ *    避免请求被平台强杀；如需更短/更长可在环境变量里显式覆盖（3–25）；
  *  - 定时清理：functions/cron.mjs 为 Netlify Scheduled Function（每天 UTC 17:00）；
  *    也可用外部 cron 调用 GET /api/cron?token=<RECEIVE_TOKEN>。
  */
@@ -24,6 +24,7 @@ const ENV_KEYS = [
   "ENABLE_AUTH",
   "ADMIN_PASSWORD",
   "RETENTION_DAYS",
+  "WAIT_MAX_SECONDS",
   "PHONE_AREA_ENABLED",
   "PHONE_AREA_API",
   "SITE_NAME",
@@ -62,6 +63,9 @@ function buildEnv() {
   }
   const env = { DB: cachedDb };
   for (const k of ENV_KEYS) env[k] = process.env[k] || "";
+  /* Netlify Functions 默认 10s 执行上限：长轮询默认降到 8s，避免请求被平台强杀
+     （显式配置 WAIT_MAX_SECONDS 时以配置为准） */
+  if (!env.WAIT_MAX_SECONDS) env.WAIT_MAX_SECONDS = "8";
   return env;
 }
 

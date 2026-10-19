@@ -23,6 +23,7 @@ const ENV_KEYS = [
   "ENABLE_AUTH",
   "ADMIN_PASSWORD",
   "RETENTION_DAYS",
+  "WAIT_MAX_SECONDS",
   "PHONE_AREA_ENABLED",
   "PHONE_AREA_API",
   "SITE_NAME",
@@ -61,6 +62,9 @@ function buildEnv() {
   }
   const env = { DB: cachedDb };
   for (const k of ENV_KEYS) env[k] = process.env[k] || "";
+  /* Vercel Edge 单次请求约 25s 上限：长轮询默认 20s，留出响应头写出的余量
+     （显式配置 WAIT_MAX_SECONDS 时以配置为准） */
+  if (!env.WAIT_MAX_SECONDS) env.WAIT_MAX_SECONDS = "20";
   return env;
 }
 

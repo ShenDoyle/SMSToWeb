@@ -19,6 +19,7 @@ const ENV_KEYS = [
   "ENABLE_AUTH",
   "ADMIN_PASSWORD",
   "RETENTION_DAYS",
+  "WAIT_MAX_SECONDS",
   "PHONE_AREA_ENABLED",
   "PHONE_AREA_API",
   "SITE_NAME",
@@ -60,6 +61,8 @@ function buildEnv(vars) {
   }
   const e = { DB: cachedDb };
   for (const k of ENV_KEYS) e[k] = g(k);
+  /* 边缘函数执行时长比 Worker 紧：长轮询默认 20s，可用 WAIT_MAX_SECONDS 覆盖（3–25） */
+  if (!e.WAIT_MAX_SECONDS) e.WAIT_MAX_SECONDS = "20";
   return e;
 }
 
