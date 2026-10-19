@@ -327,6 +327,27 @@ function trimEnv(v) {
 }
 
 /* 通知渠道通用 POST；非 2xx 抛错由调用方记日志（不抛出影响主流程） */
+/* 通用超时信号：优先 AbortSignal.timeout（Node 17.3+ / V8 10.2+），
+   老运行时（部分边缘函数、旧 Node）退化为 AbortController + setTimeout，
+   两者都不可用时返回 undefined（退化为无超时，行为等同旧版，不会抛错） */
+function timeoutSignal(ms) {
+  try {
+    if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+      return AbortSignal.timeout(ms);
+    }
+  } catch (e) { /* 某些运行时存在该方法但他处实现异常，继续走兜底 */ }
+  try {
+    if (typeof AbortController === "function") {
+      const ac = new AbortController();
+      const timer = setTimeout(function () { try { ac.abort(); } catch (e) {} }, ms);
+      /* Node 下避免定时器把进程吊住（unref 存在时） */
+      if (timer && typeof timer.unref === "function") timer.unref();
+      return ac.signal;
+    }
+  } catch (e) {}
+  return undefined;
+}
+
 async function postNotify(url, headers, body) {
   const opts = {
     method: "POST",
@@ -334,9 +355,8 @@ async function postNotify(url, headers, body) {
     body: body,
   };
   /* 单渠道 10s 超时：避免慢/挂起的第三方把内联 await 的响应拖死（无 waitUntil 的平台） */
-  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
-    opts.signal = AbortSignal.timeout(10000);
-  }
+  const sig = timeoutSignal(10000);
+  if (sig) opts.signal = sig;
   const res = await fetch(url, opts);
   if (!res.ok) throw new Error("HTTP " + res.status);
 }
@@ -843,21 +863,37 @@ function handleManifest(env) {
   const name = siteName(env);
   const icon = siteIcon(env);
   const m = {
-    name: name, short_name: name, start_url: "/", display: "standalone",
+    name: name, short_name: name,
+    description: "SMS / notification gateway — browse messages from any device.",
+    start_url: "/", scope: "/", display: "standalone",
+    display_override: ["standalone", "minimal-ui"],
+    orientation: "any", lang: "zh-CN", dir: "ltr",
     background_color: "#f5f6f7", theme_color: "#15803d",
+    categories: ["utilities", "productivity"],
     icons: [
-      { src: icon, sizes: "192x192", type: "image/x-icon" },
-      { src: icon, sizes: "512x512", type: "image/x-icon" }
+      { src: icon, sizes: "192x192", type: "image/x-icon", purpose: "any" },
+      { src: icon, sizes: "512x512", type: "image/x-icon", purpose: "any" }
     ]
   };
   return new Response(JSON.stringify(m), {
     headers: { "Content-Type": "application/manifest+json; charset=utf-8", "Cache-Control": "no-cache", ...CORS },
   });
 }
+/* Service Worker：静态壳缓存优先、接口永不缓存；离线时回落到缓存的管理页 */
 function handleSW() {
-  const js = "self.addEventListener('install',function(e){self.skipWaiting();});" +
+  const js = "var C='smstoweb-shell-v2';" +
+    "self.addEventListener('install',function(e){self.skipWaiting();});" +
     "self.addEventListener('activate',function(e){e.waitUntil(self.clients.claim());});" +
-    "self.addEventListener('fetch',function(e){if(e.request.method!=='GET')return;e.respondWith(fetch(e.request).catch(function(){return caches.match(e.request);}));});";
+    "self.addEventListener('fetch',function(e){" +
+      "var r=e.request;if(r.method!=='GET')return;" +
+      "var u=new URL(r.url);if(u.origin!==location.origin)return;" +
+      "if(u.pathname.indexOf('/api/')===0)return;" +
+      "e.respondWith(fetch(r).then(function(res){" +
+        "if(res&&res.ok&&(u.pathname==='/'||u.pathname.indexOf('/index.html')===0)){" +
+          "var cp=res.clone();caches.open(C).then(function(c){c.put(r,cp);});}" +
+        "return res;" +
+      "}).catch(function(){return caches.match(r).then(function(m){return m||caches.match('/');});}));" +
+    "});";
   return new Response(js, {
     headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-cache", ...CORS },
   });
@@ -954,7 +990,8 @@ async function handlePhoneArea(url, env) {
     const tpl = String(env.PHONE_AREA_API || "").trim() || AREA_DEFAULT_API;
     const target = tpl.indexOf("{number}") !== -1 ? tpl.replace("{number}", encodeURIComponent(num)) : tpl + encodeURIComponent(num);
     const opts = {};
-    if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") opts.signal = AbortSignal.timeout(4000);
+    const sig = timeoutSignal(4000);
+    if (sig) opts.signal = sig;
     const resp = await fetch(target, opts);
     if (resp.ok) {
       const d = await resp.json();
@@ -985,7 +1022,11 @@ async function handleWait(url, env) {
   const lastId = parseInt(url.searchParams.get("last_id") || "0", 10) || 0;
   const deviceId = parseInt(url.searchParams.get("device_id") || "", 10);
   const filter = Number.isInteger(deviceId) && deviceId > 0;
-  const deadline = Date.now() + 25000;
+  /* 挂起时长可配：Netlify Functions 默认 10s 超时、部分平台更短，
+     部署在这些平台时把 WAIT_MAX_SECONDS 调到 8~10，避免请求被平台强杀导致前端反复重连 */
+  const waitSec = Math.min(25, Math.max(3, parseInt(env.WAIT_MAX_SECONDS, 10) || 25));
+  const deadline = Date.now() + waitSec * 1000;
+  const tick = Math.min(2000, Math.max(500, waitSec * 1000 / 5));
   for (;;) {
     const sql = filter
       ? "SELECT MAX(id) AS n FROM messages WHERE device_id = ?1 AND deleted_at IS NULL"
@@ -993,7 +1034,7 @@ async function handleWait(url, env) {
     const row = await (filter ? env.DB.prepare(sql).bind(deviceId) : env.DB.prepare(sql)).first();
     if (row && row.n > lastId) return json({ success: true, changed: true, id: row.n });
     if (Date.now() > deadline) return json({ success: true, changed: false });
-    await new Promise(function (r) { setTimeout(r, 2000); });
+    await new Promise(function (r) { setTimeout(r, Math.min(tick, Math.max(0, deadline - Date.now()))); });
   }
 }
 
@@ -1004,10 +1045,17 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="format-detection" content="telephone=no,email=no,address=no">
+<meta name="color-scheme" content="light dark">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="__SITE_NAME__">
+<link rel="apple-touch-icon" href="__SITE_ICON__">
 <link rel="icon" href="__SITE_ICON__">
 <link rel="manifest" href="/manifest.webmanifest">
-<meta name="theme-color" content="#15803d">
+<meta name="theme-color" content="#15803d" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#14171a" media="(prefers-color-scheme: dark)">
 <title>__SITE_NAME__</title>
 <style>
   :root {
@@ -1200,76 +1248,114 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .barrow .bt { flex: 1; background: var(--row-border); border-radius: 4px; height: 10px; overflow: hidden; }
   .barrow .bf { height: 100%; background: var(--accent); border-radius: 4px; }
   .barrow .bn { width: 34px; text-align: right; color: var(--muted); flex: none; }
-  /* 移动端安全区 */
-  body { padding-bottom: calc(40px + env(safe-area-inset-bottom)); }
+  /* ---------- 移动端体验与浏览器兼容 ---------- */
+  html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+  body { padding-bottom: calc(40px + env(safe-area-inset-bottom, 0px));
+         -webkit-tap-highlight-color: transparent; }
+  .wrap { padding-left: max(16px, env(safe-area-inset-left, 0px));
+          padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+  /* 触控：去掉移动端 300ms 点击延迟 */
+  button, select, .tab, .opt, .tbtn, .clr, .mx, .star, .del, .tabop, .tabx, .newpill, .undo-btn { touch-action: manipulation; }
+  /* iOS Safari 输入框字号 < 16px 会触发自动放大，统一 16px；桌面端仍用紧凑字号 */
+  input[type=search], input[type=number], input[type=password], select, textarea { font-size: 16px; }
+  .tabs { -webkit-overflow-scrolling: touch; scrollbar-width: thin; }
+  .tabs::-webkit-scrollbar { height: 3px; }
+  .sheet { -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
+  .toastroot { padding-left: env(safe-area-inset-left, 0px); padding-right: env(safe-area-inset-right, 0px);
+               bottom: calc(48px + env(safe-area-inset-bottom, 0px)); }
+  .selbar { bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
+  .newpill { bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
+  @media (min-width: 561px) {
+    input[type=search], input[type=number], select { font-size: 14px; }
+  }
   @media (max-width: 560px) {
+    .gh { top: 10px; right: 10px; opacity: .5; }
     .modal { align-items: flex-end; padding: 0; }
-    .sheet { border-radius: 16px 16px 0 0; max-height: 88vh; }
+    .sheet { border-radius: 18px 18px 0 0; max-height: 88vh; max-height: 88dvh;
+             padding-bottom: calc(22px + env(safe-area-inset-bottom, 0px)); }
+    /* 窄屏放大可点区域，降低误触 */
+    .tbtn, .pager button { padding: 8px 12px; font-size: 13px; min-height: 36px; }
+    .tab { padding: 7px 13px; }
+    .tabop, .tabx { padding: 2px 5px; }
+    .star, .del { padding: 4px 6px; }
+    .opts { gap: 14px; }
+    .selbar { width: calc(100% - 24px); justify-content: space-between; border-radius: 14px; }
+    .barrow .bl { width: 54px; }
+  }
+  /* 无精确指针（手机/平板）：开关加大到 44x26，便于拇指操作 */
+  @media (hover: none) {
+    .opt .switch { width: 44px; height: 26px; }
+    .opt .switch::after { width: 20px; height: 20px; }
+    .opt input:checked + .switch::after { transform: translateX(18px); }
   }
 </style>
 </head>
 <body>
-<a class="gh" href="https://github.com/ShenDoyle/SMSToWeb" target="_blank" rel="noopener noreferrer" title="GitHub 仓库" aria-label="GitHub 仓库">
+<a class="gh" href="https://github.com/ShenDoyle/SMSToWeb" target="_blank" rel="noopener noreferrer" data-i18n-title="ghRepo" title="GitHub 仓库" data-i18n-aria="ghRepo" aria-label="GitHub 仓库">
   <svg viewBox="0 0 16 16" width="26" height="26" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
 </a>
 <div class="wrap">
-  <div class="head"><h1>__SITE_NAME__</h1><span class="headacts"><button class="tbtn" id="statsbtn" title="统计">统计</button><button class="tbtn" id="setbtn" title="设置">设置</button><button class="tbtn" id="themebtn" title="切换主题（自动 / 浅色 / 深色）">自动</button></span></div>
-  <div class="tabs" id="tabs" role="tablist" aria-label="设备标签"></div>
+  <div class="head">
+    <h1>__SITE_NAME__</h1>
+    <span class="headacts">
+      <button class="tbtn" id="statsbtn" data-i18n-title="stats" data-i18n="stats">统计</button>
+      <button class="tbtn" id="setbtn" data-i18n-title="settings" data-i18n="settings">设置</button>
+      <button class="tbtn" id="themebtn" data-i18n-title="themeTip">自动</button>
+      <button class="tbtn" id="langbtn" data-i18n-title="langTip">EN</button>
+    </span>
+  </div>
+  <div class="tabs" id="tabs" role="tablist" data-i18n-aria="devices" aria-label="设备标签"></div>
   <div class="toolbar">
     <div class="searchwrap">
-      <input type="search" id="q" list="qhist" placeholder="搜索发件人或内容…">
-      <button class="clr" id="clearq" hidden title="清除搜索" aria-label="清除搜索">×</button>
+      <input type="search" id="q" list="qhist" data-i18n-ph="searchPh" placeholder="搜索发件人或内容…" autocomplete="off">
+      <button class="clr" id="clearq" hidden data-i18n-title="clearSearch" data-i18n-aria="clearSearch" title="清除搜索" aria-label="清除搜索">×</button>
     </div>
     <datalist id="qhist"></datalist>
-    <select id="src" title="按来源筛选">
-      <option value="">全部来源</option>
-      <option value="sms">短信</option>
-      <option value="notify">通知</option>
+    <select id="src" data-i18n-title="srcTip" title="按来源筛选">
+      <option value="" data-i18n="allSources">全部来源</option>
+      <option value="sms" data-i18n="srcSms">短信</option>
+      <option value="notify" data-i18n="srcNotify">通知</option>
     </select>
-    <select id="range" title="按时间筛选">
-      <option value="">全部时间</option>
-      <option value="1d">今天</option>
-      <option value="7d">近 7 天</option>
-      <option value="30d">近 30 天</option>
+    <select id="range" data-i18n-title="rangeTip" title="按时间筛选">
+      <option value="" data-i18n="allTime">全部时间</option>
+      <option value="1d" data-i18n="today">今天</option>
+      <option value="7d" data-i18n="d7">近 7 天</option>
+      <option value="30d" data-i18n="d30">近 30 天</option>
     </select>
   </div>
   <div class="opts">
-    <label class="opt"><input type="checkbox" id="autocopy"><span class="switch"></span><span>自动复制验证码</span></label>
-    <label class="opt"><input type="checkbox" id="notifyon"><span class="switch"></span><span>后台通知</span></label>
-    <label class="opt"><input type="checkbox" id="soundon"><span class="switch"></span><span>提示音</span></label>
+    <label class="opt"><input type="checkbox" id="autocopy"><span class="switch"></span><span data-i18n="autoCopy">自动复制验证码</span></label>
+    <label class="opt"><input type="checkbox" id="notifyon"><span class="switch"></span><span data-i18n="notifyOn">后台通知</span></label>
+    <label class="opt"><input type="checkbox" id="soundon"><span class="switch"></span><span data-i18n="soundOn">提示音</span></label>
     <span class="spacer"></span>
-    <button class="tbtn" id="staronly" title="只看收藏">★ 收藏</button>
-    <button class="tbtn" id="unreadonly" title="只看未读">● 未读</button>
-    <button class="tbtn" id="selectbtn" title="进入批量选择">选择</button>
-    <button class="tbtn" id="clearbtn" title="清空当前筛选结果（软删除）">清空</button>
-    <button class="tbtn" id="exportcsv" title="按当前筛选导出 CSV">导出 CSV</button>
-    <button class="tbtn" id="exportjson" title="按当前筛选导出 JSON">导出 JSON</button>
+    <button class="tbtn" id="staronly" data-i18n-title="starTip" data-i18n="starOnly" title="只看收藏">★ 收藏</button>
+    <button class="tbtn" id="unreadonly" data-i18n-title="unreadTip" data-i18n="unreadOnly" title="只看未读">● 未读</button>
+    <button class="tbtn" id="selectbtn" data-i18n-title="selectTip" data-i18n="select" title="进入批量选择">选择</button>
+    <button class="tbtn" id="clearbtn" data-i18n-title="clearTip" data-i18n="clear" title="清空当前筛选结果（软删除）">清空</button>
+    <button class="tbtn" id="exportcsv" data-i18n-title="exportCsvTip" data-i18n="exportCsv" title="按当前筛选导出 CSV">导出 CSV</button>
+    <button class="tbtn" id="exportjson" data-i18n-title="exportJsonTip" data-i18n="exportJson" title="按当前筛选导出 JSON">导出 JSON</button>
   </div>
   <div class="meta"><span id="stat"></span><span id="pageinfo"></span></div>
   <div class="list" id="list"><div class="sk"><div class="skc"></div><div class="skc"></div><div class="skc"></div></div></div>
   <div class="pager">
-    <button id="prev">上一页</button>
+    <button id="prev" data-i18n="prev">上一页</button>
     <span id="pagenum"></span>
-    <button id="next">下一页</button>
-    <select id="perpage" title="每页条数">
-      <option value="20">20 条/页</option>
-      <option value="50">50 条/页</option>
-      <option value="100">100 条/页</option>
-    </select>
-    <input id="jump" type="number" min="1" inputmode="numeric" placeholder="页码" title="输入页码后回车跳转">
-    <button id="gojump">跳转</button>
+    <button id="next" data-i18n="next">下一页</button>
+    <select id="perpage" data-i18n-title="perPageTip" title="每页条数"></select>
+    <input id="jump" type="number" min="1" inputmode="numeric" data-i18n-ph="jumpPh" data-i18n-title="jumpTip" placeholder="页码" title="输入页码后回车跳转">
+    <button id="gojump" data-i18n="go">跳转</button>
   </div>
 </div>
 <button class="newpill" id="newpill" hidden></button>
 <div class="selbar" id="selbar" hidden>
   <span id="selcount">已选 0 条</span>
-  <button class="tbtn" id="selall">全选本页</button>
-  <button class="tbtn" id="seldel" disabled>删除</button>
-  <button class="tbtn" id="selcancel">取消</button>
+  <button class="tbtn" id="selall" data-i18n="selAll">全选本页</button>
+  <button class="tbtn" id="seldel" disabled data-i18n="del">删除</button>
+  <button class="tbtn" id="selcancel" data-i18n="cancel">取消</button>
 </div>
 <div class="modal" id="modal" hidden>
   <div class="sheet">
-    <button class="mx" id="modalx" type="button" aria-label="关闭">×</button>
+    <button class="mx" id="modalx" type="button" data-i18n-aria="modalClose" aria-label="关闭">×</button>
     <div id="modalbody"></div>
   </div>
 </div>
@@ -1296,6 +1382,198 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     sound: (function () { try { return localStorage.getItem("sms_sound") === "1"; } catch (e) { return false; } })()
   };
   var $ = function (id) { return document.getElementById(id); };
+
+  /* ---------------- 中英双语（i18n） ----------------
+     语言优先级：?lang=zh|en > localStorage(sms_lang) > 浏览器语言(zh* → 中文, 其它 → 英文)
+     静态节点标注：data-i18n(文本) / data-i18n-ph(placeholder) / data-i18n-title(title) / data-i18n-aria(aria-label)
+     动态文案：T("key") 或 T("key", {n: 1})，占位符写作 {n}。
+     切换语言后整页 reload：避免半渲染状态，且本地缓存过滤条件不受影响。 */
+  var LANG = (function () {
+    var v = "";
+    try { v = String(new URLSearchParams(location.search).get("lang") || "").toLowerCase(); } catch (e) {}
+    if (v !== "zh" && v !== "en") { try { v = String(localStorage.getItem("sms_lang") || "").toLowerCase(); } catch (e) { v = ""; } }
+    if (v !== "zh" && v !== "en") {
+      var nav = String(navigator.language || navigator.userLanguage || navigator.browserLanguage || "").toLowerCase();
+      v = nav.indexOf("zh") === 0 ? "zh" : (nav ? "en" : "zh");
+    }
+    try { localStorage.setItem("sms_lang", v); } catch (e) {}
+    return v;
+  })();
+  var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  var I18N = {
+    zh: {
+      langBtn: "EN", langTip: "Switch to English",
+      ghRepo: "GitHub repository", modalClose: "Close", devices: "Devices",
+      jumpTip: "Enter a page number and press Enter", perPageTip: "Items per page",
+      stats: "统计", settings: "设置",
+      themeAuto: "自动", themeLight: "浅色", themeDark: "深色",
+      themeTip: "切换主题（自动 / 浅色 / 深色）",
+      tabAll: "全部", tabRename: "重命名设备", tabMerge: "合并到其他设备", tabDel: "删除该设备标签",
+      searchPh: "搜索发件人或内容…", clearSearch: "清除搜索",
+      srcTip: "按来源筛选", allSources: "全部来源", srcSms: "短信", srcNotify: "通知",
+      rangeTip: "按时间筛选", allTime: "全部时间", d7: "近 7 天", d30: "近 30 天",
+      autoCopy: "自动复制验证码", notifyOn: "后台通知", soundOn: "提示音",
+      starOnly: "★ 收藏", unreadOnly: "● 未读", starTip: "只看收藏", unreadTip: "只看未读",
+      select: "选择", selectTip: "进入批量选择", done: "完成",
+      clear: "清空", clearTip: "清空当前筛选结果（软删除）",
+      exportCsv: "导出 CSV", exportJson: "导出 JSON",
+      exportCsvTip: "按当前筛选导出 CSV", exportJsonTip: "按当前筛选导出 JSON",
+      total: "共 {n} 条", pageOf: "第 {a} / {b} 页",
+      prev: "上一页", next: "下一页", perPage: "{n} 条/页", jumpPh: "页码", go: "跳转",
+      loading: "加载中…", emptyFilter: "没有符合条件的消息",
+      emptyAll: "还没有收到消息", emptyHint: "在手机端配置 SmsForwarder，或调用 /api/push 推送一条试试",
+      loadFail: "加载失败：{m}", retry: "重试",
+      del: "删除", unknownNum: "未知号码", codeLabel: "验证码：", copy: "复制", copied: "已复制",
+      more: "展开全文", less: "收起", unread: "未读",
+      starItemTip: "收藏/置顶", recvTip: "双击复制收件号", selTip: "选择",
+      numLibTip: "常见号码库（仅供参考）", areaTip: "号码归属地",
+      deletedOne: "已删除", deletedN: "已删除 {n} 条", undo: "撤销",
+      newPill: "↑ {n} 条新消息", gotNew: "收到 {n} 条新消息", codeCopied: "验证码 {c} 已复制",
+      recvCopied: "收件号已复制", newSms: "新短信",
+      selCount: "已选 {n} 条", selAll: "全选本页", cancel: "取消",
+      dSource: "来源", dDevice: "设备标签", dRecv: "收件号", dTime: "时间", dLabel: "号码标签", dStatus: "状态",
+      notSet: "（未设置）", read: "已读", starredPrefix: "★ 收藏 · ",
+      star: "收藏置顶", unstar: "取消收藏", markUnread: "标为未读", copyAll: "复制全文",
+      call: "拨号", setLabel: "号码标签",
+      labelPrompt: "给 {n} 设置标签（留空清除）",
+      sTheme: "主题", sSound: "新消息提示音", sDnd: "免打扰", sDndRange: "免打扰时段",
+      to: "至", hourSuffix: "点", save: "保存", saved: "设置已保存",
+      statTitle: "统计", statFail: "统计加载失败", statTotal: "总消息", statUnread: "未读", statStarred: "收藏",
+      statSources: "来源分布", statDays: "近 7 天",
+      autoCopyOn: "已开启验证码自动复制", autoCopyOff: "已关闭验证码自动复制",
+      notifyOnMsg: "已开启后台通知", notifyOffMsg: "已关闭后台通知",
+      soundOnMsg: "已开启新消息提示音", soundOffMsg: "已关闭新消息提示音",
+      clearedN: "已清空 {n} 条",
+      confirmDelN: "确认删除选中的 {n} 条？",
+      scopeDevice: "当前设备", scopeFilter: "当前筛选结果", scopeAll: "全部消息",
+      confirmClear: "确认清空{scope}？将软删除匹配的所有消息（此操作不可撤销）。",
+      confirmClear2: "再次确认：真的要清空{scope}吗？",
+      renamePrompt: "重命名设备「{name}」\n留空则恢复默认名", renameFail: "重命名失败",
+      noOthers: "没有可合并的其他设备",
+      mergePrompt: "把「{a}」的全部消息合并到哪台设备？\n{list}\n输入序号：",
+      invalidIdx: "序号无效",
+      mergeConfirm: "确认把「{a}」的全部消息合并到「{b}」？\n合并后本标签将被删除。",
+      targetMissing: "目标设备不存在", mergeFail: "合并失败",
+      delDevConfirm: "删除该设备标签？（须先清空其全部短信）",
+      hasMessages: "该设备仍有短信，请先删除全部短信", delFail: "删除失败",
+      devCount: "（{n} 条）",
+      justNow: "刚刚", minAgo: "{n} 分钟前", hourAgo: "{n} 小时前", today: "今天", yesterday: "昨天",
+      unnamed: "未命名设备", unknownErr: "操作失败"
+    },
+    en: {
+      langBtn: "中文", langTip: "切换到中文",
+      ghRepo: "GitHub 仓库", modalClose: "关闭", devices: "设备标签",
+      jumpTip: "输入页码后回车跳转", perPageTip: "每页条数",
+      stats: "Stats", settings: "Settings",
+      themeAuto: "Auto", themeLight: "Light", themeDark: "Dark",
+      themeTip: "Theme: auto / light / dark",
+      tabAll: "All", tabRename: "Rename device", tabMerge: "Merge into another device", tabDel: "Delete this device",
+      searchPh: "Search sender or content…", clearSearch: "Clear search",
+      srcTip: "Filter by source", allSources: "All sources", srcSms: "SMS", srcNotify: "Notification",
+      rangeTip: "Filter by time", allTime: "All time", d7: "Last 7 days", d30: "Last 30 days",
+      autoCopy: "Auto-copy codes", notifyOn: "Background alerts", soundOn: "Sound",
+      starOnly: "★ Starred", unreadOnly: "● Unread", starTip: "Starred only", unreadTip: "Unread only",
+      select: "Select", selectTip: "Enter multi-select", done: "Done",
+      clear: "Clear", clearTip: "Clear current filter (soft delete)",
+      exportCsv: "Export CSV", exportJson: "Export JSON",
+      exportCsvTip: "Export current filter as CSV", exportJsonTip: "Export current filter as JSON",
+      total: "{n} messages", pageOf: "Page {a} of {b}",
+      prev: "Prev", next: "Next", perPage: "{n} per page", jumpPh: "Page", go: "Go",
+      loading: "Loading…", emptyFilter: "No matching messages",
+      emptyAll: "No messages yet", emptyHint: "Set up SmsForwarder on your phone, or POST to /api/push to try it out",
+      loadFail: "Failed to load: {m}", retry: "Retry",
+      del: "Delete", unknownNum: "Unknown", codeLabel: "Code:", copy: "Copy", copied: "Copied",
+      more: "Show more", less: "Show less", unread: "Unread",
+      starItemTip: "Star / pin", recvTip: "Double-tap to copy", selTip: "Select",
+      numLibTip: "Built-in number directory (reference only)", areaTip: "Number location",
+      deletedOne: "Deleted", deletedN: "{n} deleted", undo: "Undo",
+      newPill: "↑ {n} new", gotNew: "{n} new message(s)", codeCopied: "Code {c} copied",
+      recvCopied: "Recipient number copied", newSms: "New message",
+      selCount: "{n} selected", selAll: "Select page", cancel: "Cancel",
+      dSource: "Source", dDevice: "Device", dRecv: "Recipient", dTime: "Time", dLabel: "Number label", dStatus: "Status",
+      notSet: "(not set)", read: "Read", starredPrefix: "★ Starred · ",
+      star: "Star & pin", unstar: "Unstar", markUnread: "Mark unread", copyAll: "Copy text",
+      call: "Call", setLabel: "Number label",
+      labelPrompt: "Label for {n} (leave empty to clear)",
+      sTheme: "Theme", sSound: "New message sound", sDnd: "Do not disturb", sDndRange: "Quiet hours",
+      to: "to", hourSuffix: "", save: "Save", saved: "Settings saved",
+      statTitle: "Statistics", statFail: "Failed to load stats", statTotal: "Total", statUnread: "Unread", statStarred: "Starred",
+      statSources: "By source", statDays: "Last 7 days",
+      autoCopyOn: "Auto-copy enabled", autoCopyOff: "Auto-copy disabled",
+      notifyOnMsg: "Background alerts enabled", notifyOffMsg: "Background alerts disabled",
+      soundOnMsg: "Sound enabled", soundOffMsg: "Sound disabled",
+      clearedN: "Cleared {n}",
+      confirmDelN: "Delete {n} selected message(s)?",
+      scopeDevice: "this device", scopeFilter: "the current filter", scopeAll: "all messages",
+      confirmClear: "Clear {scope}? All matching messages will be soft-deleted (cannot be undone).",
+      confirmClear2: "Really clear {scope}?",
+      renamePrompt: "Rename device \"{name}\"\nLeave empty to restore the default name", renameFail: "Rename failed",
+      noOthers: "No other devices to merge into",
+      mergePrompt: "Merge all messages of \"{a}\" into which device?\n{list}\nEnter number:",
+      invalidIdx: "Invalid number",
+      mergeConfirm: "Merge all messages of \"{a}\" into \"{b}\"?\nThe \"{a}\" tag will be removed.",
+      targetMissing: "Target device not found", mergeFail: "Merge failed",
+      delDevConfirm: "Delete this device tag? (all messages must be cleared first)",
+      hasMessages: "This device still has messages — delete them first", delFail: "Delete failed",
+      devCount: "({n})",
+      justNow: "just now", minAgo: "{n} min ago", hourAgo: "{n} h ago", today: "Today", yesterday: "Yesterday",
+      unnamed: "Unnamed device", unknownErr: "Operation failed"
+    }
+  };
+  function T(key, vars) {
+    var m = I18N[LANG] || I18N.zh;
+    var s = m[key];
+    if (s === undefined) s = I18N.zh[key];
+    if (s === undefined) return key;
+    if (vars) {
+      for (var k in vars) {
+        if (Object.prototype.hasOwnProperty.call(vars, k)) s = s.split("{" + k + "}").join(vars[k]);
+      }
+    }
+    return s;
+  }
+  /* 静态节点翻译（在首屏渲染前调用，避免中英文闪烁） */
+  function applyI18n() {
+    document.documentElement.lang = LANG === "zh" ? "zh-CN" : "en";
+    var each = function (sel, attr, fn) {
+      var ns = document.querySelectorAll("[" + attr + "]");
+      for (var i = 0; i < ns.length; i++) fn(ns[i], T(ns[i].getAttribute(attr)));
+    };
+    each("data-i18n", "data-i18n", function (el, v) { el.textContent = v; });
+    each("data-i18n-ph", "data-i18n-ph", function (el, v) { el.setAttribute("placeholder", v); });
+    each("data-i18n-title", "data-i18n-title", function (el, v) { el.setAttribute("title", v); });
+    each("data-i18n-aria", "data-i18n-aria", function (el, v) { el.setAttribute("aria-label", v); });
+    var lb = $("langbtn");
+    if (lb) { lb.textContent = T("langBtn"); lb.title = T("langTip"); }
+    var tb = $("themebtn");
+    if (tb) tb.setAttribute("title", T("themeTip"));
+  }
+  /* 每页条数下拉（含本地化文案） */
+  function buildPerPage() {
+    var sel = $("perpage");
+    if (!sel) return;
+    var nums = [20, 50, 100], html = "";
+    for (var i = 0; i < nums.length; i++) html += '<option value="' + nums[i] + '">' + esc(T("perPage", { n: nums[i] })) + '</option>';
+    sel.innerHTML = html;
+  }
+  /* 语言切换：写入 localStorage 后整页重载（避免半渲染状态；筛选条件不落盘，重载即回到默认视图） */
+  function initLang() {
+    var b = $("langbtn");
+    if (!b) return;
+    b.onclick = function () {
+      var next = LANG === "zh" ? "en" : "zh";
+      try { localStorage.setItem("sms_lang", next); } catch (e) {}
+      try {
+        var u = new URL(location.href);
+        u.searchParams.set("lang", next);
+        location.replace(u.toString());
+        return;
+      } catch (e) { location.reload(); }
+    };
+  }
+  applyI18n();
+  buildPerPage();
+  initLang();
   function esc(s) {
     return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
@@ -1305,35 +1583,51 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var d = new Date(String(utc).replace(" ", "T") + "Z");
     return isNaN(d.getTime()) ? null : d;
   }
+  var LOCALE = LANG === "zh" ? "zh-CN" : "en-US";
+  function pad2(s) { s = String(s); return s.length < 2 ? "0" + s : s; }
+  /* 取北京时间字段：优先 Intl（Asia/Shanghai 固定时区）；无 Intl / 无时区数据的旧环境按 UTC+8 手算 */
   function partsOf(d) {
-    var parts = new Intl.DateTimeFormat("zh-CN", {
-      timeZone: "Asia/Shanghai", year: "numeric", month: "numeric", day: "numeric",
-      hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23"
-    }).formatToParts(d);
-    var v = {};
-    for (var i = 0; i < parts.length; i++) v[parts[i].type] = parts[i].value;
-    var pad = function (s) { s = String(s); return s.length < 2 ? "0" + s : s; };
-    v.pmonth = pad(v.month); v.pday = pad(v.day);
-    v.phour = pad(v.hour); v.pminute = pad(v.minute); v.psecond = pad(v.second);
+    var v = {}, ok = false, i;
+    try {
+      var base = { timeZone: "Asia/Shanghai", year: "numeric", month: "numeric", day: "numeric",
+                   hour: "2-digit", minute: "2-digit", second: "2-digit" };
+      var parts;
+      try { parts = new Intl.DateTimeFormat(LOCALE, Object.assign({ hourCycle: "h23" }, base)).formatToParts(d); }
+      catch (e1) { parts = new Intl.DateTimeFormat(LOCALE, Object.assign({ hour12: false }, base)).formatToParts(d); }
+      for (i = 0; i < parts.length; i++) if (parts[i].type) v[parts[i].type] = parts[i].value;
+      ok = !!(v.year && v.month && v.day && v.hour !== undefined);
+    } catch (e2) { ok = false; }
+    if (!ok) {
+      var t = new Date(d.getTime() + 8 * 3600 * 1000);
+      v = { year: String(t.getUTCFullYear()), month: String(t.getUTCMonth() + 1), day: String(t.getUTCDate()),
+            hour: pad2(t.getUTCHours()), minute: pad2(t.getUTCMinutes()), second: pad2(t.getUTCSeconds()) };
+    }
+    v.pmonth = pad2(v.month); v.pday = pad2(v.day);
+    v.phour = pad2(v.hour); v.pminute = pad2(v.minute); v.psecond = pad2(v.second);
     return v;
   }
   function fmtTime(utc) {
     var d = parseUTC(utc);
     if (!d) return String(utc || "");
     var v = partsOf(d);
-    return v.year + "年" + v.pmonth + "月" + v.pday + "日 " + v.phour + ":" + v.pminute + ":" + v.psecond;
+    if (LANG === "zh") return v.year + "年" + v.pmonth + "月" + v.pday + "日 " + v.phour + ":" + v.pminute + ":" + v.psecond;
+    return MONTHS[Number(v.month) - 1] + " " + Number(v.day) + ", " + v.year + " " + v.phour + ":" + v.pminute + ":" + v.psecond;
   }
   /* 相对时间：刚刚 / N 分钟前 / N 小时前 / 更早显示短日期；悬停卡片可看完整时间 */
   function relTime(utc) {
     var d = parseUTC(utc);
     if (!d) return String(utc || "");
     var diff = (Date.now() - d.getTime()) / 1000;
-    if (diff < 60) return "刚刚";
-    if (diff < 3600) return Math.floor(diff / 60) + " 分钟前";
-    if (diff < 86400) return Math.floor(diff / 3600) + " 小时前";
+    if (diff < 60) return T("justNow");
+    if (diff < 3600) return T("minAgo", { n: Math.floor(diff / 60) });
+    if (diff < 86400) return T("hourAgo", { n: Math.floor(diff / 3600) });
     var v = partsOf(d), now = partsOf(new Date());
-    var yr = v.year === now.year ? "" : v.year + "年";
-    return yr + Number(v.pmonth) + "月" + Number(v.pday) + "日 " + v.phour + ":" + v.pminute;
+    if (LANG === "zh") {
+      var yr = v.year === now.year ? "" : v.year + "年";
+      return yr + Number(v.pmonth) + "月" + Number(v.pday) + "日 " + v.phour + ":" + v.pminute;
+    }
+    var yr2 = v.year === now.year ? "" : ", " + v.year;
+    return MONTHS[Number(v.month) - 1] + " " + Number(v.day) + yr2 + " " + v.phour + ":" + v.pminute;
   }
   /* 日期分组标签：今天 / 昨天 / M月D日（跨年带年份） */
   function dayLabel(utc) {
@@ -1342,11 +1636,15 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var v = partsOf(d), now = partsOf(new Date());
     if (v.year === now.year && v.pmonth === now.pmonth) {
       var dd = Number(v.pday), nd = Number(now.pday);
-      if (dd === nd) return "今天";
-      if (nd - dd === 1) return "昨天";
+      if (dd === nd) return T("today");
+      if (nd - dd === 1) return T("yesterday");
     }
-    var yr = v.year === now.year ? "" : v.year + "年";
-    return yr + Number(v.pmonth) + "月" + Number(v.pday) + "日";
+    if (LANG === "zh") {
+      var yr = v.year === now.year ? "" : v.year + "年";
+      return yr + Number(v.pmonth) + "月" + Number(v.pday) + "日";
+    }
+    var yr2 = v.year === now.year ? "" : ", " + v.year;
+    return MONTHS[Number(v.month) - 1] + " " + Number(v.day) + yr2;
   }
   /* 验证码提取（级联策略，借鉴 SmsForwarder 关键词集 / otp-message-extractor 防误报 / expo-sms-listener 级联）：
      ① 关键词在前+分隔码(123-456/取件码) → ② 关键词在前+数字码 → ③ 码在前(123456是您的验证码)
@@ -1432,6 +1730,19 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     "12306": "中国铁路", "96110": "反诈专线", "12321": "不良信息举报", "95598": "国家电网",
     "95188": "支付宝"
   };
+  /* 内置机构号码库英文名（与上面一一对应；界面语言为英文时使用） */
+  var NUM_LABELS_EN = {
+    "10086": "China Mobile", "10010": "China Unicom", "10000": "China Telecom", "10099": "China Broadnet",
+    "95588": "ICBC", "95533": "CCB", "95599": "ABC", "95566": "Bank of China",
+    "95555": "China Merchants Bank", "95559": "Bank of Communications", "95561": "Industrial Bank", "95528": "SPD Bank",
+    "95577": "Hua Xia Bank", "95568": "China Minsheng Bank", "95508": "Guangfa Bank", "95595": "CEB",
+    "95558": "CITIC Bank", "95580": "PSBC", "95511": "Ping An",
+    "95338": "SF Express", "95543": "STO Express", "95554": "YTO Express", "95546": "Yunda Express",
+    "95311": "ZTO Express", "95353": "Deppon", "11183": "China Post", "950616": "JD Logistics",
+    "12345": "Gov. Hotline", "12315": "Consumer Complaint", "12333": "Social Security", "12329": "Housing Fund",
+    "12306": "China Railway", "96110": "Anti-fraud Hotline", "12321": "Spam Report", "95598": "State Grid",
+    "95188": "Alipay"
+  };
   function normalizeNum(s) {
     var d = String(s || "").replace(/\D/g, "");
     if (d.length > 11 && d.indexOf("86") === 0) d = d.slice(2);
@@ -1440,7 +1751,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   function numLabel(s) {
     var d = normalizeNum(s);
     if (!d) return "";
-    return state.labels[d] || NUM_LABELS[d] || "";
+    return state.labels[d] || (LANG === "zh" ? NUM_LABELS[d] : NUM_LABELS_EN[d]) || "";
   }
   /* 归属地：仅对 11 位手机号按需查后端 /api/phone；前端按号码缓存，最多 3 并发 */
   var areaCache = {};
@@ -1484,7 +1795,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   function doCopy(text, btn) {
     var done = function () {
       var old = btn.textContent;
-      btn.textContent = "已复制";
+      btn.textContent = T("copied");
       btn.disabled = true;
       setTimeout(function () { btn.textContent = old; btn.disabled = false; }, 1500);
     };
@@ -1514,9 +1825,9 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var t = document.createElement("div");
     t.className = "toast undo";
     var span = document.createElement("span");
-    span.textContent = ids.length > 1 ? "已删除 " + ids.length + " 条" : "已删除";
+    span.textContent = ids.length > 1 ? T("deletedN", { n: ids.length }) : T("deletedOne");
     var btn = document.createElement("button");
-    btn.className = "undo-btn"; btn.type = "button"; btn.textContent = "撤销";
+    btn.className = "undo-btn"; btn.type = "button"; btn.textContent = T("undo");
     t.appendChild(span); t.appendChild(btn);
     toastRoot().appendChild(t);
     setTimeout(function () { t.classList.add("show"); }, 10);
@@ -1552,7 +1863,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   function showNewPill(n) {
     pillN += (n || 1);
     var el = $("newpill");
-    el.textContent = "↑ " + pillN + " 条新消息";
+    el.textContent = T("newPill", { n: pillN });
     el.hidden = false;
     clearTimeout(pillTimer);
     pillTimer = setTimeout(function () { el.hidden = true; pillN = 0; }, 8000);
@@ -1562,7 +1873,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var latest = fresh[0];
     var code = extractCode(latest.content);
     if (code && state.autoCopy) {
-      var fin = function () { toast("验证码 " + code + " 已复制"); };
+      var fin = function () { toast(T("codeCopied", { c: code })); };
       if (navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(code).then(fin, function () { fallbackCopy(code); fin(); });
       } else { fallbackCopy(code); fin(); }
@@ -1571,13 +1882,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       state.unread += fresh.length;
       document.title = "(" + state.unread + ") " + SITE_NAME;
       if (state.notify && !isDND() && window.Notification && Notification.permission === "granted") {
-        var body = (code ? "验证码 " + code + "  " : "") + String(latest.content || "");
+        var body = (code ? T("codeLabel") + " " + code + "  " : "") + String(latest.content || "");
         try {
-          new Notification(String(latest.sender || "新短信"), { body: body.slice(0, 140), tag: "sms-" + latest.id });
+          new Notification(String(latest.sender || T("newSms")), { body: body.slice(0, 140), tag: "sms-" + latest.id });
         } catch (e) {}
       }
     } else {
-      if (!(code && state.autoCopy)) toast("收到 " + fresh.length + " 条新消息");
+      if (!(code && state.autoCopy)) toast(T("gotNew", { n: fresh.length }));
       if (state.sound && !isDND()) beep(code ? 960 : 760);
       if (window.scrollY > 260) showNewPill(fresh.length);
     }
@@ -1608,39 +1919,39 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         el.onclick = function () { state.device = id; state.page = 1; renderTabs(res.list || []); load(); };
         return el;
       };
-      tabs.appendChild(mk("全部", 0, "(" + (res.list || []).reduce(function (s, d) { return s + d.msg_count; }, 0) + ")"));
+      tabs.appendChild(mk(T("tabAll"), 0, "(" + (res.list || []).reduce(function (s, d) { return s + d.msg_count; }, 0) + ")"));
       (res.list || []).forEach(function (d) {
-        var el = mk(d.display_name, d.id, "(" + d.msg_count + ")");
+        var el = mk(d.display_name, d.id, T("devCount", { n: d.msg_count }));
         /* 设备标签操作：✎ 重命名（设别名）、⇄ 合并到其他设备（后端 /api/devices/alias、/api/devices/merge） */
         if (d.id) {
           var ed = document.createElement("span");
-          ed.className = "tabop"; ed.textContent = "✎"; ed.title = "重命名设备";
+          ed.className = "tabop"; ed.textContent = "✎"; ed.title = T("tabRename");
           ed.onclick = function (ev) {
             ev.stopPropagation();
-            var nm = prompt("重命名设备「" + d.display_name + "」\n留空则恢复默认名", d.alias || d.display_name);
+            var nm = prompt(T("renamePrompt", { name: d.display_name }), d.alias || d.display_name);
             if (nm === null) return;
             fetch("/api/devices/alias", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: d.id, alias: String(nm).trim() }) })
               .then(function (r) { return r.json(); })
-              .then(function (res2) { if (!res2.success) { alert(res2.error || "重命名失败"); return; } refreshAll(); });
+              .then(function (res2) { if (!res2.success) { alert(res2.error || T("renameFail")); return; } refreshAll(); });
           };
           el.appendChild(ed);
           var mg = document.createElement("span");
-          mg.className = "tabop"; mg.textContent = "⇄"; mg.title = "合并到其他设备";
+          mg.className = "tabop"; mg.textContent = "⇄"; mg.title = T("tabMerge");
           mg.onclick = function (ev) {
             ev.stopPropagation();
             var others = (res.list || []).filter(function (x) { return x.id && x.id !== d.id; });
-            if (!others.length) { alert("没有可合并的其他设备"); return; }
-            var lines = others.map(function (x, i) { return (i + 1) + ". " + x.display_name + "（" + x.msg_count + " 条）"; });
-            var pick = prompt("把「" + d.display_name + "」的全部消息合并到哪台设备？\n" + lines.join("\n") + "\n输入序号：");
+            if (!others.length) { alert(T("noOthers")); return; }
+            var lines = others.map(function (x, i) { return (i + 1) + ". " + x.display_name + " " + T("devCount", { n: x.msg_count }); });
+            var pick = prompt(T("mergePrompt", { a: d.display_name, list: lines.join("\n") }));
             if (pick === null) return;
             var idx = parseInt(pick, 10);
-            if (!(idx >= 1 && idx <= others.length)) { alert("序号无效"); return; }
+            if (!(idx >= 1 && idx <= others.length)) { alert(T("invalidIdx")); return; }
             var target = others[idx - 1];
-            if (!confirm("确认把「" + d.display_name + "」的全部消息合并到「" + target.display_name + "」？\n合并后本标签将被删除。")) return;
+            if (!confirm(T("mergeConfirm", { a: d.display_name, b: target.display_name }))) return;
             fetch("/api/devices/merge", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ from: d.id, to: target.id }) })
               .then(function (r) { return r.json(); })
               .then(function (res2) {
-                if (!res2.success) { alert(res2.error === "device not found" ? "目标设备不存在" : (res2.error || "合并失败")); return; }
+                if (!res2.success) { alert(res2.error === "device not found" ? T("targetMissing") : (res2.error || T("mergeFail"))); return; }
                 if (state.device === d.id) { state.device = target.id; }
                 refreshAll();
               });
@@ -1652,15 +1963,15 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
           var x = document.createElement("span");
           x.className = "tabx";
           x.textContent = "×";
-          x.title = "删除该设备标签";
+          x.title = T("tabDel");
           x.onclick = function (ev) {
             ev.stopPropagation();
-            if (!confirm("删除该设备标签？（须先清空其全部短信）")) return;
+            if (!confirm(T("delDevConfirm"))) return;
             fetch("/api/devices/" + d.id, { method: "DELETE" })
               .then(function (r) { return r.json(); })
               .then(function (res2) {
                 if (!res2.success) {
-                  alert(res2.error === "has messages" ? "该设备仍有短信，请先删除全部短信" : (res2.error || "删除失败"));
+                  alert(res2.error === "has messages" ? T("hasMessages") : (res2.error || T("delFail")));
                   return;
                 }
                 if (state.device === d.id) { state.device = 0; state.page = 1; }
@@ -1675,15 +1986,15 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   }
   function renderTabs(list) { loadDevices(); }
   function updateMeta(res) {
-    $("stat").textContent = "共 " + res.total + " 条";
-    $("pageinfo").textContent = res.pages > 1 ? "第 " + res.page + " / " + res.pages + " 页" : "";
+    $("stat").textContent = T("total", { n: res.total });
+    $("pageinfo").textContent = res.pages > 1 ? T("pageOf", { a: res.page, b: res.pages }) : "";
     $("pagenum").textContent = res.pages > 1 ? res.page + " / " + res.pages : "";
     $("prev").disabled = res.page <= 1;
     $("next").disabled = res.page >= res.pages;
   }
   function updateSelBar() {
     var n = Object.keys(state.selected).length;
-    if ($("selcount")) $("selcount").textContent = "已选 " + n + " 条";
+    if ($("selcount")) $("selcount").textContent = T("selCount", { n: n });
     if ($("seldel")) $("seldel").disabled = n === 0;
   }
   function srcClass(s) {
@@ -1701,23 +2012,23 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var needFold = String(m.content || "").length > 220;
     var lbl = isSms ? numLabel(m.sender) : "";
     var snum = isSms ? normalizeNum(m.sender) : "";
-    var undot = m.read_at ? "" : '<span class="undot" title="未读"></span>';
+    var undot = m.read_at ? "" : '<span class="undot" title="' + esc(T("unread")) + '"></span>';
     var senderHtml = isSms
-      ? '<span class="sender">' + esc(m.sender || "未知号码") + '</span>' +
-        (lbl ? '<span class="nlabel" title="常见号码库（仅供参考）">' + esc(lbl) + '</span>' : '') +
+      ? '<span class="sender">' + esc(m.sender || T("unknownNum")) + '</span>' +
+        (lbl ? '<span class="nlabel" title="' + esc(T("numLibTip")) + '">' + esc(lbl) + '</span>' : '') +
         (!lbl && /^1[3-9]\d{9}$/.test(snum) ? '<span class="area" data-num="' + snum + '"></span>' : '') + undot
-      : '<span class="srctag ' + srcClass(m.source) + '">' + esc(m.source || "通知") + '</span><span class="sender">' + esc(m.sender || m.device_name || "通知") + '</span>' + undot;
+      : '<span class="srctag ' + srcClass(m.source) + '">' + esc(m.source || T("srcNotify")) + '</span><span class="sender">' + esc(m.sender || m.device_name || T("srcNotify")) + '</span>' + undot;
     return '<div class="card' + (isFresh ? " flash" : "") + '" data-id="' + m.id + '" data-day="' + esc(dayLabel(m.received_at)) + '">' +
-      '<label class="selwrap" title="选择"><input type="checkbox" class="selbox" data-id="' + m.id + '"></label>' +
+      '<label class="selwrap" title="' + esc(T("selTip")) + '"><input type="checkbox" class="selbox" data-id="' + m.id + '"></label>' +
       '<div class="row1">' + senderHtml +
-        '<button class="star' + (m.starred ? " on" : "") + '" data-id="' + m.id + '" title="收藏/置顶">' + (m.starred ? "★" : "☆") + '</button>' +
-        '<button class="del" data-id="' + m.id + '">删除</button>' +
+        '<button class="star' + (m.starred ? " on" : "") + '" data-id="' + m.id + '" title="' + esc(T("starItemTip")) + '">' + (m.starred ? "★" : "☆") + '</button>' +
+        '<button class="del" data-id="' + m.id + '">' + esc(T("del")) + '</button>' +
       '</div>' +
-      (code ? '<div class="code-line">验证码：<b>' + esc(code) + '</b><button class="copy" data-code="' + esc(code) + '">复制</button></div>' : '') +
+      (code ? '<div class="code-line">' + esc(T("codeLabel")) + ' <b>' + esc(code) + '</b><button class="copy" data-code="' + esc(code) + '">' + esc(T("copy")) + '</button></div>' : '') +
       '<div class="line"><span class="content' + (needFold ? " fold" : "") + '">' + linkify(highlight(esc(m.content), state.q)) + '</span>' +
-        (needFold ? '<button class="more" type="button">展开全文</button>' : '') + '</div>' +
+        (needFold ? '<button class="more" type="button">' + esc(T("more")) + '</button>' : '') + '</div>' +
       '<div class="line foot-line"><span class="time-line" title="' + esc(fmtTime(m.received_at)) + '">' + esc(relTime(m.received_at)) + '</span>' +
-        (isSms && recv ? '<span class="recv" title="双击复制收件号">' + esc(recv) + '</span>' : '') +
+        (isSms && recv ? '<span class="recv" title="' + esc(T("recvTip")) + '">' + esc(recv) + '</span>' : '') +
       '</div>' +
     '</div>';
   }
@@ -1737,7 +2048,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     updateMeta(res);
     if (!list.length) {
       var hasFilter = state.device || state.src || state.range || state.q;
-      $("list").innerHTML = '<div class="empty">' + (hasFilter ? "没有符合条件的消息" : "还没有收到消息<br><small>在手机端配置 SmsForwarder，或调用 /api/push 推送一条试试</small>") + '</div>';
+      $("list").innerHTML = '<div class="empty">' + (hasFilter ? esc(T("emptyFilter")) : esc(T("emptyAll")) + '<br><small>' + esc(T("emptyHint")) + '</small>') + '</div>';
       return;
     }
     var html = "", lastDay = "";
@@ -1790,7 +2101,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     return true;
   }
   function showRetry(e) {
-    $("list").innerHTML = '<div class="empty">加载失败：' + esc(e && e.message) + '<br><button class="tbtn" id="retrybtn" type="button">重试</button></div>';
+    $("list").innerHTML = '<div class="empty">' + esc(T("loadFail", { m: (e && e.message) || "" })) + '<br><button class="tbtn" id="retrybtn" type="button">' + esc(T("retry")) + '</button></div>';
     var b = $("retrybtn");
     if (b) b.onclick = function () { load(); };
   }
@@ -1853,24 +2164,24 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var code = extractCode(m.content);
     var snum = normalizeNum(m.sender);
     var wasRead = !!m.read_at;
-    var html = '<h3>' + esc(isSms ? (m.sender || "未知号码") : (m.sender || m.device_name || "通知")) + '</h3>' +
+    var html = '<h3>' + esc(isSms ? (m.sender || T("unknownNum")) : (m.sender || m.device_name || T("srcNotify"))) + '</h3>' +
       '<div class="dl">' +
-        drow("来源", isSms ? "短信" : (m.source || "通知")) +
-        drow("设备标签", m.device_name || "") +
-        (isSms ? drow("收件号", m.sim_number || m.sim || "") : "") +
-        drow("时间", fmtTime(m.received_at)) +
-        drow("号码标签", numLabel(m.sender) || "（未设置）") +
-        drow("状态", (m.starred ? "★ 收藏 · " : "") + (wasRead ? "已读" : "未读")) +
+        drow(T("dSource"), isSms ? T("srcSms") : (m.source || T("srcNotify"))) +
+        drow(T("dDevice"), m.device_name || "") +
+        (isSms ? drow(T("dRecv"), m.sim_number || m.sim || "") : "") +
+        drow(T("dTime"), fmtTime(m.received_at)) +
+        drow(T("dLabel"), numLabel(m.sender) || T("notSet")) +
+        drow(T("dStatus"), (m.starred ? T("starredPrefix") : "") + (wasRead ? T("read") : T("unread"))) +
       '</div>' +
-      (code ? '<div class="code-line">验证码：<b>' + esc(code) + '</b><button class="copy" data-code="' + esc(code) + '">复制</button></div>' : '') +
+      (code ? '<div class="code-line">' + esc(T("codeLabel")) + ' <b>' + esc(code) + '</b><button class="copy" data-code="' + esc(code) + '">' + esc(T("copy")) + '</button></div>' : '') +
       '<div class="detail-content">' + linkify(esc(m.content)) + '</div>' +
       '<div class="detail-actions">' +
-        '<button class="tbtn" id="dstar">' + (m.starred ? "取消收藏" : "收藏置顶") + '</button>' +
-        '<button class="tbtn" id="dread">标为未读</button>' +
-        '<button class="tbtn" id="dcopy">复制全文</button>' +
-        (isSms && snum ? '<a class="tbtn" href="tel:' + esc(snum) + '">拨号</a>' : '') +
-        (isSms && snum ? '<button class="tbtn" id="dlabel">号码标签</button>' : '') +
-        '<button class="tbtn" id="ddel">删除</button>' +
+        '<button class="tbtn" id="dstar">' + esc(m.starred ? T("unstar") : T("star")) + '</button>' +
+        '<button class="tbtn" id="dread">' + esc(T("markUnread")) + '</button>' +
+        '<button class="tbtn" id="dcopy">' + esc(T("copyAll")) + '</button>' +
+        (isSms && snum ? '<a class="tbtn" href="tel:' + esc(snum) + '">' + esc(T("call")) + '</a>' : '') +
+        (isSms && snum ? '<button class="tbtn" id="dlabel">' + esc(T("setLabel")) + '</button>' : '') +
+        '<button class="tbtn" id="ddel">' + esc(T("del")) + '</button>' +
       '</div>';
     openModal(html);
     if (!wasRead) {
@@ -1886,7 +2197,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var lb = $("dlabel");
     if (lb) lb.onclick = function () {
       var cur = state.labels[snum] || "";
-      var nm = prompt("给 " + snum + " 设置标签（留空清除）", cur);
+      var nm = prompt(T("labelPrompt", { n: snum }), cur);
       if (nm === null) return;
       saveLabel(snum, String(nm).trim());
       closeModal(); load();
@@ -1907,14 +2218,14 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   }
   function openSettings() {
     var d = getDND();
-    var html = '<h3>设置</h3>' +
+    var html = '<h3>' + esc(T("settings")) + '</h3>' +
       '<div class="dl">' +
-        '<div class="drow"><span>主题</span><span><button class="tbtn" id="thauto">自动</button> <button class="tbtn" id="thlight">浅色</button> <button class="tbtn" id="thdark">深色</button></span></div>' +
-        '<div class="drow"><span>新消息提示音</span><span><input type="checkbox" id="stsound"' + (state.sound ? " checked" : "") + '></span></div>' +
-        '<div class="drow"><span>免打扰</span><span><input type="checkbox" id="stdnd"' + (d.on ? " checked" : "") + '></span></div>' +
-        '<div class="drow"><span>免打扰时段</span><span><input type="number" id="dnds" min="0" max="23" value="' + (parseInt(d.start, 10) || 0) + '" style="width:56px"> 至 <input type="number" id="dnde" min="0" max="23" value="' + (parseInt(d.end, 10) || 0) + '" style="width:56px"> 点</span></div>' +
+        '<div class="drow"><span>' + esc(T("sTheme")) + '</span><span><button class="tbtn" id="thauto">' + esc(T("themeAuto")) + '</button> <button class="tbtn" id="thlight">' + esc(T("themeLight")) + '</button> <button class="tbtn" id="thdark">' + esc(T("themeDark")) + '</button></span></div>' +
+        '<div class="drow"><span>' + esc(T("sSound")) + '</span><span><input type="checkbox" id="stsound"' + (state.sound ? " checked" : "") + '></span></div>' +
+        '<div class="drow"><span>' + esc(T("sDnd")) + '</span><span><input type="checkbox" id="stdnd"' + (d.on ? " checked" : "") + '></span></div>' +
+        '<div class="drow"><span>' + esc(T("sDndRange")) + '</span><span><input type="number" id="dnds" min="0" max="23" value="' + (parseInt(d.start, 10) || 0) + '" style="width:56px"> ' + esc(T("to")) + ' <input type="number" id="dnde" min="0" max="23" value="' + (parseInt(d.end, 10) || 0) + '" style="width:56px"> ' + esc(T("hourSuffix")) + '</span></div>' +
       '</div>' +
-      '<div class="detail-actions"><button class="tbtn" id="dsave">保存</button></div>';
+      '<div class="detail-actions"><button class="tbtn" id="dsave">' + esc(T("save")) + '</button></div>';
     openModal(html);
     $("thauto").onclick = function () { try { localStorage.setItem("sms_theme", "auto"); } catch (e) {} applyTheme("auto"); };
     $("thlight").onclick = function () { try { localStorage.setItem("sms_theme", "light"); } catch (e) {} applyTheme("light"); };
@@ -1927,30 +2238,30 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       state.sound = $("stsound").checked;
       try { localStorage.setItem("sms_sound", state.sound ? "1" : "0"); } catch (e) {}
       if ($("soundon")) $("soundon").checked = state.sound;
-      closeModal(); toast("设置已保存");
+      closeModal(); toast(T("saved"));
     };
   }
   function openStats() {
-    openModal('<h3>统计</h3><div id="statbody">加载中…</div>');
+    openModal('<h3>' + esc(T("statTitle")) + '</h3><div id="statbody">' + esc(T("loading")) + '</div>');
     fetch("/api/stats").then(function (r) { return r.json(); }).then(function (d) {
-      if (!d || !d.success) { $("statbody").textContent = "统计加载失败"; return; }
+      if (!d || !d.success) { $("statbody").textContent = T("statFail"); return; }
       var maxS = 1, maxD = 1;
       (d.sources || []).forEach(function (x) { if (x.n > maxS) maxS = x.n; });
       (d.days || []).forEach(function (x) { if (x.n > maxD) maxD = x.n; });
       var html = '<div class="statgrid">' +
-        '<div class="statbox"><b>' + d.total + '</b><span>总消息</span></div>' +
-        '<div class="statbox"><b>' + d.unread + '</b><span>未读</span></div>' +
-        '<div class="statbox"><b>' + d.starred + '</b><span>收藏</span></div></div>';
-      html += '<h3 style="font-size:13px;margin:6px 0">来源分布</h3>';
+        '<div class="statbox"><b>' + d.total + '</b><span>' + esc(T("statTotal")) + '</span></div>' +
+        '<div class="statbox"><b>' + d.unread + '</b><span>' + esc(T("statUnread")) + '</span></div>' +
+        '<div class="statbox"><b>' + d.starred + '</b><span>' + esc(T("statStarred")) + '</span></div></div>';
+      html += '<h3 style="font-size:13px;margin:6px 0">' + esc(T("statSources")) + '</h3>';
       (d.sources || []).forEach(function (x) {
-        html += '<div class="barrow"><span class="bl">' + esc(x.source) + '</span><span class="bt"><span class="bf" style="width:' + Math.round(x.n / maxS * 100) + '%"></span></span><span class="bn">' + x.n + '</span></div>';
+        html += '<div class="barrow"><span class="bl">' + esc(srcLabel(x.source) || x.source) + '</span><span class="bt"><span class="bf" style="width:' + Math.round(x.n / maxS * 100) + '%"></span></span><span class="bn">' + x.n + '</span></div>';
       });
-      html += '<h3 style="font-size:13px;margin:12px 0 6px">近 7 天</h3>';
+      html += '<h3 style="font-size:13px;margin:12px 0 6px">' + esc(T("statDays")) + '</h3>';
       (d.days || []).forEach(function (x) {
         html += '<div class="barrow"><span class="bl">' + esc(String(x.d || "").slice(5)) + '</span><span class="bt"><span class="bf" style="width:' + Math.round(x.n / maxD * 100) + '%"></span></span><span class="bn">' + x.n + '</span></div>';
       });
       $("statbody").innerHTML = html;
-    }).catch(function () { var b = $("statbody"); if (b) b.textContent = "统计加载失败"; });
+    }).catch(function () { var b = $("statbody"); if (b) b.textContent = T("statFail"); });
   }
   function registerSW() {
     try { if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(function () {}); } catch (e) {}
@@ -1994,14 +2305,14 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   }
   /* 来源下拉：从 /api/sources 动态聚合所有来源（含自定义 cron/alert 等），替代原先写死的三项 */
   function srcLabel(s) {
-    if (s === "sms") return "短信";
-    if (s === "notify") return "通知";
+    if (s === "sms") return T("srcSms");
+    if (s === "notify") return T("srcNotify");
     return s;
   }
   function loadSources() {
     return fetch("/api/sources").then(function (r) { return r.json(); }).then(function (res) {
       var sel = $("src"), cur = state.src || "", list = (res && res.list) || [], seen = {};
-      var html = '<option value="">全部来源</option>';
+      var html = '<option value="">' + esc(T("allSources")) + '</option>';
       list.forEach(function (it) {
         seen[it.source] = true;
         html += '<option value="' + esc(it.source) + '">' + esc(srcLabel(it.source)) + " (" + it.count + ")</option>";
@@ -2062,24 +2373,34 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   window.addEventListener("scroll", function () {
     if (window.scrollY < 260) { var el = $("newpill"); if (el && !el.hidden) { el.hidden = true; pillN = 0; } }
   });
-  /* 推送式自动刷新：长轮询 /api/wait；第 1 页收到新消息即刷新，其他页只弹胶囊避免打断阅读 */
-  function pollLoop() {
-    if (state.q) {
-      setTimeout(function () { load().then(pollLoop); }, 5000);
-      return;
-    }
-    var p = "last_id=" + (state.lastId || 0);
-    if (state.device) p += "&device_id=" + state.device;
-    fetch("/api/wait?" + p)
-      .then(function (r) { return r.json(); })
-      .then(function (d) {
-        if (d && d.changed) {
-          if (d.id) state.lastId = Math.max(state.lastId, d.id);
-          if (state.page === 1) { load(true); } else { showNewPill(); }
-        }
-      })
-      .catch(function () {})
-      .finally(pollLoop);
+  /* 推送式自动刷新：长轮询 /api/wait；第 1 页收到新消息即刷新，其他页只弹胶囊避免打断阅读。
+     失败（平台函数超时 / 断网）时指数退避，避免在 Netlify 等 10s 函数上限的平台形成忙循环。 */
+  var pollErr = 0;
+  function pollLoop(delay) {
+    setTimeout(function () {
+      if (state.q) {
+        load().then(function () { pollLoop(5000); }, function () { pollLoop(5000); });
+        return;
+      }
+      var p = "last_id=" + (state.lastId || 0);
+      if (state.device) p += "&device_id=" + state.device;
+      var t0 = Date.now();
+      fetch("/api/wait?" + p)
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          pollErr = 0;
+          if (d && d.changed) {
+            if (d.id) state.lastId = Math.max(state.lastId, d.id);
+            if (state.page === 1) { load(true); } else { showNewPill(); }
+          }
+        })
+        .catch(function () { pollErr = Math.min(pollErr + 1, 5); })
+        .then(function () {
+          if (pollErr) { pollLoop(Math.min(30000, 1000 * Math.pow(2, pollErr))); return; }
+          /* 平台若不支持长轮询会立刻返回，这里兜底最小间隔，避免高频空转 */
+          pollLoop(Math.max(0, 1500 - (Date.now() - t0)));
+        });
+    }, delay || 0);
   }
   pollLoop();
   /* 开关初始化与记忆（localStorage） */
@@ -2090,7 +2411,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   acb.onchange = function () {
     state.autoCopy = acb.checked;
     try { localStorage.setItem("sms_autocopy", state.autoCopy ? "1" : "0"); } catch (e) {}
-    toast(state.autoCopy ? "已开启验证码自动复制" : "已关闭验证码自动复制");
+    toast(state.autoCopy ? T("autoCopyOn") : T("autoCopyOff"));
   };
   nb.onchange = function () {
     state.notify = nb.checked;
@@ -2098,17 +2419,22 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (state.notify && window.Notification && Notification.permission === "default") {
       Notification.requestPermission();
     }
-    toast(state.notify ? "已开启后台通知" : "已关闭后台通知");
+    toast(state.notify ? T("notifyOnMsg") : T("notifyOffMsg"));
   };
   sb.onchange = function () {
     state.sound = sb.checked;
     try { localStorage.setItem("sms_sound", state.sound ? "1" : "0"); } catch (e) {}
     if (state.sound) beep();
-    toast(state.sound ? "已开启新消息提示音" : "已关闭新消息提示音");
+    toast(state.sound ? T("soundOnMsg") : T("soundOffMsg"));
   };
-  /* 回到页面即清零未读数、恢复标题 */
+  /* 回到页面即清零未读数、恢复标题，并立刻补拉一次（移动端切后台常被冻结，长轮询可能已断） */
   document.addEventListener("visibilitychange", function () {
-    if (!document.hidden) { state.unread = 0; document.title = SITE_NAME; }
+    if (!document.hidden) {
+      state.unread = 0;
+      document.title = SITE_NAME;
+      pollErr = 0;
+      load(true);
+    }
   });
   $("list").addEventListener("click", function (ev) {
     var starBtn = ev.target.closest ? ev.target.closest(".star") : null;
@@ -2127,7 +2453,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (moreBtn) {
       var card = moreBtn.closest(".card");
       var c = card ? card.querySelector(".content") : null;
-      if (c) { var folded = c.classList.toggle("fold"); moreBtn.textContent = folded ? "展开全文" : "收起"; }
+      if (c) { var folded = c.classList.toggle("fold"); moreBtn.textContent = folded ? T("more") : T("less"); }
       return;
     }
     var copyBtn = ev.target.closest ? ev.target.closest(".copy") : null;
@@ -2144,7 +2470,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var el = ev.target.closest ? ev.target.closest(".recv") : null;
     if (!el) return;
     var text = el.textContent;
-    var fin = function () { toast("收件号已复制"); };
+    var fin = function () { toast(T("recvCopied")); };
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).then(fin, function () { fallbackCopy(text); fin(); });
     } else { fallbackCopy(text); fin(); }
@@ -2154,7 +2480,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     state.selectMode = !!on;
     document.body.classList.toggle("selecting", state.selectMode);
     $("selbar").hidden = !state.selectMode;
-    $("selectbtn").textContent = state.selectMode ? "完成" : "选择";
+    $("selectbtn").textContent = state.selectMode ? T("done") : T("select");
     if (!state.selectMode) state.selected = {};
     syncSelBoxes();
     updateSelBar();
@@ -2175,7 +2501,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   $("seldel").onclick = function () {
     var ids = Object.keys(state.selected).map(function (k) { return parseInt(k, 10); }).filter(function (n) { return n > 0; });
     if (!ids.length) return;
-    if (!confirm("确认删除选中的 " + ids.length + " 条？")) return;
+    if (!confirm(T("confirmDelN", { n: ids.length }))) return;
     fetch("/api/messages/remove", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: ids }) })
       .then(function (r) { return r.json(); })
       .then(function (d) { if (d && d.success) { setSelectMode(false); undoToast(ids); load(); } });
@@ -2188,12 +2514,12 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     updateSelBar();
   });
   $("clearbtn").onclick = function () {
-    var scope = state.device ? "当前设备" : (state.src || state.range || state.q ? "当前筛选结果" : "全部消息");
-    if (!confirm("确认清空" + scope + "？将软删除匹配的所有消息（此操作不可撤销）。")) return;
-    if (!confirm("再次确认：真的要清空" + scope + "吗？")) return;
+    var scope = state.device ? T("scopeDevice") : (state.src || state.range || state.q ? T("scopeFilter") : T("scopeAll"));
+    if (!confirm(T("confirmClear", { scope: scope }))) return;
+    if (!confirm(T("confirmClear2", { scope: scope }))) return;
     fetch("/api/messages/clear", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ device_id: state.device, source: state.src, range: state.range, q: state.q }) })
       .then(function (r) { return r.json(); })
-      .then(function (d) { if (d && d.success) { toast("已清空 " + d.removed + " 条"); state.selected = {}; load(); } });
+      .then(function (d) { if (d && d.success) { toast(T("clearedN", { n: d.removed })); state.selected = {}; load(); } });
   };
   /* 主题三态：auto → light → dark */
   var THEMES = ["auto", "light", "dark"];
@@ -2201,7 +2527,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   function applyTheme(t) {
     if (t === "auto") document.documentElement.removeAttribute("data-theme");
     else document.documentElement.setAttribute("data-theme", t);
-    $("themebtn").textContent = t === "auto" ? "自动" : (t === "light" ? "浅色" : "深色");
+    $("themebtn").textContent = t === "auto" ? T("themeAuto") : (t === "light" ? T("themeLight") : T("themeDark"));
   }
   (function initTheme() {
     var t = currentTheme(); if (THEMES.indexOf(t) === -1) t = "auto";
@@ -2240,7 +2566,9 @@ const LOGIN_HTML = String.raw`<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="format-detection" content="telephone=no">
 <link rel="icon" href="__SITE_ICON__">
 <title>__SITE_NAME__ - 登录</title>
 <style>
@@ -2251,30 +2579,68 @@ const LOGIN_HTML = String.raw`<!DOCTYPE html>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font: 14px/1.6 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
          background: var(--bg); color: var(--text); display: flex; align-items: center;
-         justify-content: center; min-height: 100vh; }
+         justify-content: center; min-height: 100vh; min-height: 100dvh;
+         padding: calc(16px + env(safe-area-inset-top, 0px)) 16px calc(16px + env(safe-area-inset-bottom, 0px));
+         -webkit-text-size-adjust: 100%; -webkit-tap-highlight-color: transparent; }
   .box { background: var(--card); border: 1px solid var(--border); border-radius: 12px;
-         padding: 28px 24px; width: 300px; text-align: center; }
-  h1 { font-size: 17px; margin-bottom: 16px; }
-  input { width: 100%; padding: 9px 12px; border: 1px solid var(--input-border); border-radius: 8px;
-          font-size: 14px; margin-bottom: 10px; background: var(--card); color: var(--text); }
-  button { width: 100%; padding: 9px 0; border: none; border-radius: 8px; background: #15803d;
-           color: #fff; font-size: 14px; cursor: pointer; }
-  button:hover { background: #116632; }
+         padding: 28px 24px; width: 100%; max-width: 320px; text-align: center; position: relative; }
+  h1 { font-size: 17px; margin-bottom: 16px; word-break: break-word; }
+  input { width: 100%; padding: 11px 12px; border: 1px solid var(--input-border); border-radius: 8px;
+          font-size: 16px; margin-bottom: 10px; background: var(--card); color: var(--text); }
+  button#go { width: 100%; padding: 11px 0; border: none; border-radius: 8px; background: #15803d;
+           color: #fff; font-size: 15px; cursor: pointer; touch-action: manipulation; }
+  button#go:hover { background: #116632; }
+  button#go:disabled { opacity: .6; }
   .err { color: #b91c1c; font-size: 12px; min-height: 18px; margin-top: 8px; }
-  .foot { color: var(--faint); font-size: 12px; margin-top: 14px; }
-  .foot a { color: var(--faint); }
+  .langbtn { position: absolute; top: 8px; right: 10px; border: 1px solid var(--border); background: none;
+             color: var(--muted, #6b7280); border-radius: 6px; padding: 3px 8px; font-size: 11px; cursor: pointer; }
+  .foot { color: var(--faint, #9aa3ab); font-size: 12px; margin-top: 14px; }
+  .foot a { color: var(--faint, #9aa3ab); }
 </style>
 </head>
 <body>
 <div class="box">
+  <button class="langbtn" id="langbtn" type="button">EN</button>
   <h1>__SITE_NAME__</h1>
-  <input type="password" id="pw" placeholder="管理密码" autofocus>
-  <button id="go">登 录</button>
+  <input type="password" id="pw" data-i18n-ph="loginPw" placeholder="管理密码" autofocus autocomplete="current-password">
+  <button id="go" data-i18n="loginBtn">登 录</button>
   <div class="err" id="err"></div>
   <div class="foot">© 2026 <a href="https://cbm.im/" target="_blank" rel="noopener noreferrer">左立方</a> · <a href="https://github.com/ShenDoyle/SMSToWeb" target="_blank" rel="noopener noreferrer">SMSToWeb</a></div>
 </div>
 <script>
 (function () {
+  /* 登录页中英双语：语言探测与主页面一致（?lang > localStorage > 浏览器语言） */
+  var LANG = (function () {
+    var v = "";
+    try { v = String(new URLSearchParams(location.search).get("lang") || "").toLowerCase(); } catch (e) {}
+    if (v !== "zh" && v !== "en") { try { v = String(localStorage.getItem("sms_lang") || "").toLowerCase(); } catch (e) { v = ""; } }
+    if (v !== "zh" && v !== "en") {
+      var nav = String(navigator.language || navigator.userLanguage || "").toLowerCase();
+      v = nav.indexOf("zh") === 0 ? "zh" : (nav ? "en" : "zh");
+    }
+    try { localStorage.setItem("sms_lang", v); } catch (e) {}
+    return v;
+  })();
+  var D = {
+    zh: { loginPw: "管理密码", loginBtn: "登 录", wrongPw: "密码错误",
+          tooMany: "尝试次数过多，请 10 分钟后再试", loginFail: "登录失败", netErr: "网络错误",
+          title: " - 登录", btnLang: "EN", tipLang: "Switch to English" },
+    en: { loginPw: "Admin password", loginBtn: "Sign in", wrongPw: "Wrong password",
+          tooMany: "Too many attempts. Try again in 10 minutes.", loginFail: "Sign-in failed", netErr: "Network error",
+          title: " - Sign in", btnLang: "中文", tipLang: "切换到中文" }
+  };
+  function T(k) { return (D[LANG] && D[LANG][k]) || D.zh[k] || k; }
+  function apply() {
+    document.documentElement.lang = LANG === "zh" ? "zh-CN" : "en";
+    document.title = __SITE_NAME_JSON__ + T("title");
+    var ns = document.querySelectorAll("[data-i18n]");
+    for (var i = 0; i < ns.length; i++) ns[i].textContent = T(ns[i].getAttribute("data-i18n"));
+    var ps = document.querySelectorAll("[data-i18n-ph]");
+    for (var j = 0; j < ps.length; j++) ps[j].setAttribute("placeholder", T(ps[j].getAttribute("data-i18n-ph")));
+    var lb = document.getElementById("langbtn");
+    if (lb) { lb.textContent = T("btnLang"); lb.title = T("tipLang"); }
+  }
+  apply();
   /* 图标回退：SITE_ICON 设置了但加载失败时，自动换回默认图标 */
   (function () {
     var l = document.querySelector('link[rel="icon"]'); if (!l) return;
@@ -2284,21 +2650,38 @@ const LOGIN_HTML = String.raw`<!DOCTYPE html>
     img.onerror = function () { l.href = def; };
     img.src = l.getAttribute("href");
   })();
+  (function () {
+    var b = document.getElementById("langbtn");
+    if (b) b.onclick = function () {
+      var next = LANG === "zh" ? "en" : "zh";
+      try { localStorage.setItem("sms_lang", next); } catch (e) {}
+      try {
+        var u = new URL(location.href);
+        u.searchParams.set("lang", next);
+        location.replace(u.toString());
+      } catch (e) { location.reload(); }
+    };
+  })();
   var pw = document.getElementById("pw");
   var err = document.getElementById("err");
+  var go = document.getElementById("go");
+  var busy = false;
   function tryLogin() {
+    if (busy) return;
+    busy = true; go.disabled = true; err.textContent = "";
     fetch("/api/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ password: pw.value })
     }).then(function (r) { return r.json(); }).then(function (d) {
+      busy = false; go.disabled = false;
       if (d && d.success) { location.reload(); return; }
-      err.textContent = d && d.error === "wrong password" ? "密码错误"
-        : d && d.error === "too many attempts" ? "尝试次数过多，请 10 分钟后再试"
-        : "登录失败";
-    }).catch(function () { err.textContent = "网络错误"; });
+      err.textContent = d && d.error === "wrong password" ? T("wrongPw")
+        : d && d.error === "too many attempts" ? T("tooMany")
+        : T("loginFail");
+    }).catch(function () { busy = false; go.disabled = false; err.textContent = T("netErr"); });
   }
-  document.getElementById("go").onclick = tryLogin;
+  go.onclick = tryLogin;
   pw.addEventListener("keydown", function (e) { if (e.key === "Enter") tryLogin(); });
 })();
 </script>
