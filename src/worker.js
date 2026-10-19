@@ -818,6 +818,53 @@ async function handleMergeDevices(request, env) {
   return json({ success: true, moved: moved.meta ? moved.meta.changes : 0 });
 }
 
+/* ---------------- 号码归属地（免费、无 key） ----------------
+ * 仅对 11 位手机号查询；默认走 360 公开接口（无 key），结果内存缓存 24h。
+ * 外部接口失败静默降级（不显示归属地，不影响页面）。
+ * 关闭方式：PHONE_AREA_ENABLED=false；自定义源：PHONE_AREA_API（URL 模板，用 {number} 占位）。 */
+const AREA_CACHE = new Map();
+const AREA_TTL = 24 * 3600 * 1000;
+const AREA_DEFAULT_API = "https://cx.shouji.360.cn/phonearea.php?number={number}";
+
+async function handlePhoneArea(url, env) {
+  const num = String(url.searchParams.get("number") || "").replace(/\D/g, "");
+  if (!/^1[3-9]\d{9}$/.test(num)) return json({ success: true, found: false });
+  const flag = String(env.PHONE_AREA_ENABLED || "true").trim().toLowerCase();
+  if (flag === "false" || flag === "0" || flag === "off") return json({ success: true, found: false, disabled: true });
+
+  const cached = AREA_CACHE.get(num);
+  if (cached && Date.now() - cached.t < AREA_TTL) return json(Object.assign({ success: true }, cached.v));
+
+  let out = { found: false };
+  try {
+    const tpl = String(env.PHONE_AREA_API || "").trim() || AREA_DEFAULT_API;
+    const target = tpl.indexOf("{number}") !== -1 ? tpl.replace("{number}", encodeURIComponent(num)) : tpl + encodeURIComponent(num);
+    const opts = {};
+    if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") opts.signal = AbortSignal.timeout(4000);
+    const resp = await fetch(target, opts);
+    if (resp.ok) {
+      const d = await resp.json();
+      const data = d && d.data;
+      if (d && d.code === 0 && data) {
+        const province = String(data.province || "").trim();
+        const city = String(data.city || "").trim();
+        const sp = String(data.sp || "").trim();
+        if (province || sp) out = { found: true, province: province, city: city, sp: sp };
+      }
+    }
+  } catch (e) {
+    /* 外部接口异常：静默降级 */
+  }
+  if (out.found) {
+    AREA_CACHE.set(num, { v: out, t: Date.now() });
+    if (AREA_CACHE.size > 5000) {
+      const now = Date.now();
+      for (const [k, v] of AREA_CACHE) if (now - v.t > AREA_TTL) AREA_CACHE.delete(k);
+    }
+  }
+  return json(Object.assign({ success: true }, out));
+}
+
 /* 长轮询：最多挂起 25s，期间每 2s 查一次是否有比 last_id 更新的消息；
    有则立即返回 changed=true（前端收到后刷新列表），实现推送式自动刷新 */
 async function handleWait(url, env) {
@@ -960,6 +1007,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
              color: #fff; border: none; border-radius: 999px; padding: 8px 16px; font-size: 13px; font-weight: 600;
              cursor: pointer; z-index: 98; }
   .newpill:hover { background: var(--accent-deep); }
+  .nlabel { flex: none; font-size: 11px; font-weight: 700; color: var(--accent); background: var(--badge-bg); border-radius: 5px; padding: 1px 6px; }
+  .area { color: var(--faint); font-size: 12px; }
   .pager input, .pager select { padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; font-size: 13px; background: var(--card); color: var(--text); }
   #jump { width: 64px; }
 </style>
@@ -1155,6 +1204,57 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       var href = /^https?:\/\//i.test(core) ? core : "https://" + core;
       return '<a href="' + href + '" target="_blank" rel="noopener noreferrer">' + core + '</a>' + trail;
     });
+  }
+  /* 内置常见机构号码库（离线、仅供参考）；匹配前剥离 +86/空格等非数字 */
+  var NUM_LABELS = {
+    "10086": "中国移动", "10010": "中国联通", "10000": "中国电信", "10099": "中国广电",
+    "95588": "工商银行", "95533": "建设银行", "95599": "农业银行", "95566": "中国银行",
+    "95555": "招商银行", "95559": "交通银行", "95561": "兴业银行", "95528": "浦发银行",
+    "95577": "华夏银行", "95568": "民生银行", "95508": "广发银行", "95595": "光大银行",
+    "95558": "中信银行", "95580": "邮储银行", "95511": "平安",
+    "95338": "顺丰速运", "95543": "申通快递", "95554": "圆通速递", "95546": "韵达快递",
+    "95311": "中通快递", "95353": "德邦快递", "11183": "中国邮政", "950616": "京东物流",
+    "12345": "政务服务", "12315": "消费者投诉", "12333": "社保热线", "12329": "公积金",
+    "12306": "中国铁路", "96110": "反诈专线", "12321": "不良信息举报", "95598": "国家电网",
+    "95188": "支付宝"
+  };
+  function normalizeNum(s) {
+    var d = String(s || "").replace(/\D/g, "");
+    if (d.length > 11 && d.indexOf("86") === 0) d = d.slice(2);
+    return d;
+  }
+  function numLabel(s) {
+    var d = normalizeNum(s);
+    return (d && NUM_LABELS[d]) || "";
+  }
+  /* 归属地：仅对 11 位手机号按需查后端 /api/phone；前端按号码缓存，最多 3 并发 */
+  var areaCache = {};
+  function fillAreas() {
+    var els = $("list").querySelectorAll(".area[data-num]");
+    var todo = {}, i;
+    for (i = 0; i < els.length; i++) {
+      var n = els[i].getAttribute("data-num");
+      if (areaCache[n] === undefined) { todo[n] = 1; }
+      else { els[i].textContent = areaCache[n] ? " · " + areaCache[n] : ""; }
+    }
+    var nums = Object.keys(todo), running = 0, idx = 0;
+    function paint(num) {
+      var es = $("list").querySelectorAll('.area[data-num="' + num + '"]');
+      for (var j = 0; j < es.length; j++) es[j].textContent = areaCache[num] ? " · " + areaCache[num] : "";
+    }
+    function pump() {
+      while (running < 3 && idx < nums.length) {
+        (function (num) {
+          running++;
+          fetch("/api/phone?number=" + encodeURIComponent(num))
+            .then(function (r) { return r.json(); })
+            .then(function (d) { areaCache[num] = (d && d.found) ? ((d.province || "") + (d.sp || "")) : ""; })
+            .catch(function () { areaCache[num] = ""; })
+            .then(function () { running--; paint(num); pump(); });
+        })(nums[idx++]);
+      }
+    }
+    pump();
   }
   function fallbackCopy(text) {
     var ta = document.createElement("textarea");
@@ -1373,11 +1473,15 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
           var isSms = (m.source || "sms") === "sms";
           var recv = m.sim_number || m.sim || "";
           var needFold = String(m.content || "").length > 220;
+          var lbl = isSms ? numLabel(m.sender) : "";
+          var snum = isSms ? normalizeNum(m.sender) : "";
+          var senderHtml = isSms
+            ? '<span class="sender">' + esc(m.sender || "未知号码") + '</span>' +
+              (lbl ? '<span class="nlabel" title="常见号码库（仅供参考）">' + esc(lbl) + '</span>' : '') +
+              (!lbl && /^1[3-9]\d{9}$/.test(snum) ? '<span class="area" data-num="' + snum + '"></span>' : '')
+            : '<span class="srctag">' + esc(m.source || "通知") + '</span><span class="sender">' + esc(m.sender || m.device_name || "通知") + '</span>';
           html += '<div class="card' + (freshSet[m.id] ? " flash" : "") + '">' +
-            '<div class="row1">' +
-              (isSms
-                ? '<span class="sender">' + esc(m.sender || "未知号码") + '</span>'
-                : '<span class="srctag">' + esc(m.source || "通知") + '</span><span class="sender">' + esc(m.sender || m.device_name || "通知") + '</span>') +
+            '<div class="row1">' + senderHtml +
               '<button class="del" data-id="' + m.id + '">删除</button>' +
             '</div>' +
             (code ? '<div class="code-line">验证码：<b>' + esc(code) + '</b><button class="copy" data-code="' + esc(code) + '">复制</button></div>' : '') +
@@ -1389,6 +1493,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
           '</div>';
         });
         $("list").innerHTML = html;
+        fillAreas();
       })
       .catch(function (e) { $("list").innerHTML = '<div class="empty">加载失败：' + esc(e.message) + '</div>'; });
   }
@@ -1684,6 +1789,9 @@ export default {
       }
       if (path === "/api/sources" && request.method === "GET") {
         return await handleListSources(env);
+      }
+      if (path === "/api/phone" && request.method === "GET") {
+        return await handlePhoneArea(url, env);
       }
       if ((path === "/" || path === "/index.html") && request.method === "GET") {
         return new Response(renderHtml(PAGE_HTML, env), {

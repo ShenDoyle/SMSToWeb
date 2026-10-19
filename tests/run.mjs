@@ -151,6 +151,16 @@ async function main() {
   const csv2 = await er2.text();
   check(/'=1\+1/.test(csv2), "CSV 公式注入被前置单引号防护");
 
+  group("号码归属地 / 内置号码库");
+  r = await call("GET", "/api/phone?number=13800138000", env({ PHONE_AREA_ENABLED: "false" }));
+  check(r.data && r.data.found === false && r.data.disabled === true, "PHONE_AREA_ENABLED=false → 不外呼、返回 disabled");
+  r = await call("GET", "/api/phone?number=abc", e0);
+  check(r.data && r.data.found === false, "非法号码 → found:false");
+  r = await call("GET", "/api/phone?number=10086", e0);
+  check(r.data && r.data.found === false, "非手机号（短号）→ 不查询归属地");
+  const page2 = await (await fetchApp(R("GET", "/", {}), e0)).text();
+  check(/NUM_LABELS/.test(page2) && /fillAreas/.test(page2), "管理页内置号码库与归属地填充逻辑存在");
+
   group("登录鉴权 / http cookie 降级 / 防锁死");
   const eAuth = env({ ENABLE_AUTH: "true", ADMIN_PASSWORD: "secret" });
   r = await call("GET", "/api/messages", eAuth);
