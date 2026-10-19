@@ -181,6 +181,28 @@ async function main() {
   r = await call("GET", "/api/messages?device_id=" + devBatch.id, e0);
   check(r.data && r.data.total === 0, "清空后该设备无消息");
 
+  group("收藏 / 已读 / 统计 / PWA");
+  const mlist = (await call("GET", "/api/messages?limit=100", e0)).data.list;
+  const mid = mlist[0].id;
+  r = await call("POST", "/api/messages/star", e0, { body: { id: mid, starred: true } });
+  check(r.data && r.data.success && r.data.starred === 1, "收藏消息");
+  r = await call("GET", "/api/messages?starred=1&limit=100", e0);
+  check(r.data && r.data.list.some(function (m) { return m.id === mid; }), "只看收藏包含该消息");
+  r = await call("POST", "/api/messages/star", e0, { body: { id: mid, starred: false } });
+  check(r.data && r.data.starred === 0, "取消收藏");
+  r = await call("POST", "/api/messages/read", e0, { body: { id: mid, read: true } });
+  check(r.data && r.data.success && r.data.read === true, "标为已读");
+  r = await call("GET", "/api/messages?unread=1&limit=100", e0);
+  check(r.data && !r.data.list.some(function (m) { return m.id === mid; }), "只看未读排除已读消息");
+  r = await call("POST", "/api/messages/read", e0, { body: { id: mid, read: false } });
+  check(r.data && r.data.read === false, "标为未读");
+  r = await call("GET", "/api/stats", e0);
+  check(r.data && r.data.success && typeof r.data.total === "number" && Array.isArray(r.data.sources) && Array.isArray(r.data.days), "统计接口返回");
+  const mf = await fetchApp(R("GET", "/manifest.webmanifest", {}), e0);
+  check(mf.status === 200 && /manifest/.test(mf.headers.get("Content-Type") || ""), "manifest 可访问");
+  const swr = await fetchApp(R("GET", "/sw.js", {}), e0);
+  check(swr.status === 200 && /addEventListener/.test(await swr.text()), "service worker 可访问");
+
   group("登录鉴权 / http cookie 降级 / 防锁死");
   const eAuth = env({ ENABLE_AUTH: "true", ADMIN_PASSWORD: "secret" });
   r = await call("GET", "/api/messages", eAuth);
