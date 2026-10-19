@@ -1143,9 +1143,17 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     return cnt === 1 ? lone : "";
   }
   /* 内容链接化：注意入参必须已经过 esc() 转义 */
+  /* 链接识别：支持 http(s)://、www. 前缀与常见裸域名；大小写不敏感；
+     自动剥掉句末标点、不吞右括号；邮箱内的域名不链接；裸域名补 https:// */
+  var LINK_RE = /(?:https?:\/\/[^\s<>"'，。；！？、（）【】「」《》…)\]}]+|www\.[^\s<>"'，。；！？、（）【】「」《》…)\]}]+|\b(?:[a-z0-9-]+\.)+(?:com|cn|net|org|io|co|me|app|dev|xyz|top|info|biz|cc|tv|ai|gov|edu|shop|site|link|vip|ltd|tech|online|wang|xin|cloud|store|club|fun|space|website|press|news|blog|pro|live|art|design|hk|tw|mo|sg|jp|kr|uk|us|de|fr|ru|in|au|ca|nl|it|es|se|no|dk|fi|pl|be|at|cz|gr|pt|ie|nz|za|mx|ar|my|th|vn|id|ph|tr|ae)(?![a-z0-9-])(?:\/[^\s<>"'，。；！？、（）【】「」《》…)\]}]*)?)/gi;
   function linkify(escaped) {
-    return String(escaped || "").replace(/https?:\/\/[^\s<>"'，。；！？、）【】]+/g, function (u) {
-      return '<a href="' + u + '" target="_blank" rel="noopener noreferrer">' + u + '</a>';
+    return String(escaped || "").replace(LINK_RE, function (m, offset, str) {
+      var trail = "";
+      var core = m.replace(/[.,:!?]+$/, function (t) { trail = t; return ""; });
+      if (!core) return m;
+      if (!/^https?:\/\//i.test(core) && offset > 0 && str.charAt(offset - 1) === "@") return m;
+      var href = /^https?:\/\//i.test(core) ? core : "https://" + core;
+      return '<a href="' + href + '" target="_blank" rel="noopener noreferrer">' + core + '</a>' + trail;
     });
   }
   function fallbackCopy(text) {
