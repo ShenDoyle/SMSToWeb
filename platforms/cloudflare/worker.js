@@ -618,6 +618,8 @@ async function handleListMessages(url, env) {
   const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get("limit") || "20", 10) || 20));
 
   const source = (url.searchParams.get("source") || "").trim();
+  const range = (url.searchParams.get("range") || "").trim();
+  const rangeDays = { "1d": 1, "7d": 7, "30d": 30 }[range] || 0;
 
   const where = [];
   const params = [];
@@ -628,6 +630,10 @@ async function handleListMessages(url, env) {
   if (source) {
     where.push("m.source = ?");
     params.push(source);
+  }
+  if (rangeDays) {
+    where.push("m.received_at >= ?");
+    params.push(new Date(Date.now() - rangeDays * 86400000).toISOString().replace("T", " ").slice(0, 19));
   }
   if (q) {
     where.push("(m.content LIKE ? OR m.sender LIKE ?)");
@@ -659,6 +665,81 @@ async function handleListMessages(url, env) {
     limit,
     pages: Math.max(1, Math.ceil(total / limit)),
     list: rows,
+  });
+}
+
+/* ---------------- 导出（CSV / JSON） ----------------
+ * 按当前筛选条件（device_id / source / range / q）导出全部匹配消息，供备份与离线分析。
+ * 最多 EXPORT_MAX 条；CSV 带 BOM 便于 Excel 识别 UTF-8，并做公式注入防护。 */
+const EXPORT_MAX = 20000;
+
+function csvCell(v) {
+  let s = String(v === null || v === undefined ? "" : v);
+  /* CSV 公式注入防护：以 = + - @ 或制表/回车开头的单元格前置单引号 */
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  if (/[",\r\n]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
+
+/* UTC "YYYY-MM-DD HH:MM:SS" → 北京时间串 */
+function bjTimeStr(utc) {
+  const d = new Date(String(utc || "").replace(" ", "T") + "Z");
+  if (isNaN(d.getTime())) return String(utc || "");
+  return new Date(d.getTime() + 8 * 3600 * 1000).toISOString().replace("T", " ").slice(0, 19);
+}
+
+async function handleExport(url, env) {
+  const deviceId = parseInt(url.searchParams.get("device_id") || "", 10);
+  const q = (url.searchParams.get("q") || "").trim();
+  const source = (url.searchParams.get("source") || "").trim();
+  const range = (url.searchParams.get("range") || "").trim();
+  const rangeDays = { "1d": 1, "7d": 7, "30d": 30 }[range] || 0;
+  const format = (url.searchParams.get("format") || "csv").toLowerCase() === "json" ? "json" : "csv";
+
+  const where = [];
+  const params = [];
+  if (Number.isInteger(deviceId) && deviceId > 0) { where.push("m.device_id = ?"); params.push(deviceId); }
+  if (source) { where.push("m.source = ?"); params.push(source); }
+  if (rangeDays) {
+    where.push("m.received_at >= ?");
+    params.push(new Date(Date.now() - rangeDays * 86400000).toISOString().replace("T", " ").slice(0, 19));
+  }
+  if (q) { where.push("(m.content LIKE ? OR m.sender LIKE ?)"); params.push("%" + q + "%", "%" + q + "%"); }
+  const whereSql = where.length ? "WHERE " + where.join(" AND ") : "";
+
+  const rows = (await env.DB.prepare(
+    `SELECT m.id, m.sender, m.content, m.received_at, m.source,
+            COALESCE(NULLIF(d.alias, ''), d.device) AS device_name, d.sim
+     FROM messages m JOIN devices d ON d.id = m.device_id
+     ${whereSql}
+     ORDER BY m.received_at DESC, m.id DESC
+     LIMIT ${EXPORT_MAX}`
+  ).bind(...params).all()).results || [];
+
+  const stamp = nowUTC().slice(0, 10);
+  if (format === "json") {
+    const out = rows.map(function (r) {
+      return { id: r.id, time: bjTimeStr(r.received_at), device: r.device_name, sim: r.sim || "", sender: r.sender, source: r.source, content: r.content };
+    });
+    return new Response(JSON.stringify(out, null, 2), {
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+        "Content-Disposition": 'attachment; filename="smstoweb-' + stamp + '.json"',
+        "Cache-Control": "no-store", ...CORS,
+      },
+    });
+  }
+  const header = "id,time,device,sim,sender,source,content";
+  const lines = rows.map(function (r) {
+    return [r.id, bjTimeStr(r.received_at), r.device_name, r.sim || "", r.sender, r.source, r.content].map(csvCell).join(",");
+  });
+  const csv = "\uFEFF" + header + "\n" + lines.join("\n") + "\n";
+  return new Response(csv, {
+    headers: {
+      "Content-Type": "text/csv; charset=utf-8",
+      "Content-Disposition": 'attachment; filename="smstoweb-' + stamp + '.csv"',
+      "Cache-Control": "no-store", ...CORS,
+    },
   });
 }
 
@@ -749,7 +830,7 @@ async function handleWait(url, env) {
       ? "SELECT MAX(id) AS n FROM messages WHERE device_id = ?1"
       : "SELECT MAX(id) AS n FROM messages";
     const row = await (filter ? env.DB.prepare(sql).bind(deviceId) : env.DB.prepare(sql)).first();
-    if (row && row.n > lastId) return json({ success: true, changed: true });
+    if (row && row.n > lastId) return json({ success: true, changed: true, id: row.n });
     if (Date.now() > deadline) return json({ success: true, changed: false });
     await new Promise(function (r) { setTimeout(r, 2000); });
   }
@@ -858,6 +939,29 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   @media (prefers-color-scheme: dark) {
     .toast { background: #e6e9ec; color: #14171a; }
   }
+  .toolbar, .opts, .pager { flex-wrap: wrap; }
+  .searchwrap { position: relative; flex: 1; display: flex; min-width: 140px; }
+  .searchwrap input { width: 100%; }
+  .clr { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); border: none; background: none;
+         color: var(--faint); font-size: 16px; cursor: pointer; padding: 0 4px; line-height: 1; }
+  .clr:hover { color: var(--text); }
+  .tbtn { border: 1px solid var(--border); background: var(--card); color: var(--text); border-radius: 8px;
+          padding: 5px 10px; font-size: 12px; cursor: pointer; }
+  .tbtn:hover { border-color: var(--accent); color: var(--accent); }
+  .spacer { flex: 1; }
+  .content.fold { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+  .more { border: none; background: none; color: var(--link); cursor: pointer; font-size: 12px; padding: 2px 0; }
+  .more:hover { text-decoration: underline; }
+  .card.flash { animation: slidein .25s ease-out, flash 1.6s ease-out; }
+  @keyframes flash { 0% { background: var(--accent-bg); } 100% { background: var(--card); } }
+  .skc { height: 62px; border-radius: 10px; background: var(--row-border); margin-bottom: 8px; animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
+  .newpill { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); background: var(--accent);
+             color: #fff; border: none; border-radius: 999px; padding: 8px 16px; font-size: 13px; font-weight: 600;
+             cursor: pointer; z-index: 98; }
+  .newpill:hover { background: var(--accent-deep); }
+  .pager input, .pager select { padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; font-size: 13px; background: var(--card); color: var(--text); }
+  #jump { width: 64px; }
 </style>
 </head>
 <body>
@@ -868,25 +972,46 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   <h1>__SITE_NAME__</h1>
   <div class="tabs" id="tabs"></div>
   <div class="toolbar">
-    <input type="search" id="q" placeholder="搜索发件人或内容…">
+    <div class="searchwrap">
+      <input type="search" id="q" placeholder="搜索发件人或内容…">
+      <button class="clr" id="clearq" hidden title="清除搜索" aria-label="清除搜索">×</button>
+    </div>
     <select id="src" title="按来源筛选">
       <option value="">全部来源</option>
       <option value="sms">短信</option>
       <option value="notify">通知</option>
     </select>
+    <select id="range" title="按时间筛选">
+      <option value="">全部时间</option>
+      <option value="1d">今天</option>
+      <option value="7d">近 7 天</option>
+      <option value="30d">近 30 天</option>
+    </select>
   </div>
   <div class="opts">
     <label class="opt"><input type="checkbox" id="autocopy"><span class="switch"></span><span>自动复制验证码</span></label>
     <label class="opt"><input type="checkbox" id="notifyon"><span class="switch"></span><span>后台通知</span></label>
+    <label class="opt"><input type="checkbox" id="soundon"><span class="switch"></span><span>提示音</span></label>
+    <span class="spacer"></span>
+    <button class="tbtn" id="exportcsv" title="按当前筛选导出 CSV">导出 CSV</button>
+    <button class="tbtn" id="exportjson" title="按当前筛选导出 JSON">导出 JSON</button>
   </div>
   <div class="meta"><span id="stat"></span><span id="pageinfo"></span></div>
-  <div class="list" id="list"><div class="empty">加载中…</div></div>
+  <div class="list" id="list"><div class="sk"><div class="skc"></div><div class="skc"></div><div class="skc"></div></div></div>
   <div class="pager">
     <button id="prev">上一页</button>
     <span id="pagenum"></span>
     <button id="next">下一页</button>
+    <select id="perpage" title="每页条数">
+      <option value="20">20 条/页</option>
+      <option value="50">50 条/页</option>
+      <option value="100">100 条/页</option>
+    </select>
+    <input id="jump" type="number" min="1" inputmode="numeric" placeholder="页码" title="输入页码后回车跳转">
+    <button id="gojump">跳转</button>
   </div>
 </div>
+<button class="newpill" id="newpill" hidden></button>
 <footer class="foot">© 2026 <a href="https://cbm.im/" target="_blank" rel="noopener noreferrer">左立方</a> · <a href="https://github.com/ShenDoyle/SMSToWeb" target="_blank" rel="noopener noreferrer">SMSToWeb</a></footer>
 <script>
 (function () {
@@ -902,9 +1027,10 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   })();
   var state = {
     device: 0, src: "", q: "", page: 1, pages: 1, total: 0, lastId: 0, deb: null,
-    inited: false, unread: 0,
+    inited: false, unread: 0, limit: 20, range: "", notifiedId: 0,
     autoCopy: (function () { try { return localStorage.getItem("sms_autocopy") !== "0"; } catch (e) { return true; } })(),
-    notify: (function () { try { return localStorage.getItem("sms_notify") !== "0"; } catch (e) { return true; } })()
+    notify: (function () { try { return localStorage.getItem("sms_notify") !== "0"; } catch (e) { return true; } })(),
+    sound: (function () { try { return localStorage.getItem("sms_sound") === "1"; } catch (e) { return false; } })()
   };
   var $ = function (id) { return document.getElementById(id); };
   function esc(s) {
@@ -1055,7 +1181,35 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, 300);
     }, 2600);
   }
-  /* 新消息处理：验证码自动复制 + 标题未读数 + 后台系统通知 */
+  /* 提示音：短促正弦波；首次调用在用户手势（开关切换）内，规避浏览器自动播放限制 */
+  var audioCtx = null;
+  function beep() {
+    try {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      audioCtx = audioCtx || new AC();
+      if (audioCtx.state === "suspended") audioCtx.resume();
+      var o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      o.connect(g); g.connect(audioCtx.destination);
+      o.type = "sine"; o.frequency.value = 880;
+      var t0 = audioCtx.currentTime;
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.exponentialRampToValueAtTime(0.09, t0 + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.2);
+      o.start(t0); o.stop(t0 + 0.22);
+    } catch (e) {}
+  }
+  /* 悬浮「N 条新消息」胶囊：用户在下方浏览时提示新消息 */
+  var pillN = 0, pillTimer = null;
+  function showNewPill(n) {
+    pillN += (n || 1);
+    var el = $("newpill");
+    el.textContent = "↑ " + pillN + " 条新消息";
+    el.hidden = false;
+    clearTimeout(pillTimer);
+    pillTimer = setTimeout(function () { el.hidden = true; pillN = 0; }, 8000);
+  }
+  /* 新消息处理：验证码自动复制 + 页面可见时 toast/提示音/胶囊 + 隐藏时标题未读与系统通知 */
   function notifyNew(fresh) {
     var latest = fresh[0];
     var code = extractCode(latest.content);
@@ -1074,14 +1228,20 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
           new Notification(String(latest.sender || "新短信"), { body: body.slice(0, 140), tag: "sms-" + latest.id });
         } catch (e) {}
       }
+    } else {
+      if (!(code && state.autoCopy)) toast("收到 " + fresh.length + " 条新消息");
+      if (state.sound) beep();
+      if (window.scrollY > 260) showNewPill(fresh.length);
     }
   }
   function qs() {
     var p = new URLSearchParams();
     if (state.device) p.set("device_id", state.device);
     if (state.src) p.set("source", state.src);
+    if (state.range) p.set("range", state.range);
     if (state.q) p.set("q", state.q);
     p.set("page", state.page);
+    p.set("limit", state.limit);
     return p.toString();
   }
   function loadDevices() {
@@ -1168,21 +1328,35 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         if (!res.success) throw new Error(res.error || "load failed");
         state.total = res.total; state.pages = res.pages;
         var list = res.list || [];
-        /* 新消息识别：首次加载建立基线；之后把比 lastId 新的交给 notifyNew（自动复制/通知/未读数） */
+        var freshSet = {};
+        /* 新消息识别：lastId 为轮询游标（防忙循环），notifiedId 为已通知基线；
+           首次加载建立基线，之后把比 notifiedId 新的交给 notifyNew */
         if (!state.inited) {
           state.inited = true;
-          if (list.length) state.lastId = list[0].id;
+          if (list.length) {
+            state.lastId = Math.max(state.lastId, list[0].id);
+            state.notifiedId = Math.max(state.notifiedId, list[0].id);
+          }
         } else {
-          var fresh = list.filter(function (m) { return m.id > state.lastId; });
-          if (fresh.length) { state.lastId = fresh[0].id; notifyNew(fresh); }
+          var fresh = list.filter(function (m) { return m.id > state.notifiedId; });
+          if (fresh.length) {
+            state.notifiedId = fresh[0].id;
+            fresh.forEach(function (m) { freshSet[m.id] = true; });
+            notifyNew(fresh);
+          }
+          if (list.length) state.lastId = Math.max(state.lastId, list[0].id);
         }
         $("stat").textContent = "共 " + res.total + " 条";
         $("pageinfo").textContent = res.pages > 1 ? "第 " + res.page + " / " + res.pages + " 页" : "";
         $("pagenum").textContent = res.pages > 1 ? res.page + " / " + res.pages : "";
         $("prev").disabled = res.page <= 1;
         $("next").disabled = res.page >= res.pages;
-        if (!list.length) { $("list").innerHTML = '<div class="empty">暂无短信</div>'; return; }
-        /* 按日期分组渲染：今天 / 昨天 / M月D日 分隔行；来源徽章区分短信与通知 */
+        if (!list.length) {
+          var hasFilter = state.device || state.src || state.range || state.q;
+          $("list").innerHTML = '<div class="empty">' + (hasFilter ? "没有符合条件的消息" : "还没有收到消息<br><small>在手机端配置 SmsForwarder，或调用 /api/push 推送一条试试</small>") + '</div>';
+          return;
+        }
+        /* 按日期分组渲染：今天 / 昨天 / M月D日 分隔行；来源徽章区分短信与通知；长文折叠；新消息高亮 */
         var html = "", lastDay = "";
         list.forEach(function (m) {
           var day = dayLabel(m.received_at);
@@ -1190,7 +1364,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
           var code = extractCode(m.content);
           var isSms = (m.source || "sms") === "sms";
           var recv = m.sim_number || m.sim || "";
-          html += '<div class="card">' +
+          var needFold = String(m.content || "").length > 220;
+          html += '<div class="card' + (freshSet[m.id] ? " flash" : "") + '">' +
             '<div class="row1">' +
               (isSms
                 ? '<span class="sender">' + esc(m.sender || "未知号码") + '</span>'
@@ -1198,7 +1373,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
               '<button class="del" data-id="' + m.id + '">删除</button>' +
             '</div>' +
             (code ? '<div class="code-line">验证码：<b>' + esc(code) + '</b><button class="copy" data-code="' + esc(code) + '">复制</button></div>' : '') +
-            '<div class="line"><span class="content">' + linkify(esc(m.content)) + '</span></div>' +
+            '<div class="line"><span class="content' + (needFold ? " fold" : "") + '">' + linkify(esc(m.content)) + '</span>' +
+              (needFold ? '<button class="more" type="button">展开全文</button>' : '') + '</div>' +
             '<div class="line foot-line"><span class="time-line" title="' + esc(fmtTime(m.received_at)) + '">' + esc(relTime(m.received_at)) + '</span>' +
               (isSms && recv ? '<span class="recv" title="双击复制收件号">' + esc(recv) + '</span>' : '') +
             '</div>' +
@@ -1228,14 +1404,57 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     }).catch(function () {});
   }
   function refreshAll() { return Promise.all([loadSources(), loadDevices()]).then(load); }
+  function syncClear() { $("clearq").hidden = !$("q").value; }
   $("q").addEventListener("input", function () {
+    syncClear();
     clearTimeout(state.deb);
     state.deb = setTimeout(function () { state.q = $("q").value.trim(); state.page = 1; load(); }, 300);
   });
+  $("clearq").onclick = function () { $("q").value = ""; state.q = ""; state.page = 1; syncClear(); load(); $("q").focus(); };
   $("prev").onclick = function () { if (state.page > 1) { state.page--; load(); } };
   $("next").onclick = function () { if (state.page < state.pages) { state.page++; load(); } };
   $("src").onchange = function () { state.src = $("src").value; state.page = 1; load(); };
-  /* 推送式自动刷新：长轮询 /api/wait，有新消息立即加载；搜索模式下退化为 5s 轮询 */
+  $("range").onchange = function () { state.range = $("range").value; state.page = 1; load(); };
+  $("perpage").onchange = function () { state.limit = parseInt($("perpage").value, 10) || 20; state.page = 1; load(); };
+  function doJump() {
+    var n = parseInt($("jump").value, 10);
+    if (!Number.isInteger(n)) return;
+    n = Math.min(Math.max(1, n), state.pages || 1);
+    state.page = n; $("jump").value = ""; load();
+  }
+  $("gojump").onclick = doJump;
+  $("jump").addEventListener("keydown", function (e) { if (e.key === "Enter") doJump(); });
+  state.range = $("range").value = "";
+  state.limit = parseInt($("perpage").value, 10) || 20;
+  /* 导出：按当前筛选条件下载 CSV / JSON（附件下载，不跳转页面） */
+  function exportUrl(fmt) {
+    var p = new URLSearchParams();
+    if (state.device) p.set("device_id", state.device);
+    if (state.src) p.set("source", state.src);
+    if (state.range) p.set("range", state.range);
+    if (state.q) p.set("q", state.q);
+    p.set("format", fmt);
+    return "/api/export?" + p.toString();
+  }
+  function download(url) {
+    var a = document.createElement("a");
+    a.href = url; a.download = "";
+    document.body.appendChild(a); a.click();
+    setTimeout(function () { if (a.parentNode) a.parentNode.removeChild(a); }, 100);
+  }
+  $("exportcsv").onclick = function () { download(exportUrl("csv")); };
+  $("exportjson").onclick = function () { download(exportUrl("json")); };
+  /* 悬浮新消息胶囊：点击回到首页顶部 */
+  $("newpill").onclick = function () {
+    $("newpill").hidden = true; pillN = 0;
+    state.page = 1;
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    load();
+  };
+  window.addEventListener("scroll", function () {
+    if (window.scrollY < 260) { var el = $("newpill"); if (el && !el.hidden) { el.hidden = true; pillN = 0; } }
+  });
+  /* 推送式自动刷新：长轮询 /api/wait；第 1 页收到新消息即刷新，其他页只弹胶囊避免打断阅读 */
   function pollLoop() {
     if (state.q) {
       setTimeout(function () { load().then(pollLoop); }, 5000);
@@ -1245,15 +1464,21 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (state.device) p += "&device_id=" + state.device;
     fetch("/api/wait?" + p)
       .then(function (r) { return r.json(); })
-      .then(function (d) { if (d && d.changed) load(); })
+      .then(function (d) {
+        if (d && d.changed) {
+          if (d.id) state.lastId = Math.max(state.lastId, d.id);
+          if (state.page === 1) { load(); } else { showNewPill(); }
+        }
+      })
       .catch(function () {})
       .finally(pollLoop);
   }
   pollLoop();
   /* 开关初始化与记忆（localStorage） */
-  var acb = $("autocopy"), nb = $("notifyon");
+  var acb = $("autocopy"), nb = $("notifyon"), sb = $("soundon");
   acb.checked = state.autoCopy;
   nb.checked = state.notify;
+  sb.checked = state.sound;
   acb.onchange = function () {
     state.autoCopy = acb.checked;
     try { localStorage.setItem("sms_autocopy", state.autoCopy ? "1" : "0"); } catch (e) {}
@@ -1267,11 +1492,24 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     }
     toast(state.notify ? "已开启后台通知" : "已关闭后台通知");
   };
+  sb.onchange = function () {
+    state.sound = sb.checked;
+    try { localStorage.setItem("sms_sound", state.sound ? "1" : "0"); } catch (e) {}
+    if (state.sound) beep();
+    toast(state.sound ? "已开启新消息提示音" : "已关闭新消息提示音");
+  };
   /* 回到页面即清零未读数、恢复标题 */
   document.addEventListener("visibilitychange", function () {
     if (!document.hidden) { state.unread = 0; document.title = SITE_NAME; }
   });
   $("list").addEventListener("click", function (ev) {
+    var moreBtn = ev.target.closest ? ev.target.closest(".more") : null;
+    if (moreBtn) {
+      var card = moreBtn.closest(".card");
+      var c = card ? card.querySelector(".content") : null;
+      if (c) { var folded = c.classList.toggle("fold"); moreBtn.textContent = folded ? "展开全文" : "收起"; }
+      return;
+    }
     var copyBtn = ev.target.closest ? ev.target.closest(".copy") : null;
     if (copyBtn) { doCopy(copyBtn.getAttribute("data-code"), copyBtn); return; }
     var btn = ev.target.closest ? ev.target.closest(".del") : null;
@@ -1412,6 +1650,9 @@ export default {
       }
       if (path === "/api/messages" && request.method === "GET") {
         return await handleListMessages(url, env);
+      }
+      if (path === "/api/export" && request.method === "GET") {
+        return await handleExport(url, env);
       }
       const msgMatch = path.match(/^\/api\/messages\/(\d+)$/);
       if (msgMatch && request.method === "DELETE") {

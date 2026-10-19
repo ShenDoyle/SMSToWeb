@@ -126,6 +126,31 @@ async function main() {
   r = await call("POST", "/api/devices/merge", e0, { body: { from: devB.id, to: devB.id } });
   check(r.status === 400, "合并到自身 → 400");
 
+  group("时间范围 / 分页 / 导出");
+  await db.prepare("INSERT INTO messages(device_id, sender, content, received_at, source) SELECT id,'oldsender','range-old','2000-01-01 00:00:00','sms' FROM devices LIMIT 1").run();
+  r = await call("GET", "/api/messages?range=1d&limit=100", e0);
+  check(r.data && !r.data.list.some(m => m.content === "range-old"), "range=1d 排除极旧消息");
+  r = await call("GET", "/api/messages?range=7d&limit=100", e0);
+  check(r.data && !r.data.list.some(m => m.content === "range-old") && r.data.list.length >= 1, "range=7d 排除极旧、保留近期");
+
+  r = await call("GET", "/api/messages?limit=2&page=1", e0);
+  check(r.data && r.data.limit === 2 && r.data.list.length <= 2, "limit=2 生效且返回不超过 2 条");
+
+  const er = await fetchApp(R("GET", "/api/export?format=csv", {}), e0);
+  const csv = await er.text();
+  check(er.status === 200 && /text\/csv/.test(er.headers.get("Content-Type") || ""), "导出 CSV 响应类型正确");
+  check(/id,time,device,sim,sender,source,content/.test(csv), "CSV 含表头");
+  check(/attachment; filename="smstoweb-/.test(er.headers.get("Content-Disposition") || ""), "CSV 带附件下载头");
+
+  const jr = await fetchApp(R("GET", "/api/export?format=json", {}), e0);
+  const jdata = await jr.json();
+  check(Array.isArray(jdata) && jdata.length >= 1, "导出 JSON 为数组且有数据");
+
+  await call("POST", "/api/push?token=tok", e0, { body: { content: "=1+1", time: "2026-10-18 10:00:00" } });
+  const er2 = await fetchApp(R("GET", "/api/export?format=csv&q=%3D1%2B1", {}), e0);
+  const csv2 = await er2.text();
+  check(/'=1\+1/.test(csv2), "CSV 公式注入被前置单引号防护");
+
   group("登录鉴权 / http cookie 降级 / 防锁死");
   const eAuth = env({ ENABLE_AUTH: "true", ADMIN_PASSWORD: "secret" });
   r = await call("GET", "/api/messages", eAuth);
