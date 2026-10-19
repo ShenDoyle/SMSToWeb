@@ -7,7 +7,7 @@
  */
 import { fetchApp, runCron, handleCronRequest } from "../platforms/node/app.js";
 import { LocalDatabase } from "../platforms/node/db.js";
-import { rmSync } from "node:fs";
+import { rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -230,6 +230,87 @@ async function main() {
     if (rr.status === 429) saw429 = true; else if (rr.status === 200) allowed++;
   }
   check(saw429 && allowed >= 1 && allowed < 260, "限速生效：放行一批后开始返回 429");
+
+  group("中英双语 / 移动端 / 平台兼容");
+  const coreSrc = readFileSync(new URL("../src/worker.js", import.meta.url), "utf8");
+  /* 取出 I18N 字面量求值，检查中英字典键集完全一致（防漏翻） */
+  const i18nAt = coreSrc.indexOf("var I18N = {");
+  const i18nClose = coreSrc.indexOf("};", i18nAt);
+  const i18nLit = coreSrc.slice(coreSrc.indexOf("{", i18nAt), i18nClose + 1);
+  let I18N = null;
+  try { I18N = new Function("return " + i18nLit + ";")(); } catch (e) { I18N = null; }
+  check(!!I18N && !!I18N.zh && !!I18N.en, "管理页内置 zh / en 两套字典");
+  if (I18N && I18N.zh && I18N.en) {
+    const zk = Object.keys(I18N.zh).sort(), ek = Object.keys(I18N.en).sort();
+    const has = function (o, k) { return Object.prototype.hasOwnProperty.call(o, k); };
+    const missingEn = zk.filter(function (k) { return !has(I18N.en, k); });
+    const extra = ek.filter(function (k) { return !has(I18N.zh, k); });
+    check(missingEn.length === 0 && extra.length === 0,
+      "中英字典键集一致（zh " + zk.length + " 项，缺失：" + (missingEn.join(",") || "无") + "，多余：" + (extra.join(",") || "无") + "）");
+    check(String(I18N.en.total).indexOf("{n}") >= 0 && String(I18N.zh.total).indexOf("{n}") >= 0,
+      "带变量的文案保留 {n} 占位符");
+  }
+  const pageHtml = await (await fetchApp(R("GET", "/", {}), e0)).text();
+  check(/data-i18n="stats"/.test(pageHtml) && /data-i18n-ph="searchPh"/.test(pageHtml),
+    "管理页静态文案带 data-i18n 标注");
+  check(/id="langbtn"/.test(pageHtml) && /sms_lang/.test(pageHtml), "头部语言切换按钮与本地记忆");
+  check(/function applyI18n/.test(pageHtml) && /function T\(key, vars\)/.test(pageHtml), "i18n 运行时（T / applyI18n）已注入");
+  check(/viewport-fit=cover/.test(pageHtml) && /apple-mobile-web-app-capable/.test(pageHtml),
+    "移动端 viewport 安全区 / PWA meta 就位");
+  check(/format-detection" content="telephone=no/.test(pageHtml), "禁用 iOS 号码自动识别，避免吞掉发件号");
+  const eLogin = env({ ENABLE_AUTH: "true", ADMIN_PASSWORD: "secret" });
+  const loginHtml = await (await fetchApp(R("GET", "/", {}), eLogin)).text();
+  check(/loginPw/.test(loginHtml) && /Sign in/.test(loginHtml) && /id="langbtn"/.test(loginHtml),
+    "登录页同样支持中英切换");
+  const mani = await (await fetchApp(R("GET", "/manifest.webmanifest", {}), e0)).json();
+  check(mani && mani.lang && mani.scope === "/" && Array.isArray(mani.display_override),
+    "manifest 含 lang / scope / display_override");
+  const swTxt = await (await fetchApp(R("GET", "/sw.js", {}), e0)).text();
+  check(/caches\.open/.test(swTxt) && /indexOf\('\/api\/'\)===0/.test(swTxt),
+    "Service Worker 缓存页面壳且跳过 /api/");
+  /* 长轮询时长可配：WAIT_MAX_SECONDS=3 应在 ~3s 内返回（适配 Netlify 10s 函数超时） */
+  const t0 = Date.now();
+  const w = await call("GET", "/api/wait?last_id=999999", env({ WAIT_MAX_SECONDS: "3" }));
+  const elapsed = Date.now() - t0;
+  check(w.data && w.data.changed === false && elapsed >= 2500 && elapsed < 6000,
+    "WAIT_MAX_SECONDS 生效（实测 " + elapsed + "ms）");
+
+  /* 在沙箱里求值页面内的 i18n + 日期函数，验证中英实际输出（不依赖浏览器） */
+  const sliceStart = coreSrc.indexOf("var MONTHS =");
+  const sliceEnd = coreSrc.indexOf("/* 验证码提取");
+  let mkI18n = null;
+  if (sliceStart > 0 && sliceEnd > sliceStart) {
+    try {
+      const body = coreSrc.slice(sliceStart, sliceEnd) + "\nreturn { T: T, fmtTime: fmtTime, relTime: relTime, dayLabel: dayLabel };";
+      const noopEl = { setAttribute: function () {}, textContent: "" };
+      const fakeDoc = { documentElement: {}, querySelectorAll: function () { return []; }, getElementById: function () { return null; } };
+      mkI18n = function (lang) {
+        return new Function("LANG", "document", "window", "location", "localStorage", "$", "esc", body)(
+          lang, fakeDoc, {}, {}, { getItem: function () { return null; }, setItem: function () {} },
+          function () { return null; }, function (s) { return String(s == null ? "" : s); }
+        );
+      };
+    } catch (e) { mkI18n = null; }
+  }
+  check(!!mkI18n, "i18n / 日期函数可在沙箱中求值");
+  if (mkI18n) {
+    const z = mkI18n("zh"), en = mkI18n("en");
+    check(z.T("total", { n: 3 }) === "共 3 条" && en.T("total", { n: 3 }) === "3 messages",
+      "文案插值按语言输出（共 3 条 / 3 messages）");
+    check(z.T("pageOf", { a: 1, b: 4 }) === "第 1 / 4 页" && en.T("pageOf", { a: 1, b: 4 }) === "Page 1 of 4",
+      "分页文案按语言输出");
+    check(z.T("noSuchKey") === "noSuchKey", "缺失键回退为键名（不抛错）");
+    const t = "2026-10-19 10:30:00"; /* UTC → 北京 18:30 */
+    check(z.fmtTime(t) === "2026年10月19日 18:30:00", "中文完整时间格式");
+    check(en.fmtTime(t) === "Oct 19, 2026 18:30:00", "英文完整时间格式");
+    const nowMs = Date.now();
+    const nowUtc = new Date(nowMs).toISOString().replace("T", " ").slice(0, 19);
+    check(z.dayLabel(nowUtc) === "今天" && en.dayLabel(nowUtc) === "Today", "日期分组标签按语言输出");
+    check(en.relTime(new Date(nowMs - 5 * 60000).toISOString().replace("T", " ").slice(0, 19)) === "5 min ago",
+      "英文相对时间（5 min ago）");
+    check(z.relTime(new Date(nowMs - 5 * 60000).toISOString().replace("T", " ").slice(0, 19)) === "5 分钟前",
+      "中文相对时间（5 分钟前）");
+  }
 
   console.log("\n===== 结果：" + pass + " 通过，" + fail + " 失败 =====");
   if (fail) console.log("失败项：\n - " + failed.join("\n - "));
