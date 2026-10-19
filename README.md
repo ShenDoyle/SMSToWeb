@@ -11,6 +11,7 @@
 - **数据与提醒**：按当前筛选一键导出 CSV / JSON；页面可见时新消息有 toast / 可选提示音 / 悬浮提醒，后台时浏览器通知 + 标题未读；超长消息自动折叠
 - **号码识别**：内置常见机构号码库（运营商 / 银行 / 快递 / 政务等）自动标注；未知手机号可选显示归属地（默认开启，可关）
 - **批量与撤销**：批量选择删除、按当前筛选一键清空；删除后 5 秒内可撤销（软删除）；暗色模式支持自动 / 浅色 / 深色三态
+- **收藏 / 未读 / 统计**：星标置顶、只看收藏 / 未读、统计面板（来源分布 + 近 7 天）；自定义号码标签；搜索高亮与历史；设置里可配免打扰与提示音；可添加到主屏幕（PWA）
 
 ```
 【短信】Android(SmsForwarder) ──POST /api/receive──┐
@@ -73,7 +74,7 @@ Cloudflare 平台额外需要 `DB`（D1 绑定）；其余平台需要 `TURSO_DA
 - **接口 429** → 触发写入限速（每 IP 每分钟 120 次），等 1 分钟自动恢复；正常使用不会碰到，出现说明 token 可能已泄露或被脚本刷库
 - **超长消息** → 单条正文最多保存 8000 字符，超出部分自动截断
 - **设备标签改名** → 标签名由消息模板 `name` 字段决定，改 `name` 会生成新标签；网页上点标签后的「✎」可重命名、「⇄」可把该标签的消息合并到另一设备，无消息的标签可直接「×」删除
-- **从旧版本升级（软删除）** → 旧库需执行一次 `ALTER TABLE messages ADD COLUMN deleted_at TEXT;`（新库建表已包含；node 本地 SQLite 启动时自动补列）
+- **从旧版本升级（新增列）** → 旧库需执行：`ALTER TABLE messages ADD COLUMN deleted_at TEXT;`、`ALTER TABLE messages ADD COLUMN starred INTEGER NOT NULL DEFAULT 0;`、`ALTER TABLE messages ADD COLUMN read_at TEXT;`（新库建表已包含；node 本地 SQLite 启动时自动补列）
 
 ## 开发说明
 
