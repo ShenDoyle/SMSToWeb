@@ -158,6 +158,14 @@ async function main() {
   check(r.data && r.data.found === false, "非法号码 → found:false");
   r = await call("GET", "/api/phone?number=10086", e0);
   check(r.data && r.data.found === false, "非手机号（短号）→ 不查询归属地");
+  /* /api/phone 上游限速：自定义不可达 API（127.0.0.1:1 立即拒连），独立 XFF 桶，超 120/分→429 */
+  const ePhone = env({ PHONE_AREA_API: "http://127.0.0.1:1/{number}" });
+  let sawPhone429 = false;
+  for (let i = 0; i < 140 && !sawPhone429; i++) {
+    const rr = await call("GET", "/api/phone?number=138" + String(10000000 + i), ePhone, { headers: { "X-Forwarded-For": "198.51.100.7" } });
+    if (rr.status === 429) sawPhone429 = true;
+  }
+  check(sawPhone429, "/api/phone 上游查询限速生效（120 次/分，超限 429）");
   const page2 = await (await fetchApp(R("GET", "/", {}), e0)).text();
   check(/NUM_LABELS/.test(page2) && /fillAreas/.test(page2), "管理页内置号码库与归属地填充逻辑存在");
 
@@ -283,6 +291,10 @@ async function main() {
     "管理页静态文案带 data-i18n 标注");
   check(/id="langbtn"/.test(pageHtml) && /sms_lang/.test(pageHtml), "头部语言切换按钮与本地记忆");
   check(/function applyI18n/.test(pageHtml) && /function T\(key, vars\)/.test(pageHtml), "i18n 运行时（T / applyI18n）已注入");
+  check(/r\.status === 401/.test(pageHtml) && /location\.reload/.test(pageHtml),
+    "登录过期 401 → 整页重载到登录页（不停在加载失败）");
+  check(/setAttribute\("data-dev"/.test(pageHtml) && /function markActiveTabs/.test(pageHtml) && !/renderTabs/.test(pageHtml),
+    "设备 tab 切换仅更新激活态（不再重复拉 /api/devices）");
   check(/viewport-fit=cover/.test(pageHtml) && /apple-mobile-web-app-capable/.test(pageHtml),
     "移动端 viewport 安全区 / PWA meta 就位");
   check(/format-detection" content="telephone=no/.test(pageHtml), "禁用 iOS 号码自动识别，避免吞掉发件号");
@@ -293,6 +305,8 @@ async function main() {
   const mani = await (await fetchApp(R("GET", "/manifest.webmanifest", {}), e0)).json();
   check(mani && mani.lang && mani.scope === "/" && Array.isArray(mani.display_override),
     "manifest 含 lang / scope / display_override");
+  check(mani && Array.isArray(mani.icons) && mani.icons.length === 1 && mani.icons[0].sizes === "any",
+    "manifest 图标尺寸如实标注（.ico 用 sizes:any，不再虚标 192/512）");
   const swTxt = await (await fetchApp(R("GET", "/sw.js", {}), e0)).text();
   check(/caches\.open/.test(swTxt) && /indexOf\('\/api\/'\)===0/.test(swTxt),
     "Service Worker 缓存页面壳且跳过 /api/");

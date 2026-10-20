@@ -883,9 +883,10 @@ function handleManifest(env) {
     orientation: "any", lang: "zh-CN", dir: "ltr",
     background_color: "#f5f6f7", theme_color: "#15803d",
     categories: ["utilities", "productivity"],
+    /* 单图标条目：SITE_ICON 通常是 .ico，尺寸不可预设，用 sizes:"any" 如实标注
+       （原先虚标 192x192/512x512 与实际图标文件不符，PWA 安装时拿不到期望尺寸） */
     icons: [
-      { src: icon, sizes: "192x192", type: "image/x-icon", purpose: "any" },
-      { src: icon, sizes: "512x512", type: "image/x-icon", purpose: "any" }
+      { src: icon, sizes: "any", type: "image/x-icon", purpose: "any" }
     ]
   };
   return new Response(JSON.stringify(m), {
@@ -989,7 +990,7 @@ const AREA_CACHE = new Map();
 const AREA_TTL = 24 * 3600 * 1000;
 const AREA_DEFAULT_API = "https://cx.shouji.360.cn/phonearea.php?number={number}";
 
-async function handlePhoneArea(url, env) {
+async function handlePhoneArea(request, url, env) {
   const num = String(url.searchParams.get("number") || "").replace(/\D/g, "");
   if (!/^1[3-9]\d{9}$/.test(num)) return json({ success: true, found: false });
   const flag = String(env.PHONE_AREA_ENABLED || "true").trim().toLowerCase();
@@ -997,6 +998,10 @@ async function handlePhoneArea(url, env) {
 
   const cached = AREA_CACHE.get(num);
   if (cached && Date.now() - cached.t < AREA_TTL) return json(Object.assign({ success: true }, cached.v));
+
+  /* 上游查询限速：与写入接口共用每 IP 120 次/分的软限速桶，遏制把 /api/phone
+     当免费代理刷外部归属地接口；缓存命中（含 24h TTL 内重复查询）不消耗配额 */
+  if (!allowWrite(request)) return json({ success: false, error: "too many requests" }, 429);
 
   let out = { found: false };
   try {
@@ -1924,12 +1929,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       tabs.innerHTML = "";
       var mk = function (label, id, extra) {
         var el = document.createElement("div");
+        el.setAttribute("data-dev", String(id));
         el.className = "tab" + (state.device === id ? " active" : "");
         el.setAttribute("role", "tab");
         el.setAttribute("aria-selected", state.device === id ? "true" : "false");
         el.tabIndex = 0;
         el.textContent = label + (extra ? " " + extra : "");
-        el.onclick = function () { state.device = id; state.page = 1; renderTabs(res.list || []); load(); };
+        el.onclick = function () { state.device = id; state.page = 1; markActiveTabs(); load(); };
         return el;
       };
       tabs.appendChild(mk(T("tabAll"), 0, "(" + (res.list || []).reduce(function (s, d) { return s + d.msg_count; }, 0) + ")"));
@@ -1997,7 +2003,18 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       });
     });
   }
-  function renderTabs(list) { loadDevices(); }
+  /* 切换设备标签时只更新激活态，不重新拉取 /api/devices（此前每次点击都会多请求一次设备列表） */
+  function markActiveTabs() {
+    var tabs = $("tabs").children;
+    for (var i = 0; i < tabs.length; i++) {
+      var el = tabs[i];
+      var raw = el.getAttribute("data-dev");
+      var id = raw === null ? 0 : parseInt(raw, 10);
+      var active = id === state.device;
+      el.classList.toggle("active", active);
+      el.setAttribute("aria-selected", active ? "true" : "false");
+    }
+  }
   function updateMeta(res) {
     $("stat").textContent = T("total", { n: res.total });
     $("pageinfo").textContent = res.pages > 1 ? T("pageOf", { a: res.page, b: res.pages }) : "";
@@ -2282,7 +2299,12 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   function load(incremental) {
     var q = qs();
     return fetch("/api/messages?" + q)
-      .then(function (r) { return r.json(); })
+      .then(function (r) {
+        /* 登录过期（cookie 7 天 Max-Age）：401 时整页重载，由服务端下发登录页，
+           避免停在「加载失败」重试界面 */
+        if (r.status === 401) { location.reload(); return new Promise(function () {}); }
+        return r.json();
+      })
       .then(function (res) {
         if (!res.success) throw new Error(res.error || "load failed");
         state.total = res.total; state.pages = res.pages;
@@ -2814,7 +2836,7 @@ export default {
         return await handleListSources(env);
       }
       if (path === "/api/phone" && request.method === "GET") {
-        return await handlePhoneArea(url, env);
+        return await handlePhoneArea(request, url, env);
       }
       if ((path === "/" || path === "/index.html") && request.method === "GET") {
         return new Response(renderHtml(PAGE_HTML, env), {
