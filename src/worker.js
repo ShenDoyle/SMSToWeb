@@ -2749,7 +2749,7 @@ export default {
       /* 登录开关：开启后，除推送接口与登录/登出外，页面与管理 API 均需登录 */
       const isPage = path === "/" || path === "/index.html";
       const isPublicApi = path === "/api/receive" || path === "/api/push" || path === "/api/login" || path === "/api/logout" ||
-        path === "/manifest.webmanifest" || path === "/sw.js";
+        path === "/api/cron" || path === "/manifest.webmanifest" || path === "/sw.js";
       if (!isPublicApi && !(await isAuthed(request, env))) {
         if (isPage && request.method === "GET") {
           return new Response(renderHtml(LOGIN_HTML, env), {
