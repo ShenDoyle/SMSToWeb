@@ -14,7 +14,9 @@ crons = ["0 17 * * *"]
 # 数据保留天数：定时任务每天删除超过该天数的短信
 RETENTION_DAYS = "30"
 # 管理页登录开关："true" 访问页面需输入密码（密码用 Secret ADMIN_PASSWORD 设置）；"false" 免登录
-ENABLE_AUTH = "false"
+# 默认 "true"（安全优先）：未配置 ADMIN_PASSWORD 时不会锁死——自动按免登录运行并输出告警，配好密码即生效
+# 注意：通过 Workers Builds / wrangler 部署时，此文件优先于 Dashboard 里手动改的变量值
+ENABLE_AUTH = "true"
 
 [[d1_databases]]
 binding = "DB"
