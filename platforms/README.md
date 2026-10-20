@@ -80,7 +80,7 @@ platforms/
 ```
 
 每个平台目录可单独作为部署根目录（Git 部署时把平台 Root Directory 指到对应子目录即可），
-零 npm 依赖、无需构建。`src/worker.js` 有更新后执行 `python platforms/gen_app.py` 一键同步全部平台（CI 校验零漂移，`node tests/run.mjs` 覆盖 26 项功能断言）。
+零 npm 依赖、无需构建。`src/worker.js` 有更新后执行 `python platforms/gen_app.py` 一键同步全部平台（CI 校验零漂移，`node tests/run.mjs` 覆盖 93 项功能断言）。
 
 ## 从 Cloudflare Worker 迁移到其他平台
 

@@ -34,6 +34,14 @@ const CORS = {
   "Access-Control-Max-Age": "86400",
 };
 
+/* 安全响应头：nosniff 防 MIME  sniff；X-Frame-Options 防管理页被 iframe 嵌套（点击劫持）；
+   Referrer-Policy 不外泄域名路径。合入全部响应（json() 与各 new Response 站点） */
+const SECURITY_HEADERS = {
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY",
+  "Referrer-Policy": "no-referrer",
+};
+
 const DEFAULT_RETENTION_DAYS = 30;
 /* 单条消息正文字数上限：超出截断，防止超大载荷撑爆存储 */
 const MAX_CONTENT = 8000;
@@ -73,7 +81,7 @@ function renderHtml(html, env) {
 function json(data, status = 200) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", ...CORS },
+    headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", ...SECURITY_HEADERS, ...CORS },
   });
 }
 
@@ -161,10 +169,15 @@ const LOGIN_FAIL_LIMIT = 5;
 const LOGIN_LOCK_MS = 10 * 60 * 1000;
 const loginFails = new Map(); /* ip -> { count, lockedUntil } */
 
+/* 客户端 IP：优先 CF-Connecting-IP（Cloudflare 可信头）；
+   否则取 X-Forwarded-For 的**最右一段**——平台边缘把真实对端 IP 追加在末尾，
+   左段是客户端自带值、可任意伪造（轮换伪造值可绕过登录锁定与写入限速），不可信 */
 function clientIp(request) {
-  return (request.headers.get("CF-Connecting-IP")
-    || (request.headers.get("X-Forwarded-For") || "").split(",")[0].trim()
-    || "unknown");
+  const cf = (request.headers.get("CF-Connecting-IP") || "").trim();
+  if (cf) return cf;
+  const parts = (request.headers.get("X-Forwarded-For") || "").split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+  if (parts.length) return parts[parts.length - 1];
+  return "unknown";
 }
 
 function loginLocked(request) {
@@ -207,7 +220,7 @@ async function handleLogin(request, env) {
     headers: {
       "Content-Type": "application/json; charset=utf-8",
       "Set-Cookie": authCookieHeader(request, token, 604800),
-      ...CORS,
+      ...SECURITY_HEADERS, ...CORS,
     },
   });
 }
@@ -234,7 +247,7 @@ function handleLogout(request) {
     headers: {
       "Content-Type": "application/json; charset=utf-8",
       "Set-Cookie": authCookieHeader(request, "", 0),
-      ...CORS,
+      ...SECURITY_HEADERS, ...CORS,
     },
   });
 }
@@ -750,7 +763,7 @@ async function handleExport(url, env) {
       headers: {
         "Content-Type": "application/json; charset=utf-8",
         "Content-Disposition": 'attachment; filename="smstoweb-' + stamp + '.json"',
-        "Cache-Control": "no-store", ...CORS,
+        "Cache-Control": "no-store", ...SECURITY_HEADERS, ...CORS,
       },
     });
   }
@@ -763,7 +776,7 @@ async function handleExport(url, env) {
     headers: {
       "Content-Type": "text/csv; charset=utf-8",
       "Content-Disposition": 'attachment; filename="smstoweb-' + stamp + '.csv"',
-      "Cache-Control": "no-store", ...CORS,
+      "Cache-Control": "no-store", ...SECURITY_HEADERS, ...CORS,
     },
   });
 }
@@ -876,7 +889,7 @@ function handleManifest(env) {
     ]
   };
   return new Response(JSON.stringify(m), {
-    headers: { "Content-Type": "application/manifest+json; charset=utf-8", "Cache-Control": "no-cache", ...CORS },
+    headers: { "Content-Type": "application/manifest+json; charset=utf-8", "Cache-Control": "no-cache", ...SECURITY_HEADERS, ...CORS },
   });
 }
 /* Service Worker：静态壳缓存优先、接口永不缓存；离线时回落到缓存的管理页 */
@@ -895,7 +908,7 @@ function handleSW() {
       "}).catch(function(){return caches.match(r).then(function(m){return m||caches.match('/');});}));" +
     "});";
   return new Response(js, {
-    headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-cache", ...CORS },
+    headers: { "Content-Type": "application/javascript; charset=utf-8", "Cache-Control": "no-cache", ...SECURITY_HEADERS, ...CORS },
   });
 }
 
@@ -904,7 +917,7 @@ async function handleListDevices(env) {
     `SELECT d.id, d.device, d.sim, d.alias,
             COALESCE(NULLIF(d.alias, ''), d.device) AS display_name,
             COUNT(m.id) AS msg_count, MAX(m.received_at) AS last_at
-     FROM devices d LEFT JOIN messages m ON m.device_id = d.id
+     FROM devices d LEFT JOIN messages m ON m.device_id = d.id AND m.deleted_at IS NULL
      GROUP BY d.id
      ORDER BY last_at DESC`
   ).all();
@@ -2708,7 +2721,7 @@ export default {
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
 
-    if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+    if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: { ...SECURITY_HEADERS, ...CORS } });
 
     try {
       /* 登录开关：开启后，除推送接口与登录/登出外，页面与管理 API 均需登录 */
@@ -2718,7 +2731,7 @@ export default {
       if (!isPublicApi && !(await isAuthed(request, env))) {
         if (isPage && request.method === "GET") {
           return new Response(renderHtml(LOGIN_HTML, env), {
-            headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+            headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", ...SECURITY_HEADERS },
           });
         }
         return json({ success: false, error: "unauthorized" }, 401);
@@ -2735,6 +2748,17 @@ export default {
       }
       if (path === "/api/logout" && request.method === "POST") {
         return handleLogout(request);
+      }
+      /* 定时清理 HTTP 触发（与移植平台入口级 /api/cron 行为一致）：
+         Cloudflare 平台 cron 之外，也允许外部调度器调 GET /api/cron?token=<RECEIVE_TOKEN> 触发 */
+      if (path === "/api/cron" && request.method === "GET") {
+        const bearer = (request.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "").trim();
+        const provided = url.searchParams.get("token") || bearer;
+        if (!env.RECEIVE_TOKEN || !provided || !safeEqual(provided, env.RECEIVE_TOKEN)) {
+          return json({ success: false, error: "unauthorized" }, 403);
+        }
+        await handleCron(env);
+        return json({ success: true });
       }
       if (path === "/api/messages" && request.method === "GET") {
         return await handleListMessages(url, env);
@@ -2794,7 +2818,7 @@ export default {
       }
       if ((path === "/" || path === "/index.html") && request.method === "GET") {
         return new Response(renderHtml(PAGE_HTML, env), {
-          headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" },
+          headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", ...SECURITY_HEADERS },
         });
       }
       return json({ success: false, error: "not found" }, 404);

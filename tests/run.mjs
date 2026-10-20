@@ -180,6 +180,11 @@ async function main() {
   check(r.data && r.data.success && r.data.removed === 2, "按设备清空 2 条");
   r = await call("GET", "/api/messages?device_id=" + devBatch.id, e0);
   check(r.data && r.data.total === 0, "清空后该设备无消息");
+  /* P1 回归：设备消息全部软删后，msg_count 应归零（不含软删记录，否则 × 删除按钮被隐藏） */
+  const devAfterClear = (await call("GET", "/api/devices", e0)).data.list.find(function (d) { return d.id === devBatch.id; });
+  check(devAfterClear && devAfterClear.msg_count === 0, "设备消息全部软删后 msg_count=0（不含软删记录）");
+  r = await call("DELETE", "/api/devices/" + devBatch.id, e0);
+  check(r.data && r.data.success === true && r.data.deleted === 1, "软删全部消息后可直接删除设备标签（UI × 有出现条件）");
 
   group("收藏 / 已读 / 统计 / PWA");
   const mlist = (await call("GET", "/api/messages?limit=100", e0)).data.list;
@@ -230,6 +235,29 @@ async function main() {
     if (rr.status === 429) saw429 = true; else if (rr.status === 200) allowed++;
   }
   check(saw429 && allowed >= 1 && allowed < 260, "限速生效：放行一批后开始返回 429");
+
+  group("安全响应头 / /api/cron HTTP 触发（CF 入口）/ XFF 防伪造");
+  const homeR = await fetchApp(R("GET", "/", {}), e0);
+  check(homeR.status === 200 && homeR.headers.get("X-Content-Type-Options") === "nosniff", "管理页响应带 X-Content-Type-Options: nosniff");
+  check(homeR.headers.get("X-Frame-Options") === "DENY", "管理页响应带 X-Frame-Options: DENY（防 iframe 点击劫持）");
+  check(homeR.headers.get("Referrer-Policy") === "no-referrer", "管理页响应带 Referrer-Policy: no-referrer");
+  const apiR = await fetchApp(R("GET", "/api/messages", {}), e0);
+  check(apiR.headers.get("X-Content-Type-Options") === "nosniff" && apiR.headers.get("X-Frame-Options") === "DENY", "API 响应同样带安全响应头");
+  /* /api/cron：Cloudflare 入口（fetchApp 内路由）与移植平台入口行为一致 */
+  r = await fetchApp(R("GET", "/api/cron", {}), e0);
+  check(r.status === 403, "fetchApp /api/cron 无 token → 403");
+  r = await fetchApp(R("GET", "/api/cron?token=tok", {}), e0);
+  check(r.status === 200, "fetchApp /api/cron 带 token → 200（CF 侧外部 cron 可用）");
+  /* XFF 左段可伪造：轮换伪造左段但保持末段不变，限速桶不应被绕过 */
+  let saw429xff = false;
+  for (let i = 0; i < 260 && !saw429xff; i++) {
+    const rr = await call("POST", "/api/push?token=tok", e0, {
+      headers: { "X-Forwarded-For": "10.9." + (i % 250) + "." + ((i * 7) % 250) + ", 203.0.113.9" },
+      body: { content: "xff-spoof " + i },
+    });
+    if (rr.status === 429) saw429xff = true;
+  }
+  check(saw429xff, "XFF 左段伪造不绕过写入限速（clientIp 取末段）");
 
   group("中英双语 / 移动端 / 平台兼容");
   const coreSrc = readFileSync(new URL("../src/worker.js", import.meta.url), "utf8");

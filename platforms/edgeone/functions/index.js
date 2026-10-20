@@ -5,8 +5,8 @@
  * /foo、/api/xxx 等非根路径，根路径 / 只认 index.js（官方文档：index.js -> example.com/）。
  * 缺少本文件时访问 / 会命中平台默认 404 页面。
  *
- * 本文件逻辑与 [[default]].js 保持一致（ENV_KEYS 块由 platforms/gen_app.py 同步），
- * 修改路由处理逻辑时请两处同步修改。
+ * 本文件是 EdgeOne 侧唯一逻辑入口：[[default]].js 仅 re-export 本文件的 onRequest，
+ * 全部逻辑与 ENV_KEYS 白名单以本文件为单一来源（ENV_KEYS 块由 platforms/gen_app.py 同步）。
  */
 import { fetchApp, handleCronRequest } from "../app.js";
 import { createTursoDb } from "../db.js";
