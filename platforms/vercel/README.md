@@ -6,6 +6,14 @@
 
 ---
 
+## 一键部署（推荐）
+
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2FShenDoyle%2FSMSToWeb%2Ftree%2Fmain%2Fplatforms%2Fvercel&env=RECEIVE_TOKEN%2CTURSO_DATABASE_URL%2CTURSO_AUTH_TOKEN&project-name=sms-gateway&envDescription=%E6%8E%A8%E9%80%81%E9%89%B4%E6%9D%83%E5%AF%86%E9%92%A5%E4%B8%8E%20Turso%20%E6%95%B0%E6%8D%AE%E5%BA%93%E8%BF%9E%E6%8E%A5%E4%BF%A1%E6%81%AF&envLink=https%3A%2F%2Fgithub.com%2FShenDoyle%2FSMSToWeb)
+
+建议**先完成下方第二步（建 Turso 库）拿到连接信息**，再点按钮：Vercel 会把本平台子目录克隆为你的仓库并创建项目，按提示填 `RECEIVE_TOKEN`（推送鉴权密钥，自编长随机串）与 Turso 的 URL / Token 即可部署。部署成功后**务必执行一次第三步的建表 SQL**（Vercel 无法自动建表），否则页面打开无数据。
+
+---
+
 ## 准备工作
 
 1. 一个 GitHub 账号（Vercel 通过 GitHub 仓库部署）

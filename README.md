@@ -22,6 +22,12 @@
                                                   浏览器 ◀── 网页管理页（网关内嵌）
 ```
 
+**一键部署（Cloudflare 主版本，约 2 分钟）**：
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ShenDoyle/SMSToWeb/tree/main/platforms/cloudflare)
+
+点按钮自动完成建库建表、资源绑定与 CI 配置，按提示填 `RECEIVE_TOKEN`（推送鉴权密钥）即可上线；Vercel / Netlify 的一键部署按钮见对应平台教程。
+
 | 平台 | 部署方式 | 定时清理 | 详细教程 |
 |---|---|---|---|
 | **Cloudflare**（推荐） | Worker + D1 | 平台 cron | [platforms/cloudflare/README.md](platforms/cloudflare/README.md) |

@@ -7,6 +7,18 @@
 
 ---
 
+## 一键部署（推荐新手）
+
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ShenDoyle/SMSToWeb/tree/main/platforms/cloudflare)
+
+点上方按钮，Cloudflare 自动完成：克隆代码到你的 GitHub → **自动创建 D1 数据库并执行建表** → 绑定资源 → 配置 CI（之后你仓库每次 push 自动重新部署）→ 上线。过程中按提示填两个密钥：
+
+- `RECEIVE_TOKEN`：推送鉴权密钥，自己编一个足够长的随机字符串（手机端接入 URL 中 `token=` 与之保持一致）
+- `ADMIN_PASSWORD`：管理页登录密码（**强烈建议设置**——管理页承载短信验证码等敏感内容；留空则免登录运行并告警）
+
+> 绑自定义域名（如 `sms.example.com`）：部署完成后进入 Worker → 设置 → 域和路由 → 添加自定义域。
+> 下方手动教程保留给不想走一键流程、或想逐步理解每一步的用户。
+
 ## 准备工作
 
 1. 一个 Cloudflare 账号（[注册入口](https://dash.cloudflare.com/sign-up)，免费，邮箱即可）

@@ -6,6 +6,17 @@
 
 ---
 
+## 一键部署（推荐）
+
+[![Deploy to Netlify](https://www.netlify.com/img/deploy/button.svg)](https://app.netlify.com/start/deploy?repository=https://github.com/ShenDoyle/SMSToWeb)
+
+点按钮把仓库克隆到你的 GitHub 并进入创建向导，两处注意：
+
+1. **构建配置里把 Base directory 填 `platforms/netlify`**（本平台的 `netlify.toml` 在该子目录，填对后构建命令等自动接管）；其余保持默认
+2. 建议先完成下方第二步（建 Turso 库）拿到连接信息，创建后在 **Site configuration → Environment variables** 填 `RECEIVE_TOKEN` / `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` 并重新部署；最后执行第三步建表 SQL（Netlify 无法自动建表）
+
+---
+
 ## 准备工作
 
 1. 一个 GitHub 账号

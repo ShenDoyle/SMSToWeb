@@ -15,6 +15,9 @@ SMSToWeb 的全部六个平台（Cloudflare 主版本 + 五个移植平台）都
 六平台（含 Cloudflare）接口路径、鉴权逻辑、消息模型、管理页、多渠道通知转发、每日清理（UTC 17:00）完全一致，
 数据表结构相同，可随时互相迁移。
 
+> **一键部署**：Cloudflare / Vercel / Netlify 三个平台的教程顶部有官方一键部署按钮（Cloudflare 按钮连建库建表都自动完成），
+> Deno Deploy、EdgeOne、Docker 自托管暂无官方按钮，按各平台教程操作即可。
+
 ## 平台怎么选
 
 - **想要零成本 + 省心** → Cloudflare 主版本（D1 免费额度大，Worker 无时长问题）

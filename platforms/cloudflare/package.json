@@ -1,0 +1,17 @@
+{
+  "name": "smstoweb-sms-gateway",
+  "private": true,
+  "scripts": {
+    "deploy": "wrangler d1 execute DB --remote --file schema.sql && wrangler deploy"
+  },
+  "cloudflare": {
+    "bindings": {
+      "RECEIVE_TOKEN": {
+        "description": "推送鉴权密钥：自己编一个足够长的随机字符串（手机端接入 URL 中 `token=` 需与之一致）"
+      },
+      "ADMIN_PASSWORD": {
+        "description": "管理页登录密码（`ENABLE_AUTH=true` 时生效），建议强密码；留空则管理页免登录并输出告警"
+      }
+    }
+  }
+}
