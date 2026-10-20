@@ -1108,21 +1108,32 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
          border-radius: 8px; font-size: 14px; background: var(--card); color: var(--text); }
   .toolbar select { padding: 8px 8px; border: 1px solid var(--border); border-radius: 8px;
          font-size: 13px; background: var(--card); color: var(--text); }
-  /* 二级菜单（更多）：开关 / 筛选 / 操作收纳一处 */
-  .morewrap { position: relative; flex: none; display: inline-flex; }
-  .moremenu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 70; min-width: 200px;
-              max-width: calc(100vw - 32px); background: var(--card); border: 1px solid var(--border);
-              border-radius: 12px; box-shadow: 0 10px 28px rgba(15, 23, 42, .16); padding: 6px; display: none; }
-  .moremenu.open { display: block; }
-  .moremenu .grp { font-size: 11px; font-weight: 600; color: var(--faint); padding: 7px 10px 3px; }
-  .moremenu .grp:not(:first-child) { border-top: 1px solid var(--row-border); margin-top: 5px; }
-  .moremenu .opt { display: flex; width: 100%; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 8px; }
-  .moremenu .opt:hover { background: var(--bg); }
-  .moremenu .opt .switch { margin-left: auto; }
-  .moremenu .tbtn { display: flex; width: 100%; align-items: center; text-align: left; font-size: 13px;
-                    padding: 8px 10px; border-color: transparent; background: none; }
-  .moremenu .tbtn:hover { background: var(--bg); border-color: transparent; }
-  .moremenu .tbtn.on { border-color: var(--accent); background: var(--badge-bg); }
+  /* 设置下拉菜单：统计 / 消息开关 / 免打扰 / 筛选 / 操作，全部左对齐 */
+  .setwrap { position: relative; display: inline-flex; }
+  .setmenu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 70; min-width: 224px;
+             max-width: calc(100vw - 32px); max-height: calc(100vh - 96px); overflow-y: auto;
+             background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+             box-shadow: 0 10px 28px rgba(15, 23, 42, .16); padding: 6px; display: none; }
+  .setmenu.open { display: block; }
+  .setmenu .grp { font-size: 11px; font-weight: 600; color: var(--faint); padding: 7px 10px 3px; text-align: left; }
+  .setmenu .grp:not(:first-child) { border-top: 1px solid var(--row-border); margin-top: 5px; }
+  .setmenu .opt { display: flex; width: 100%; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 8px; }
+  .setmenu .opt:hover { background: var(--bg); }
+  .setmenu .tbtn { display: flex; width: 100%; align-items: center; text-align: left; font-size: 13px;
+                   padding: 8px 10px; border-color: transparent; background: none; }
+  .setmenu .tbtn:hover { background: var(--bg); border-color: transparent; }
+  .setmenu .tbtn.on { border-color: var(--accent); background: var(--badge-bg); color: var(--accent); }
+  .setmenu .btnrow { display: flex; flex-wrap: wrap; gap: 6px; padding: 4px 10px 6px; }
+  .setmenu .btnrow .tbtn { width: auto; flex: none; border-color: var(--border); background: var(--card); color: var(--text); }
+  .setmenu .btnrow .tbtn:hover { background: var(--card); border-color: var(--accent); color: var(--accent); }
+  .setmenu .btnrow .tbtn.on { border-color: var(--accent); background: var(--badge-bg); color: var(--accent); }
+  .setmenu .dndrow { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding: 4px 10px 8px;
+                     font-size: 12px; color: var(--muted); }
+  .setmenu .dndrow input { width: 52px; padding: 5px 6px; border: 1px solid var(--border); border-radius: 6px;
+                           font-size: 13px; background: var(--card); color: var(--text); }
+  .setmenu .dndrow .tbtn { width: auto; flex: none; border-color: var(--border); background: var(--card);
+                           color: var(--text); padding: 5px 12px; }
+  .setmenu .dndrow .tbtn:hover { background: var(--card); border-color: var(--accent); color: var(--accent); }
   .opt { position: relative; display: inline-flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
   .opt input { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; }
   .opt .switch { position: relative; flex: none; width: 40px; height: 22px; border-radius: 999px;
@@ -1309,13 +1320,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     .tab { padding: 7px 13px; }
     .tabop, .tabx { padding: 2px 5px; }
     .star, .del { padding: 4px 6px; }
-    /* 二级菜单内触控目标加大，降低误触 */
-    .moremenu .tbtn, .moremenu .opt { min-height: 42px; }
-    /* 窄屏：工具栏换行后按钮可能到行首，右对齐下拉会冲出左边界 →
-       改为底部抽屉（与 .sheet 弹层同风格），贴安全区，永不溢出 */
-    .moremenu { position: fixed; left: 16px; right: 16px; top: auto; width: auto;
-                bottom: calc(16px + env(safe-area-inset-bottom, 0px));
-                min-width: 0; max-width: none; }
+    /* 设置菜单内触控目标加大，降低误触 */
+    .setmenu .tbtn, .setmenu .opt { min-height: 42px; }
+    /* 窄屏：桌面右对齐下拉在矮/窄屏易溢出，改底部抽屉（与 .sheet 弹层同风格），
+       贴安全区 + 限高内部滚动，平板小笔记本均不溢出 */
+    .setmenu { position: fixed; left: 16px; right: 16px; top: auto; width: auto;
+               bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+               min-width: 0; max-width: none; max-height: 72vh; }
     .selbar { width: calc(100% - 24px); justify-content: space-between; border-radius: 14px; }
     .barrow .bl { width: 54px; }
   }
@@ -1335,8 +1346,37 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   <div class="head">
     <h1>__SITE_NAME__</h1>
     <span class="headacts">
-      <button class="tbtn" id="statsbtn" data-i18n-title="stats" data-i18n="stats">统计</button>
-      <button class="tbtn" id="setbtn" data-i18n-title="settings" data-i18n="settings">设置</button>
+      <span class="setwrap">
+        <button class="tbtn" id="setbtn" data-i18n-title="settings" data-i18n="settings" aria-haspopup="true" aria-expanded="false">设置</button>
+        <div class="setmenu" id="setmenu" role="menu" aria-label="设置">
+          <button class="tbtn" id="mstats" role="menuitem" data-i18n-title="stats" data-i18n="stats">统计</button>
+          <div class="grp" data-i18n="grpMsg">消息开关</div>
+          <label class="opt"><input type="checkbox" id="autocopy"><span class="switch"></span><span data-i18n="autoCopy">自动复制验证码</span></label>
+          <label class="opt"><input type="checkbox" id="notifyon"><span class="switch"></span><span data-i18n="notifyOn">后台通知</span></label>
+          <label class="opt"><input type="checkbox" id="soundon"><span class="switch"></span><span data-i18n="soundOn">提示音</span></label>
+          <div class="grp" data-i18n="sDnd">免打扰</div>
+          <label class="opt"><input type="checkbox" id="stdnd"><span class="switch"></span><span data-i18n="sDnd">免打扰</span></label>
+          <div class="dndrow">
+            <span data-i18n="sDndRange">免打扰时段</span>
+            <input type="number" id="dnds" min="0" max="23" inputmode="numeric" data-i18n-aria="dndStart" aria-label="免打扰开始小时">
+            <span data-i18n="to">至</span>
+            <input type="number" id="dnde" min="0" max="23" inputmode="numeric" data-i18n-aria="dndEnd" aria-label="免打扰结束小时">
+            <button class="tbtn" id="dndsave" data-i18n="save">保存</button>
+          </div>
+          <div class="grp" data-i18n="grpFilter">筛选</div>
+          <div class="btnrow">
+            <button class="tbtn" id="staronly" data-i18n-title="starTip" data-i18n="starOnly" title="只看收藏">★ 收藏</button>
+            <button class="tbtn" id="unreadonly" data-i18n-title="unreadTip" data-i18n="unreadOnly" title="只看未读">● 未读</button>
+          </div>
+          <div class="grp" data-i18n="grpAction">操作</div>
+          <div class="btnrow">
+            <button class="tbtn" id="selectbtn" data-i18n-title="selectTip" data-i18n="select" title="进入批量选择">选择</button>
+            <button class="tbtn" id="clearbtn" data-i18n-title="clearTip" data-i18n="clear" title="清空当前筛选结果（软删除）">清空</button>
+            <button class="tbtn" id="exportcsv" data-i18n-title="exportCsvTip" data-i18n="exportCsv" title="按当前筛选导出 CSV">导出 CSV</button>
+            <button class="tbtn" id="exportjson" data-i18n-title="exportJsonTip" data-i18n="exportJson" title="按当前筛选导出 JSON">导出 JSON</button>
+          </div>
+        </div>
+      </span>
       <button class="tbtn" id="themebtn" data-i18n-title="themeTip">自动</button>
       <button class="tbtn" id="langbtn" data-i18n-title="langTip">EN</button>
     </span>
@@ -1359,23 +1399,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       <option value="7d" data-i18n="d7">近 7 天</option>
       <option value="30d" data-i18n="d30">近 30 天</option>
     </select>
-    <span class="morewrap">
-      <button class="tbtn" id="morebtn" data-i18n="moreMenu" data-i18n-title="moreTip" title="更多功能" aria-haspopup="true" aria-expanded="false">更多</button>
-      <div class="moremenu" id="moremenu" role="menu" aria-label="更多功能">
-        <div class="grp" data-i18n="grpSwitch">开关</div>
-        <label class="opt"><input type="checkbox" id="autocopy"><span class="switch"></span><span data-i18n="autoCopy">自动复制验证码</span></label>
-        <label class="opt"><input type="checkbox" id="notifyon"><span class="switch"></span><span data-i18n="notifyOn">后台通知</span></label>
-        <label class="opt"><input type="checkbox" id="soundon"><span class="switch"></span><span data-i18n="soundOn">提示音</span></label>
-        <div class="grp" data-i18n="grpFilter">筛选</div>
-        <button class="tbtn" id="staronly" role="menuitemcheckbox" data-i18n-title="starTip" data-i18n="starOnly" title="只看收藏">★ 收藏</button>
-        <button class="tbtn" id="unreadonly" role="menuitemcheckbox" data-i18n-title="unreadTip" data-i18n="unreadOnly" title="只看未读">● 未读</button>
-        <div class="grp" data-i18n="grpAction">操作</div>
-        <button class="tbtn" id="selectbtn" role="menuitem" data-i18n-title="selectTip" data-i18n="select" title="进入批量选择">选择</button>
-        <button class="tbtn" id="clearbtn" role="menuitem" data-i18n-title="clearTip" data-i18n="clear" title="清空当前筛选结果（软删除）">清空</button>
-        <button class="tbtn" id="exportcsv" role="menuitem" data-i18n-title="exportCsvTip" data-i18n="exportCsv" title="按当前筛选导出 CSV">导出 CSV</button>
-        <button class="tbtn" id="exportjson" role="menuitem" data-i18n-title="exportJsonTip" data-i18n="exportJson" title="按当前筛选导出 JSON">导出 JSON</button>
-      </div>
-    </span>
   </div>
   <div class="meta"><span id="stat"></span><span id="pageinfo"></span></div>
   <div class="list" id="list"><div class="sk"><div class="skc"></div><div class="skc"></div><div class="skc"></div></div></div>
@@ -1448,8 +1471,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       ghRepo: "GitHub repository", modalClose: "Close", devices: "Devices",
       jumpTip: "Enter a page number and press Enter", perPageTip: "Items per page",
       stats: "统计", settings: "设置",
-      moreMenu: "更多", moreTip: "更多功能",
-      grpSwitch: "开关", grpFilter: "筛选", grpAction: "操作",
+      grpMsg: "消息开关", grpFilter: "筛选", grpAction: "操作",
+      dndStart: "免打扰开始小时", dndEnd: "免打扰结束小时",
       themeAuto: "自动", themeLight: "浅色", themeDark: "深色",
       themeTip: "切换主题（自动 / 浅色 / 深色）",
       tabAll: "全部", tabRename: "重命名设备", tabMerge: "合并到其他设备", tabDel: "删除该设备标签",
@@ -1480,8 +1503,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       star: "收藏置顶", unstar: "取消收藏", markUnread: "标为未读", copyAll: "复制全文",
       call: "拨号", setLabel: "号码标签",
       labelPrompt: "给 {n} 设置标签（留空清除）",
-      sTheme: "主题", sSound: "新消息提示音", sDnd: "免打扰", sDndRange: "免打扰时段",
-      to: "至", hourSuffix: "点", save: "保存", saved: "设置已保存",
+      sDnd: "免打扰", sDndRange: "免打扰时段",
+      to: "至", save: "保存", saved: "设置已保存",
       statTitle: "统计", statFail: "统计加载失败", statTotal: "总消息", statUnread: "未读", statStarred: "收藏",
       statSources: "来源分布", statDays: "近 7 天",
       autoCopyOn: "已开启验证码自动复制", autoCopyOff: "已关闭验证码自动复制",
@@ -1509,8 +1532,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       ghRepo: "GitHub 仓库", modalClose: "关闭", devices: "设备标签",
       jumpTip: "输入页码后回车跳转", perPageTip: "每页条数",
       stats: "Stats", settings: "Settings",
-      moreMenu: "More", moreTip: "More options",
-      grpSwitch: "Toggles", grpFilter: "Filter", grpAction: "Actions",
+      grpMsg: "Message toggles", grpFilter: "Filter", grpAction: "Actions",
+      dndStart: "Quiet hours start", dndEnd: "Quiet hours end",
       themeAuto: "Auto", themeLight: "Light", themeDark: "Dark",
       themeTip: "Theme: auto / light / dark",
       tabAll: "All", tabRename: "Rename device", tabMerge: "Merge into another device", tabDel: "Delete this device",
@@ -1541,8 +1564,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       star: "Star & pin", unstar: "Unstar", markUnread: "Mark unread", copyAll: "Copy text",
       call: "Call", setLabel: "Number label",
       labelPrompt: "Label for {n} (leave empty to clear)",
-      sTheme: "Theme", sSound: "New message sound", sDnd: "Do not disturb", sDndRange: "Quiet hours",
-      to: "to", hourSuffix: "", save: "Save", saved: "Settings saved",
+      sDnd: "Do not disturb", sDndRange: "Quiet hours",
+      to: "to", save: "Save", saved: "Settings saved",
       statTitle: "Statistics", statFail: "Failed to load stats", statTotal: "Total", statUnread: "Unread", statStarred: "Starred",
       statSources: "By source", statDays: "Last 7 days",
       autoCopyOn: "Auto-copy enabled", autoCopyOff: "Auto-copy disabled",
@@ -2274,31 +2297,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (s === e) return false;
     return s < e ? (h >= s && h < e) : (h >= s || h < e);
   }
-  function openSettings() {
-    var d = getDND();
-    var html = '<h3>' + esc(T("settings")) + '</h3>' +
-      '<div class="dl">' +
-        '<div class="drow"><span>' + esc(T("sTheme")) + '</span><span><button class="tbtn" id="thauto">' + esc(T("themeAuto")) + '</button> <button class="tbtn" id="thlight">' + esc(T("themeLight")) + '</button> <button class="tbtn" id="thdark">' + esc(T("themeDark")) + '</button></span></div>' +
-        '<div class="drow"><span>' + esc(T("sSound")) + '</span><span><input type="checkbox" id="stsound"' + (state.sound ? " checked" : "") + '></span></div>' +
-        '<div class="drow"><span>' + esc(T("sDnd")) + '</span><span><input type="checkbox" id="stdnd"' + (d.on ? " checked" : "") + '></span></div>' +
-        '<div class="drow"><span>' + esc(T("sDndRange")) + '</span><span><input type="number" id="dnds" min="0" max="23" value="' + (parseInt(d.start, 10) || 0) + '" style="width:56px"> ' + esc(T("to")) + ' <input type="number" id="dnde" min="0" max="23" value="' + (parseInt(d.end, 10) || 0) + '" style="width:56px"> ' + esc(T("hourSuffix")) + '</span></div>' +
-      '</div>' +
-      '<div class="detail-actions"><button class="tbtn" id="dsave">' + esc(T("save")) + '</button></div>';
-    openModal(html);
-    $("thauto").onclick = function () { try { localStorage.setItem("sms_theme", "auto"); } catch (e) {} applyTheme("auto"); };
-    $("thlight").onclick = function () { try { localStorage.setItem("sms_theme", "light"); } catch (e) {} applyTheme("light"); };
-    $("thdark").onclick = function () { try { localStorage.setItem("sms_theme", "dark"); } catch (e) {} applyTheme("dark"); };
-    $("dsave").onclick = function () {
-      var on = $("stdnd").checked;
-      var start = Math.min(23, Math.max(0, parseInt($("dnds").value, 10) || 0));
-      var end = Math.min(23, Math.max(0, parseInt($("dnde").value, 10) || 0));
-      try { localStorage.setItem("sms_dnd", JSON.stringify({ on: on, start: start, end: end })); } catch (e) {}
-      state.sound = $("stsound").checked;
-      try { localStorage.setItem("sms_sound", state.sound ? "1" : "0"); } catch (e) {}
-      if ($("soundon")) $("soundon").checked = state.sound;
-      closeModal(); toast(T("saved"));
-    };
-  }
   function openStats() {
     openModal('<h3>' + esc(T("statTitle")) + '</h3><div id="statbody">' + esc(T("loading")) + '</div>');
     fetch("/api/stats").then(function (r) { return r.json(); }).then(function (d) {
@@ -2490,31 +2488,45 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (state.sound) beep();
     toast(state.sound ? T("soundOnMsg") : T("soundOffMsg"));
   };
-  /* ---------- 二级菜单（更多）：开关 / 筛选 / 操作 ---------- */
-  var moreBtn = $("morebtn"), moreMenu = $("moremenu");
-  function setMoreOpen(on) {
-    moreMenu.classList.toggle("open", on);
-    moreBtn.setAttribute("aria-expanded", on ? "true" : "false");
+  /* ---------- 设置下拉菜单：统计 / 消息开关 / 免打扰 / 筛选 / 操作 ---------- */
+  var setBtn = $("setbtn"), setMenu = $("setmenu");
+  function setSetOpen(on) {
+    setMenu.classList.toggle("open", on);
+    setBtn.setAttribute("aria-expanded", on ? "true" : "false");
   }
-  moreBtn.onclick = function (ev) {
+  setBtn.onclick = function (ev) {
     if (ev && ev.stopPropagation) ev.stopPropagation();
-    setMoreOpen(!moreMenu.classList.contains("open"));
+    setSetOpen(!setMenu.classList.contains("open"));
   };
   /* 点菜单外或按 Esc 收起 */
   document.addEventListener("click", function (ev) {
-    if (!moreMenu.classList.contains("open")) return;
-    if (moreMenu.contains(ev.target) || moreBtn.contains(ev.target)) return;
-    setMoreOpen(false);
+    if (!setMenu.classList.contains("open")) return;
+    if (setMenu.contains(ev.target) || setBtn.contains(ev.target)) return;
+    setSetOpen(false);
   });
   document.addEventListener("keydown", function (ev) {
-    if (ev.key === "Escape" && moreMenu.classList.contains("open")) { setMoreOpen(false); moreBtn.focus(); }
+    if (ev.key === "Escape" && setMenu.classList.contains("open")) { setSetOpen(false); setBtn.focus(); }
   });
-  /* 开关（label 内）切换不收起，方便连续调；其余项点击即收起 */
-  moreMenu.addEventListener("click", function (ev) {
+  /* 开关（label 内）与免打扰输入区操作不收起，方便连续调；其余项点击即收起 */
+  setMenu.addEventListener("click", function (ev) {
     var t = ev.target;
-    if (t && t.closest && t.closest("label")) return;
-    setMoreOpen(false);
+    if (t && t.closest && (t.closest("label") || t.closest(".dndrow"))) return;
+    setSetOpen(false);
   });
+  /* 统计：先关菜单，再开统计弹层 */
+  $("mstats").onclick = function () { setSetOpen(false); openStats(); };
+  /* 免打扰：回填开关与时段；保存只写 dnd（提示音由 soundon 即时生效，不在此保存） */
+  var dnd = getDND();
+  $("stdnd").checked = !!dnd.on;
+  $("dnds").value = parseInt(dnd.start, 10) || 0;
+  $("dnde").value = parseInt(dnd.end, 10) || 0;
+  $("dndsave").onclick = function () {
+    var on = $("stdnd").checked;
+    var start = Math.min(23, Math.max(0, parseInt($("dnds").value, 10) || 0));
+    var end = Math.min(23, Math.max(0, parseInt($("dnde").value, 10) || 0));
+    try { localStorage.setItem("sms_dnd", JSON.stringify({ on: on, start: start, end: end })); } catch (e) {}
+    setSetOpen(false); toast(T("saved"));
+  };
   /* 回到页面即清零未读数、恢复标题，并立刻补拉一次（移动端切后台常被冻结，长轮询可能已断） */
   document.addEventListener("visibilitychange", function () {
     if (!document.hidden) {
@@ -2637,8 +2649,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   /* 收藏 / 未读筛选 + 头部按钮 + 弹层 + PWA + 搜索历史 */
   $("staronly").onclick = function () { state.starOnly = !state.starOnly; $("staronly").classList.toggle("on", state.starOnly); state.page = 1; load(); };
   $("unreadonly").onclick = function () { state.unreadOnly = !state.unreadOnly; $("unreadonly").classList.toggle("on", state.unreadOnly); state.page = 1; load(); };
-  $("statsbtn").onclick = openStats;
-  $("setbtn").onclick = openSettings;
   $("modalx").onclick = closeModal;
   $("modal").addEventListener("click", function (ev) { if (ev.target === $("modal")) closeModal(); });
   loadQHist();
