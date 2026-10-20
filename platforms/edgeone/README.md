@@ -100,7 +100,7 @@ EdgeOne Makers 暂无原生定时任务，用任一免费外部 cron 服务每�
 
 ## 注意事项与常见问题
 
-- **根路径 404（重要，2026-10 实测）**：EdgeOne Makers 的 Functions 路由规则中，`[[default]].js` 兜底只匹配 `/foo`、`/api/xxx` 等非根路径，**根路径 `/` 只认 `functions/index.js`**——缺少该文件时打开首页会直接命中平台默认 404 页（API 接口却正常）。本目录已内置 `functions/index.js` 解决，其逻辑与 `[[default]].js` 完全一致，改动路由处理时两处同步修改；`functions/index.js` 中的 ENV_KEYS 白名单块已纳入 `platforms/gen_app.py` 统一同步
+- **根路径 404（重要，2026-10 实测）**：EdgeOne Makers 的 Functions 路由规则中，`[[default]].js` 兜底只匹配 `/foo`、`/api/xxx` 等非根路径，**根路径 `/` 只认 `functions/index.js`**——缺少该文件时打开首页会直接命中平台默认 404 页（API 接口却正常）。本目录已内置 `functions/index.js` 解决（逻辑与 ENV_KEYS 白名单的单一来源，`[[default]].js` 仅 re-export 它，无需两处维护）
 - **长轮询**：Functions 执行时长上限较紧，`/api/wait`（挂起 25 秒）可能被提前截断——前端自动重试，功能不受影响
 - **部署失败排查**：根目录必须是 `platforms/edgeone`；缺 `TURSO_*` 环境变量会 500 报 "config error"
 - **更新代码**：push 到 GitHub 仓库自动重新部署
