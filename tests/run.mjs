@@ -285,6 +285,13 @@ async function main() {
       "中英字典键集一致（zh " + zk.length + " 项，缺失：" + (missingEn.join(",") || "无") + "，多余：" + (extra.join(",") || "无") + "）");
     check(String(I18N.en.total).indexOf("{n}") >= 0 && String(I18N.zh.total).indexOf("{n}") >= 0,
       "带变量的文案保留 {n} 占位符");
+    /* 值语言校验（键集一致不防值互换）：zh 值须含中文、en 值不得含中文；
+       langBtn/langTip 为语言切换按钮，有意显示目标语言，白名单放行 */
+    const langSafe = { langBtn: 1, langTip: 1 };
+    const badLang = zk.filter(function (k) {
+      return !langSafe[k] && (/[\u4e00-\u9fff]/.test(I18N.en[k]) || !/[\u4e00-\u9fff]/.test(I18N.zh[k]));
+    });
+    check(badLang.length === 0, "zh 值含中文 / en 值不含中文（防 zh/en 值互换，违例：" + (badLang.join(",") || "无") + "）");
   }
   const pageHtml = await (await fetchApp(R("GET", "/", {}), e0)).text();
   check(/data-i18n="stats"/.test(pageHtml) && /data-i18n-ph="searchPh"/.test(pageHtml),
@@ -352,6 +359,37 @@ async function main() {
       "英文相对时间（5 min ago）");
     check(z.relTime(new Date(nowMs - 5 * 60000).toISOString().replace("T", " ").slice(0, 19)) === "5 分钟前",
       "中文相对时间（5 分钟前）");
+  }
+
+  /* 验证码提取七级级联回归：码在前（①②）必须先于关键词在前（③④）——关键词在前模式
+     允许跨短 gap，曾把「123456是您的验证码，您有2000积分待领取」里的 2000 误当验证码 */
+  group("验证码提取（七级级联回归）");
+  {
+    const ecStart = coreSrc.indexOf("function extractCode");
+    const ecEnd = coreSrc.indexOf("/* 内容链接化");
+    let extractCode = null;
+    try { extractCode = new Function(coreSrc.slice(ecStart, ecEnd) + "\nreturn extractCode;")(); } catch (e) { extractCode = null; }
+    check(!!extractCode, "extractCode 可在沙箱中求值");
+    if (extractCode) {
+      const cases = [
+        ["您的验证码是482910，10分钟内有效", "482910", "②关键词在前+纯数字"],
+        ["取件码 8-2-307，请至丰巢柜取件", "82307", "①关键词在前+分隔码"],
+        ["验证码 1234 5678，请分别输入", "12345678", "①分隔码不被截断"],
+        ["123456是您的验证码，10分钟内输入", "123456", "③码在前+纯数字"],
+        ["123456是您的验证码，您有2000积分待领取", "123456", "③码在前优先于后续数字（回归：不得取 2000）"],
+        ["8-2-307 是您的取件码", "82307", "③码在前+分隔式（回归）"],
+        ["G-383838 是您的 Google 验证码", "383838", "④Google 风格"],
+        ["您的登录码 a1b2c3 请勿泄露", "a1b2c3", "⑤字母数字混合"],
+        ["验证码 482910，请勿告知 13812345678", "482910", "剥离手机号"],
+        ["【某App】您的订单20261020123456已发出", "", "无验证码关键词不提取"],
+        ["1234567890是您的验证码", "", "超长数字串不从内部截取"],
+      ];
+      for (const c of cases) {
+        let got = "";
+        try { got = extractCode(c[0]); } catch (e) { got = "<throw:" + e.message + ">"; }
+        check(got === c[1], c[2] + "：" + JSON.stringify(c[0]) + " → " + JSON.stringify(got));
+      }
+    }
   }
 
   console.log("\n===== 结果：" + pass + " 通过，" + fail + " 失败 =====");

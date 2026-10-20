@@ -193,14 +193,20 @@ function recordLoginFail(request) {
   const ip = clientIp(request);
   const rec = loginFails.get(ip) || { count: 0, lockedUntil: 0 };
   rec.count += 1;
+  rec.at = Date.now();
   if (rec.count >= LOGIN_FAIL_LIMIT) {
     rec.lockedUntil = Date.now() + LOGIN_LOCK_MS;
     rec.count = 0;
   }
   loginFails.set(ip, rec);
-  if (loginFails.size > 1000) { /* 防 Map 无限膨胀：清理已过期条目 */
+  if (loginFails.size > 1000) { /* 防 Map 无限膨胀：只清过期锁与陈旧计数 */
     const now = Date.now();
-    for (const [k, v] of loginFails) if (v.lockedUntil <= now) loginFails.delete(k);
+    /* lockedUntil<=now 会把未锁定记录（lockedUntil=0）一并误删，导致高基数 IP 池下
+       当前 IP 的失败计数被反复清零、永远无法触发锁定 */
+    for (const [k, v] of loginFails) {
+      if (v.lockedUntil && v.lockedUntil <= now) loginFails.delete(k);
+      else if (!v.lockedUntil && now - (v.at || 0) > LOGIN_LOCK_MS) loginFails.delete(k);
+    }
   }
 }
 
@@ -446,7 +452,8 @@ function dispatchNotify(env, msg) {
   const tgBot = t(env.TELEGRAM_BOT_TOKEN), tgChat = t(env.TELEGRAM_CHAT_ID);
   if (tgBot && tgChat) jobs.push(async function () {
     await postNotify("https://api.telegram.org/bot" + tgBot + "/sendMessage", null,
-      JSON.stringify({ chat_id: tgChat, text: text }));
+      /* Telegram sendMessage 上限 4096 字符：超限整条 400 静默失败，发送前截断 */
+      JSON.stringify({ chat_id: tgChat, text: text.slice(0, 4096) }));
   });
 
   const barkKey = t(env.BARK_DEVICE_KEY);
@@ -1040,8 +1047,8 @@ async function handleWait(url, env) {
   const lastId = parseInt(url.searchParams.get("last_id") || "0", 10) || 0;
   const deviceId = parseInt(url.searchParams.get("device_id") || "", 10);
   const filter = Number.isInteger(deviceId) && deviceId > 0;
-  /* 挂起时长可配：Netlify Functions 默认 10s 超时、部分平台更短，
-     部署在这些平台时把 WAIT_MAX_SECONDS 调到 8~10，避免请求被平台强杀导致前端反复重连 */
+  /* 挂起时长可配：函数型平台入口已按保守值内置默认（如 netlify=8），
+     其他平台按需把 WAIT_MAX_SECONDS 调低，避免请求被平台强杀导致前端反复重连 */
   const waitSec = Math.min(25, Math.max(3, parseInt(env.WAIT_MAX_SECONDS, 10) || 25));
   const deadline = Date.now() + waitSec * 1000;
   const tick = Math.min(2000, Math.max(500, waitSec * 1000 / 5));
@@ -1439,6 +1446,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   })();
   var state = {
     device: 0, src: "", q: "", page: 1, pages: 1, total: 0, lastId: 0, deb: null,
+    lastIdByDev: {},
     inited: false, unread: 0, limit: 20, range: "", notifiedId: 0,
     selectMode: false, selected: {}, lastQ: "", starOnly: false, unreadOnly: false, lastList: [],
     labels: (function () { try { return JSON.parse(localStorage.getItem("sms_labels") || "{}") || {}; } catch (e) { return {}; } })(),
@@ -1468,14 +1476,14 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   var I18N = {
     zh: {
       langBtn: "EN", langTip: "Switch to English",
-      ghRepo: "GitHub repository", modalClose: "Close", devices: "Devices",
-      jumpTip: "Enter a page number and press Enter", perPageTip: "Items per page",
+      ghRepo: "GitHub 仓库", modalClose: "关闭", devices: "设备标签",
+      jumpTip: "输入页码后回车跳转", perPageTip: "每页条数",
       stats: "统计", settings: "设置",
       grpMsg: "消息开关", grpFilter: "筛选", grpAction: "操作",
       dndStart: "免打扰开始小时", dndEnd: "免打扰结束小时",
       themeAuto: "自动", themeLight: "浅色", themeDark: "深色",
       themeTip: "切换主题（自动 / 浅色 / 深色）",
-      tabAll: "全部", tabRename: "重命名设备", tabMerge: "合并到其他设备", tabDel: "删除该设备标签",
+      tabAll: "全部", tabRename: "重命名设备标签", tabMerge: "合并到其他设备", tabDel: "删除该设备标签",
       searchPh: "搜索发件人或内容…", clearSearch: "清除搜索",
       srcTip: "按来源筛选", allSources: "全部来源", srcSms: "短信", srcNotify: "通知",
       rangeTip: "按时间筛选", allTime: "全部时间", d7: "近 7 天", d30: "近 30 天",
@@ -1493,7 +1501,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       del: "删除", unknownNum: "未知号码", codeLabel: "验证码：", copy: "复制", copied: "已复制",
       more: "展开全文", less: "收起", unread: "未读",
       starItemTip: "收藏/置顶", recvTip: "双击复制收件号", selTip: "选择",
-      numLibTip: "常见号码库（仅供参考）", areaTip: "号码归属地",
+      numLibTip: "常见号码库（仅供参考）",
       deletedOne: "已删除", deletedN: "已删除 {n} 条", undo: "撤销",
       newPill: "↑ {n} 条新消息", gotNew: "收到 {n} 条新消息", codeCopied: "验证码 {c} 已复制",
       recvCopied: "收件号已复制", newSms: "新短信",
@@ -1512,10 +1520,10 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       soundOnMsg: "已开启新消息提示音", soundOffMsg: "已关闭新消息提示音",
       clearedN: "已清空 {n} 条",
       confirmDelN: "确认删除选中的 {n} 条？",
-      scopeDevice: "当前设备", scopeFilter: "当前筛选结果", scopeAll: "全部消息",
+      scopeDevice: "当前设备的消息", scopeFilter: "当前筛选结果", scopeAll: "全部消息",
       confirmClear: "确认清空{scope}？将软删除匹配的所有消息（此操作不可撤销）。",
       confirmClear2: "再次确认：真的要清空{scope}吗？",
-      renamePrompt: "重命名设备「{name}」\n留空则恢复默认名", renameFail: "重命名失败",
+      renamePrompt: "重命名设备标签「{name}」\n留空则恢复默认名", renameFail: "重命名失败",
       noOthers: "没有可合并的其他设备",
       mergePrompt: "把「{a}」的全部消息合并到哪台设备？\n{list}\n输入序号：",
       invalidIdx: "序号无效",
@@ -1525,18 +1533,18 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       hasMessages: "该设备仍有短信，请先删除全部短信", delFail: "删除失败",
       devCount: "（{n} 条）",
       justNow: "刚刚", minAgo: "{n} 分钟前", hourAgo: "{n} 小时前", today: "今天", yesterday: "昨天",
-      unnamed: "未命名设备", unknownErr: "操作失败"
+      unnamed: "未命名设备"
     },
     en: {
       langBtn: "中文", langTip: "切换到中文",
-      ghRepo: "GitHub 仓库", modalClose: "关闭", devices: "设备标签",
-      jumpTip: "输入页码后回车跳转", perPageTip: "每页条数",
+      ghRepo: "GitHub repository", modalClose: "Close", devices: "Devices",
+      jumpTip: "Enter a page number and press Enter", perPageTip: "Items per page",
       stats: "Stats", settings: "Settings",
       grpMsg: "Message toggles", grpFilter: "Filter", grpAction: "Actions",
       dndStart: "Quiet hours start", dndEnd: "Quiet hours end",
       themeAuto: "Auto", themeLight: "Light", themeDark: "Dark",
       themeTip: "Theme: auto / light / dark",
-      tabAll: "All", tabRename: "Rename device", tabMerge: "Merge into another device", tabDel: "Delete this device",
+      tabAll: "All", tabRename: "Rename device tag", tabMerge: "Merge into another device", tabDel: "Delete this device tag",
       searchPh: "Search sender or content…", clearSearch: "Clear search",
       srcTip: "Filter by source", allSources: "All sources", srcSms: "SMS", srcNotify: "Notification",
       rangeTip: "Filter by time", allTime: "All time", d7: "Last 7 days", d30: "Last 30 days",
@@ -1554,7 +1562,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       del: "Delete", unknownNum: "Unknown", codeLabel: "Code:", copy: "Copy", copied: "Copied",
       more: "Show more", less: "Show less", unread: "Unread",
       starItemTip: "Star / pin", recvTip: "Double-tap to copy", selTip: "Select",
-      numLibTip: "Built-in number directory (reference only)", areaTip: "Number location",
+      numLibTip: "Built-in number directory (reference only)",
       deletedOne: "Deleted", deletedN: "{n} deleted", undo: "Undo",
       newPill: "↑ {n} new", gotNew: "{n} new message(s)", codeCopied: "Code {c} copied",
       recvCopied: "Recipient number copied", newSms: "New message",
@@ -1573,10 +1581,10 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       soundOnMsg: "Sound enabled", soundOffMsg: "Sound disabled",
       clearedN: "Cleared {n}",
       confirmDelN: "Delete {n} selected message(s)?",
-      scopeDevice: "this device", scopeFilter: "the current filter", scopeAll: "all messages",
+      scopeDevice: "this device's messages", scopeFilter: "the current filter", scopeAll: "all messages",
       confirmClear: "Clear {scope}? All matching messages will be soft-deleted (cannot be undone).",
       confirmClear2: "Really clear {scope}?",
-      renamePrompt: "Rename device \"{name}\"\nLeave empty to restore the default name", renameFail: "Rename failed",
+      renamePrompt: "Rename device tag \"{name}\"\nLeave empty to restore the default name", renameFail: "Rename failed",
       noOthers: "No other devices to merge into",
       mergePrompt: "Merge all messages of \"{a}\" into which device?\n{list}\nEnter number:",
       invalidIdx: "Invalid number",
@@ -1585,8 +1593,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       delDevConfirm: "Delete this device tag? (all messages must be cleared first)",
       hasMessages: "This device still has messages — delete them first", delFail: "Delete failed",
       devCount: "({n})",
-      justNow: "just now", minAgo: "{n} min ago", hourAgo: "{n} h ago", today: "Today", yesterday: "Yesterday",
-      unnamed: "Unnamed device", unknownErr: "Operation failed"
+      justNow: "just now", minAgo: "{n} min ago", hourAgo: "{n} hr ago", today: "Today", yesterday: "Yesterday",
+      unnamed: "Unnamed device"
     }
   };
   function T(key, vars) {
@@ -1716,8 +1724,10 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     return MONTHS[Number(v.month) - 1] + " " + Number(v.day) + yr2;
   }
   /* 验证码提取（级联策略，借鉴 SmsForwarder 关键词集 / otp-message-extractor 防误报 / expo-sms-listener 级联）：
-     ① 关键词在前+分隔码(123-456/取件码) → ② 关键词在前+数字码 → ③ 码在前(123456是您的验证码)
-     → ④ Google 风格(G-123456) → ⑤ 字母数字混合码 → ⑥ 全文唯一数字组兜底。
+     ① 码在前+分隔式(8-2-307是您的取件码) → ② 码在前+数字码(123456是您的验证码)
+     → ③ 关键词在前+分隔码 → ④ 关键词在前+数字码 → ⑤ Google 风格(G-123456)
+     → ⑥ 字母数字混合码 → ⑦ 全文唯一数字组兜底。码在前必须先于关键词在前：
+     关键词在前模式允许跨短 gap，会把「123456是您的验证码，您有2000积分」里的 2000 误当验证码。
      匹配前剥离手机号/日期/时间/金额/单号等干扰数字；仅当短信含验证码类关键词才提取。 */
   function extractCode(text) {
     var s = String(text || "").replace(/\s+/g, " ");
@@ -1741,19 +1751,23 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       return r[1];
     }
     var m;
-    /* ① 关键词在前 + 分隔式数字：123-456 / 1234 5678 / 8-2-307 取件码风格（先于纯数字，防被截断） */
+    /* ① 码在前 + 分隔式：8-2-307 是您的取件码（捕获组在匹配串开头，hit() 的左边界检查
+       会撞上组尾数字而恒真 → 单独 exec：只需保证组首左侧不紧贴数字，组尾右侧由 [^0-9] 衔接天然保证） */
+    m = new RegExp("([0-9]{1,4}(?:[- ][0-9]{1,4}){1,2})[^0-9]{0,8}(?:您的|你的)?(?:" + kw + ")", "i").exec(t);
+    if (m && !(m.index > 0 && /[0-9]/.test(t.charAt(m.index - 1)))) return m[1].replace(/[- ]/g, "");
+    /* ② 码在前 + 纯数字 4-8 位：123456是您的验证码 */
+    m = new RegExp("([0-9]{4,8})[^0-9]{0,8}(?:您的|你的)?(?:" + kw + ")", "i").exec(t);
+    if (m && !(m.index > 0 && /[0-9]/.test(t.charAt(m.index - 1)))) return m[1];
+    /* ③ 关键词在前 + 分隔式数字：123-456 / 1234 5678 / 取件码 8-2-307 风格（先于纯数字，防被截断） */
     m = hit(new RegExp("(?:" + kw + ")[^0-9]{0,12}([0-9]{1,4}(?:[- ][0-9]{1,4}){1,2})", "i"));
     if (m) return m.replace(/[- ]/g, "");
-    /* ② 关键词在前 + 纯数字 4-8 位 */
+    /* ④ 关键词在前 + 纯数字 4-8 位 */
     m = hit(new RegExp("(?:" + kw + ")[^0-9]{0,12}([0-9]{4,8})", "i"));
     if (m) return m;
-    /* ③ 码在前：123456是您的验证码 / 123456 为动态口令（限 8 字内衔接，防跨句误报） */
-    m = hit(new RegExp("([0-9]{4,8})[^0-9]{0,8}(?:您的|你的)?(?:" + kw + ")", "i"));
-    if (m) return m;
-    /* ④ Google 风格：G-383838 是您的 Google 验证码 */
+    /* ⑤ Google 风格：G-383838 是您的 Google 验证码 */
     m = hit(new RegExp("([A-Za-z]{1,3}-[0-9]{4,8})", "i"));
     if (m) return m.split("-")[1];
-    /* ⑤ 字母数字混合 4-8 位（须同时含字母与数字；右侧不得紧贴字母数字） */
+    /* ⑥ 字母数字混合 4-8 位（须同时含字母与数字；右侧不得紧贴字母数字） */
     m = new RegExp("(?:" + kw + ")[^0-9A-Za-z]{0,4}([0-9A-Za-z]{4,8})", "i").exec(t);
     if (m) {
       var b5 = m.index + m[0].length;
@@ -1761,7 +1775,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         if (/[0-9]/.test(m[1]) && /[A-Za-z]/.test(m[1])) return m[1];
       }
     }
-    /* ⑥ 兜底：剥离后全文恰好只有一组独立 4-8 位数字时才取（唯一性保证不误报） */
+    /* ⑦ 兜底：剥离后全文恰好只有一组独立 4-8 位数字时才取（唯一性保证不误报） */
     var re6 = /[0-9]{4,8}/g;
     var lone = null, cnt = 0, r6;
     while ((r6 = re6.exec(t))) {
@@ -1991,7 +2005,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       };
       tabs.appendChild(mk(T("tabAll"), 0, "(" + (res.list || []).reduce(function (s, d) { return s + d.msg_count; }, 0) + ")"));
       (res.list || []).forEach(function (d) {
-        var el = mk(d.display_name, d.id, T("devCount", { n: d.msg_count }));
+        var el = mk(d.display_name === "未命名设备" ? T("unnamed") : d.display_name, d.id, T("devCount", { n: d.msg_count }));
         /* 设备标签操作：✎ 重命名（设别名）、⇄ 合并到其他设备（后端 /api/devices/alias、/api/devices/merge） */
         if (d.id) {
           var ed = document.createElement("span");
@@ -2341,8 +2355,10 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         if (!state.inited) {
           state.inited = true;
           if (list.length) {
-            state.lastId = Math.max(state.lastId, list[0].id);
-            state.notifiedId = Math.max(state.notifiedId, list[0].id);
+            var mx0 = Math.max.apply(null, list.map(function (m) { return m.id; }));
+            if (state.device) state.lastIdByDev[state.device] = mx0;
+            state.lastId = Math.max(state.lastId, mx0);
+            state.notifiedId = Math.max(state.notifiedId, mx0);
           }
           renderFull(list, freshSet, res);
           state.lastQ = q;
@@ -2354,7 +2370,11 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
           fresh.forEach(function (m) { freshSet[m.id] = true; });
           notifyNew(fresh);
         }
-        if (list.length) state.lastId = Math.max(state.lastId, list[0].id);
+        if (list.length) {
+          var mx = Math.max.apply(null, list.map(function (m) { return m.id; }));
+          if (state.device) state.lastIdByDev[state.device] = Math.max(state.lastIdByDev[state.device] || 0, mx);
+          else state.lastId = Math.max(state.lastId, mx);
+        }
         if (incremental && fresh.length && state.page === 1 && !state.q && q === state.lastQ && prependFresh(fresh, res)) {
           state.lastQ = q;
           return;
@@ -2435,7 +2455,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (window.scrollY < 260) { var el = $("newpill"); if (el && !el.hidden) { el.hidden = true; pillN = 0; } }
   });
   /* 推送式自动刷新：长轮询 /api/wait；第 1 页收到新消息即刷新，其他页只弹胶囊避免打断阅读。
-     失败（平台函数超时 / 断网）时指数退避，避免在 Netlify 等 10s 函数上限的平台形成忙循环。 */
+     失败（平台函数超时 / 断网）时指数退避，避免在函数时长较短的平台上形成忙循环。 */
   var pollErr = 0;
   function pollLoop(delay) {
     setTimeout(function () {
@@ -2443,7 +2463,9 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         load().then(function () { pollLoop(5000); }, function () { pollLoop(5000); });
         return;
       }
-      var p = "last_id=" + (state.lastId || 0);
+      /* 游标按维度取：设备筛选下后端比较的是该设备 MAX(id)，须用该设备的游标，防跨设备混用 */
+      var cur = state.device ? (state.lastIdByDev[state.device] || 0) : (state.lastId || 0);
+      var p = "last_id=" + cur;
       if (state.device) p += "&device_id=" + state.device;
       var t0 = Date.now();
       fetch("/api/wait?" + p)
@@ -2451,7 +2473,10 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         .then(function (d) {
           pollErr = 0;
           if (d && d.changed) {
-            if (d.id) state.lastId = Math.max(state.lastId, d.id);
+            if (d.id) {
+              if (state.device) state.lastIdByDev[state.device] = Math.max(state.lastIdByDev[state.device] || 0, d.id);
+              else state.lastId = Math.max(state.lastId, d.id);
+            }
             if (state.page === 1) { load(true); } else { showNewPill(); }
           }
         })

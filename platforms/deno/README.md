@@ -90,7 +90,7 @@ curl "https://<域名>/api/push?token=<RECEIVE_TOKEN>" -H "Content-Type: applica
 
 ## 注意事项与常见问题
 
-- **定时清理**：`Deno.cron` 在部署时自动注册（每天 UTC 17:00 = 北京 01:00），无需任何额外配置，也不能手动触发测试——验证可看 D1/Turso 数据是否按期减少
+- **定时清理**：`Deno.cron` 在部署时自动注册（每天 UTC 17:00 = 北京 01:00），无需任何额外配置，也不能手动触发测试——验证可看 Turso 数据是否按期减少
 - **免费额度**：每月 100 万次请求、Active CPU 10 小时、20GiB 出站流量，个人使用绰绰有余
 - **长轮询**：Deno Deploy 无严格的单请求时长上限，`/api/wait` 25 秒长轮询工作良好；实例空闲时可能被平台回收重启（被中断的长轮询由前端自动重试），实时性与 Worker 版基本一致
 - **部署失败排查**：Entrypoint 必须填 `main.js`、运行目录必须是 `platforms/deno`；缺 `TURSO_*` 环境变量会 500 报 "config error"

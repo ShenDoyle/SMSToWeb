@@ -47,13 +47,13 @@
 | 平台 | 函数超时 | 后台通知 | 定时清理 | 建议 |
 |---|---|---|---|---|
 | Cloudflare | 无固定墙钟（CPU 受限） | `ctx.waitUntil` 响应后继续 | 平台 cron | 默认配置即可 |
-| Vercel Edge | 单次请求约 25s 上限 | 响应前内联完成 | 平台 cron | `WAIT_MAX_SECONDS=20` |
-| Netlify Functions | 默认 10s（可调） | 响应前内联完成 | scheduled function | `WAIT_MAX_SECONDS=8` |
+| Vercel Edge | 单次请求约 25 秒上限 | 响应前内联完成 | 平台 cron | `WAIT_MAX_SECONDS=20` |
+| Netlify Functions | 60s（全计划一致） | 响应前内联完成 | scheduled function | 入口默认 `WAIT_MAX_SECONDS=8` |
 | Deno Deploy | 视套餐 | 响应前内联完成 | 需外部触发 | 外部 cron 调 `/api/cron?token=` |
 | EdgeOne Makers | 视套餐 | 响应前内联完成 | 需外部触发 | `WAIT_MAX_SECONDS` 按套餐下调 |
 | Node / Docker | 自定 | 响应前内联完成 | 需外部触发 | 本地 SQLite 需 Node ≥ 22.13 |
 
-> - **长轮询**：前端对失败自动**指数退避**（1→30s），并在页面重新可见时立即补拉，平台强杀请求也不会打爆函数。
+> - **长轮询**：前端对失败自动**指数退避**（2→30s），并在页面重新可见时立即补拉，平台强杀请求也不会打爆函数。
 > - **通知转发**：Cloudflare 走 `waitUntil`；其余平台为「响应前把通知发完」（单渠道 10s 超时），因此配了很多慢渠道时会略微增加接口延迟。
 > - **定时清理**：无平台 cron 的部署，用任意定时器请求 `GET /api/cron?token=<RECEIVE_TOKEN>` 即可。
 
@@ -105,7 +105,7 @@ Cloudflare 平台额外需要 `DB`（D1 绑定）；其余平台需要 `TURSO_DA
 ## 开发说明
 
 - `src/worker.js`：核心源码（Cloudflare Worker 形态）
-- `platforms/gen_app.py`：从 `src/worker.js` 生成平台无关的 `app.js` 同步到五个移植平台，并同步 Cloudflare 独立副本 `worker.js`（保证六平台业务代码逐字节一致）；同时把 27 个渠道/站点环境变量白名单（ENV_KEYS）同步到六个平台入口，防各平台透传漂移（node 的 db.js 为 Turso+本地 SQLite 双适配，独立维护不参与同步）
+- `platforms/gen_app.py`：从 `src/worker.js` 生成平台无关的 `app.js` 同步到五个移植平台，并同步 Cloudflare 独立副本 `worker.js`（保证六平台业务代码逐字节一致）；同时把 30 项环境变量白名单（ENV_KEYS，含 3 个鉴权项）同步到六个平台入口，防各平台透传漂移（node 的 db.js 为 Turso+本地 SQLite 双适配，独立维护不参与同步）
 - `platforms/*/`：各平台自包含部署目录（入口 + app.js + db.js 适配层 + schema.sql + 本平台教程）
 - `docs/多平台接入部署指南.md`：接收端配置文档
 - `tests/run.mjs`：零依赖测试套件（需 Node 22.13+）：`node tests/run.mjs`

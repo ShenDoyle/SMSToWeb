@@ -1,6 +1,6 @@
 # 自托管部署教程（Fly.io / Railway / VPS / 本地）
 
-把 SMSToWeb 以 Docker 容器方式自托管。进程常驻、无函数时长限制，长轮询实时性最佳，适合有现成服务器或想用 Fly.io/Railway 免费额度的用户。
+把 SMSToWeb 以 Docker 容器方式自托管。进程常驻、无函数时长限制，长轮询实时性最佳，适合有现成服务器或想部署到 Fly.io / Railway 的用户（免费额度情况见下文「平台说明」）。
 
 **本目录文件**：`server.mjs`（Node 18+ 零依赖入口，含内置每日清理）、`app.js`（核心应用）、`db.js`（Turso / 本地 SQLite 双模式适配层）、`schema.sql`（建表）、`Dockerfile`、`package.json`。
 

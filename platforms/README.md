@@ -26,8 +26,8 @@ SMSToWeb 的全部六个平台（Cloudflare 主版本 + 五个移植平台）都
 - **已有服务器 / 想完全自控** → node/（Docker 自托管）
 
 > **长轮询与平台超时**：管理页通过 `GET /api/wait` 挂起等待新消息，默认最长 25 秒，可用环境变量 `WAIT_MAX_SECONDS`（3–25）按平台下调。
-> Netlify Functions 默认 10 秒上限 → 设 `8`；Vercel Edge 建议 `20`；Cloudflare / Deno / Node 保持默认即可。
-> 前端对失败做**指数退避**（1→30s）并在页面重新可见时立即补拉，即使被平台提前截断也**不会影响功能**，仅新消息提醒稍有延迟。
+> Netlify Functions 现行上限 60 秒（入口默认 `WAIT_MAX_SECONDS=8` 保守适配，可按需上调）；Vercel Edge 建议 `20`；Cloudflare / Deno / Node 保持默认即可。
+> 前端对失败做**指数退避**（2→30s）并在页面重新可见时立即补拉，即使被平台提前截断也**不会影响功能**，仅新消息提醒稍有延迟。
 
 ## 通用准备（所有非 Cloudflare 平台共用）
 
