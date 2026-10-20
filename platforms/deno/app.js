@@ -1108,7 +1108,21 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
          border-radius: 8px; font-size: 14px; background: var(--card); color: var(--text); }
   .toolbar select { padding: 8px 8px; border: 1px solid var(--border); border-radius: 8px;
          font-size: 13px; background: var(--card); color: var(--text); }
-  .opts { display: flex; gap: 22px; margin: 0 0 12px; font-size: 13px; color: var(--muted); }
+  /* 二级菜单（更多）：开关 / 筛选 / 操作收纳一处 */
+  .morewrap { position: relative; flex: none; display: inline-flex; }
+  .moremenu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 70; min-width: 200px;
+              max-width: calc(100vw - 32px); background: var(--card); border: 1px solid var(--border);
+              border-radius: 12px; box-shadow: 0 10px 28px rgba(15, 23, 42, .16); padding: 6px; display: none; }
+  .moremenu.open { display: block; }
+  .moremenu .grp { font-size: 11px; font-weight: 600; color: var(--faint); padding: 7px 10px 3px; }
+  .moremenu .grp:not(:first-child) { border-top: 1px solid var(--row-border); margin-top: 5px; }
+  .moremenu .opt { display: flex; width: 100%; align-items: center; gap: 10px; padding: 7px 10px; border-radius: 8px; }
+  .moremenu .opt:hover { background: var(--bg); }
+  .moremenu .opt .switch { margin-left: auto; }
+  .moremenu .tbtn { display: flex; width: 100%; align-items: center; text-align: left; font-size: 13px;
+                    padding: 8px 10px; border-color: transparent; background: none; }
+  .moremenu .tbtn:hover { background: var(--bg); border-color: transparent; }
+  .moremenu .tbtn.on { border-color: var(--accent); background: var(--badge-bg); }
   .opt { position: relative; display: inline-flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
   .opt input { position: absolute; opacity: 0; width: 1px; height: 1px; margin: 0; }
   .opt .switch { position: relative; flex: none; width: 40px; height: 22px; border-radius: 999px;
@@ -1168,7 +1182,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   @media (prefers-color-scheme: dark) {
     .toast { background: #e6e9ec; color: #14171a; }
   }
-  .toolbar, .opts, .pager { flex-wrap: wrap; }
+  .toolbar, .pager { flex-wrap: wrap; }
   .searchwrap { position: relative; flex: 1; display: flex; min-width: 140px; }
   .searchwrap input { width: 100%; }
   .clr { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); border: none; background: none;
@@ -1177,7 +1191,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .tbtn { border: 1px solid var(--border); background: var(--card); color: var(--text); border-radius: 8px;
           padding: 5px 10px; font-size: 12px; cursor: pointer; }
   .tbtn:hover { border-color: var(--accent); color: var(--accent); }
-  .spacer { flex: 1; }
   .content.fold { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
   .more { border: none; background: none; color: var(--link); cursor: pointer; font-size: 12px; padding: 2px 0; }
   .more:hover { text-decoration: underline; }
@@ -1296,7 +1309,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     .tab { padding: 7px 13px; }
     .tabop, .tabx { padding: 2px 5px; }
     .star, .del { padding: 4px 6px; }
-    .opts { gap: 14px; }
+    /* 二级菜单内触控目标加大，降低误触 */
+    .moremenu .tbtn, .moremenu .opt { min-height: 42px; }
+    /* 窄屏：工具栏换行后按钮可能到行首，右对齐下拉会冲出左边界 →
+       改为底部抽屉（与 .sheet 弹层同风格），贴安全区，永不溢出 */
+    .moremenu { position: fixed; left: 16px; right: 16px; top: auto; width: auto;
+                bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+                min-width: 0; max-width: none; }
     .selbar { width: calc(100% - 24px); justify-content: space-between; border-radius: 14px; }
     .barrow .bl { width: 54px; }
   }
@@ -1340,18 +1359,23 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       <option value="7d" data-i18n="d7">近 7 天</option>
       <option value="30d" data-i18n="d30">近 30 天</option>
     </select>
-  </div>
-  <div class="opts">
-    <label class="opt"><input type="checkbox" id="autocopy"><span class="switch"></span><span data-i18n="autoCopy">自动复制验证码</span></label>
-    <label class="opt"><input type="checkbox" id="notifyon"><span class="switch"></span><span data-i18n="notifyOn">后台通知</span></label>
-    <label class="opt"><input type="checkbox" id="soundon"><span class="switch"></span><span data-i18n="soundOn">提示音</span></label>
-    <span class="spacer"></span>
-    <button class="tbtn" id="staronly" data-i18n-title="starTip" data-i18n="starOnly" title="只看收藏">★ 收藏</button>
-    <button class="tbtn" id="unreadonly" data-i18n-title="unreadTip" data-i18n="unreadOnly" title="只看未读">● 未读</button>
-    <button class="tbtn" id="selectbtn" data-i18n-title="selectTip" data-i18n="select" title="进入批量选择">选择</button>
-    <button class="tbtn" id="clearbtn" data-i18n-title="clearTip" data-i18n="clear" title="清空当前筛选结果（软删除）">清空</button>
-    <button class="tbtn" id="exportcsv" data-i18n-title="exportCsvTip" data-i18n="exportCsv" title="按当前筛选导出 CSV">导出 CSV</button>
-    <button class="tbtn" id="exportjson" data-i18n-title="exportJsonTip" data-i18n="exportJson" title="按当前筛选导出 JSON">导出 JSON</button>
+    <span class="morewrap">
+      <button class="tbtn" id="morebtn" data-i18n="moreMenu" data-i18n-title="moreTip" title="更多功能" aria-haspopup="true" aria-expanded="false">更多</button>
+      <div class="moremenu" id="moremenu" role="menu" aria-label="更多功能">
+        <div class="grp" data-i18n="grpSwitch">开关</div>
+        <label class="opt"><input type="checkbox" id="autocopy"><span class="switch"></span><span data-i18n="autoCopy">自动复制验证码</span></label>
+        <label class="opt"><input type="checkbox" id="notifyon"><span class="switch"></span><span data-i18n="notifyOn">后台通知</span></label>
+        <label class="opt"><input type="checkbox" id="soundon"><span class="switch"></span><span data-i18n="soundOn">提示音</span></label>
+        <div class="grp" data-i18n="grpFilter">筛选</div>
+        <button class="tbtn" id="staronly" role="menuitemcheckbox" data-i18n-title="starTip" data-i18n="starOnly" title="只看收藏">★ 收藏</button>
+        <button class="tbtn" id="unreadonly" role="menuitemcheckbox" data-i18n-title="unreadTip" data-i18n="unreadOnly" title="只看未读">● 未读</button>
+        <div class="grp" data-i18n="grpAction">操作</div>
+        <button class="tbtn" id="selectbtn" role="menuitem" data-i18n-title="selectTip" data-i18n="select" title="进入批量选择">选择</button>
+        <button class="tbtn" id="clearbtn" role="menuitem" data-i18n-title="clearTip" data-i18n="clear" title="清空当前筛选结果（软删除）">清空</button>
+        <button class="tbtn" id="exportcsv" role="menuitem" data-i18n-title="exportCsvTip" data-i18n="exportCsv" title="按当前筛选导出 CSV">导出 CSV</button>
+        <button class="tbtn" id="exportjson" role="menuitem" data-i18n-title="exportJsonTip" data-i18n="exportJson" title="按当前筛选导出 JSON">导出 JSON</button>
+      </div>
+    </span>
   </div>
   <div class="meta"><span id="stat"></span><span id="pageinfo"></span></div>
   <div class="list" id="list"><div class="sk"><div class="skc"></div><div class="skc"></div><div class="skc"></div></div></div>
@@ -1424,6 +1448,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       ghRepo: "GitHub repository", modalClose: "Close", devices: "Devices",
       jumpTip: "Enter a page number and press Enter", perPageTip: "Items per page",
       stats: "统计", settings: "设置",
+      moreMenu: "更多", moreTip: "更多功能",
+      grpSwitch: "开关", grpFilter: "筛选", grpAction: "操作",
       themeAuto: "自动", themeLight: "浅色", themeDark: "深色",
       themeTip: "切换主题（自动 / 浅色 / 深色）",
       tabAll: "全部", tabRename: "重命名设备", tabMerge: "合并到其他设备", tabDel: "删除该设备标签",
@@ -1483,6 +1509,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       ghRepo: "GitHub 仓库", modalClose: "关闭", devices: "设备标签",
       jumpTip: "输入页码后回车跳转", perPageTip: "每页条数",
       stats: "Stats", settings: "Settings",
+      moreMenu: "More", moreTip: "More options",
+      grpSwitch: "Toggles", grpFilter: "Filter", grpAction: "Actions",
       themeAuto: "Auto", themeLight: "Light", themeDark: "Dark",
       themeTip: "Theme: auto / light / dark",
       tabAll: "All", tabRename: "Rename device", tabMerge: "Merge into another device", tabDel: "Delete this device",
@@ -2462,6 +2490,31 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (state.sound) beep();
     toast(state.sound ? T("soundOnMsg") : T("soundOffMsg"));
   };
+  /* ---------- 二级菜单（更多）：开关 / 筛选 / 操作 ---------- */
+  var moreBtn = $("morebtn"), moreMenu = $("moremenu");
+  function setMoreOpen(on) {
+    moreMenu.classList.toggle("open", on);
+    moreBtn.setAttribute("aria-expanded", on ? "true" : "false");
+  }
+  moreBtn.onclick = function (ev) {
+    if (ev && ev.stopPropagation) ev.stopPropagation();
+    setMoreOpen(!moreMenu.classList.contains("open"));
+  };
+  /* 点菜单外或按 Esc 收起 */
+  document.addEventListener("click", function (ev) {
+    if (!moreMenu.classList.contains("open")) return;
+    if (moreMenu.contains(ev.target) || moreBtn.contains(ev.target)) return;
+    setMoreOpen(false);
+  });
+  document.addEventListener("keydown", function (ev) {
+    if (ev.key === "Escape" && moreMenu.classList.contains("open")) { setMoreOpen(false); moreBtn.focus(); }
+  });
+  /* 开关（label 内）切换不收起，方便连续调；其余项点击即收起 */
+  moreMenu.addEventListener("click", function (ev) {
+    var t = ev.target;
+    if (t && t.closest && t.closest("label")) return;
+    setMoreOpen(false);
+  });
   /* 回到页面即清零未读数、恢复标题，并立刻补拉一次（移动端切后台常被冻结，长轮询可能已断） */
   document.addEventListener("visibilitychange", function () {
     if (!document.hidden) {
