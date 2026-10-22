@@ -12,6 +12,7 @@ import { fetchApp, handleCronRequest } from "../app.js";
 import { createTursoDb } from "../db.js";
 
 let cachedDb = null;
+let cachedDbKey = "";
 
 /* ==== ENV_KEYS BEGIN（由 platforms/gen_app.py 同步，勿手工修改）==== */
 const ENV_KEYS = [
@@ -53,11 +54,16 @@ function buildEnv(vars) {
   const g = function (k) {
     return vars && vars[k] != null ? String(vars[k]) : "";
   };
-  if (!cachedDb) {
+  /* Turso 客户端按凭据指纹键控缓存：环境变量变更后自动重建，无需重新部署 */
+  const dbUrl = g("TURSO_DATABASE_URL");
+  const dbToken = g("TURSO_AUTH_TOKEN");
+  const dbKey = dbUrl + "\u0000" + dbToken;
+  if (!cachedDb || cachedDbKey !== dbKey) {
     cachedDb = createTursoDb({
-      TURSO_DATABASE_URL: g("TURSO_DATABASE_URL"),
-      TURSO_AUTH_TOKEN: g("TURSO_AUTH_TOKEN"),
+      TURSO_DATABASE_URL: dbUrl,
+      TURSO_AUTH_TOKEN: dbToken,
     });
+    cachedDbKey = dbKey;
   }
   const e = { DB: cachedDb };
   for (const k of ENV_KEYS) e[k] = g(k);

@@ -12,6 +12,7 @@ import { fetchApp, runCron, handleCronRequest } from "./app.js";
 import { createTursoDb } from "./db.js";
 
 let cachedDb = null;
+let cachedDbKey = "";
 
 /* ==== ENV_KEYS BEGIN（由 platforms/gen_app.py 同步，勿手工修改）==== */
 const ENV_KEYS = [
@@ -48,13 +49,17 @@ const ENV_KEYS = [
 ];
 /* ==== ENV_KEYS END ==== */
 
-/* 环境变量 → 核心应用 env 对象（白名单循环透传；Turso 连接实例在进程内缓存复用） */
+/* 环境变量 → 核心应用 env 对象（白名单循环透传；Turso 客户端按凭据指纹键控缓存，环境变量变更自动重建） */
 function buildEnv() {
-  if (!cachedDb) {
+  const dbUrl = Deno.env.get("TURSO_DATABASE_URL") || "";
+  const dbToken = Deno.env.get("TURSO_AUTH_TOKEN") || "";
+  const dbKey = dbUrl + "\u0000" + dbToken;
+  if (!cachedDb || cachedDbKey !== dbKey) {
     cachedDb = createTursoDb({
-      TURSO_DATABASE_URL: Deno.env.get("TURSO_DATABASE_URL") || "",
-      TURSO_AUTH_TOKEN: Deno.env.get("TURSO_AUTH_TOKEN") || "",
+      TURSO_DATABASE_URL: dbUrl,
+      TURSO_AUTH_TOKEN: dbToken,
     });
+    cachedDbKey = dbKey;
   }
   const env = { DB: cachedDb };
   for (const k of ENV_KEYS) env[k] = Deno.env.get(k) || "";
