@@ -87,6 +87,59 @@ export async function onRequest({ request, env }) {
     return configError(err);
   }
   const url = new URL(request.url);
+  /* ==== 临时诊断接口（排障用，确认后移除）：/api/debug-db?key=<ADMIN_PASSWORD> ==== */
+  if (url.pathname.replace(/\/+$/, "") === "/api/debug-db") {
+    const key = url.searchParams.get("key") || "";
+    if (!e.ADMIN_PASSWORD || key !== e.ADMIN_PASSWORD) {
+      return new Response(JSON.stringify({ success: false, error: "not found" }), {
+        status: 404,
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+      });
+    }
+    const rawUrl = (env && env.TURSO_DATABASE_URL != null ? String(env.TURSO_DATABASE_URL) : "").trim();
+    const rawToken = (env && env.TURSO_AUTH_TOKEN != null ? String(env.TURSO_AUTH_TOKEN) : "").trim();
+    let kind = "空";
+    try {
+      const parts = rawToken.split(".");
+      if (rawToken && parts.length !== 3) kind = "格式异常(段数=" + parts.length + ")";
+      else if (rawToken) {
+        const payload = JSON.parse(atob(parts[1].replace(/-/g, "+").replace(/_/g, "/")));
+        if (payload && payload.kid) kind = "db-token(kid=" + String(payload.kid).slice(0, 6) + "…)";
+        else if (payload && payload.org_id != null) kind = "org-token(组织级,错误类型)";
+        else kind = "unknown(" + Object.keys(payload || {}).join(",") + ")";
+      }
+    } catch (kerr) {
+      kind = "解析失败: " + (kerr && kerr.message);
+    }
+    const diag = {
+      url_present: !!rawUrl,
+      url_host: rawUrl ? (rawUrl.replace(/^libsql:\/\//, "https://").split("/")[2] || "?") : null,
+      token_len: rawToken.length,
+      token_kind: kind,
+      eo_fetch_status: null,
+      eo_fetch_error: null,
+      eo_body_sample: null,
+    };
+    if (rawUrl && rawToken) {
+      const ep = rawUrl.replace(/^libsql:\/\//, "https://") + "/v2/pipeline";
+      try {
+        const r = await fetch(ep, {
+          method: "POST",
+          headers: { Authorization: "Bearer " + rawToken, "Content-Type": "application/json" },
+          body: JSON.stringify({ requests: [{ type: "execute", stmt: { sql: "SELECT 1" } }, { type: "close" }] }),
+        });
+        diag.eo_fetch_status = r.status;
+        diag.eo_body_sample = (await r.text()).slice(0, 240);
+      } catch (ferr) {
+        diag.eo_fetch_error = String((ferr && ferr.message) || ferr);
+      }
+    }
+    return new Response(JSON.stringify(diag, null, 2), {
+      status: 200,
+      headers: { "Content-Type": "application/json; charset=utf-8" },
+    });
+  }
+  /* ==== 临时诊断接口结束 ==== */
   if (url.pathname.replace(/\/+$/, "") === "/api/cron") {
     return handleCronRequest(request, e);
   }
