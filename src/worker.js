@@ -1489,6 +1489,11 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .tbtn { border: 1px solid var(--border); background: var(--card); color: var(--text); border-radius: 8px;
           padding: 5px 10px; font-size: 12px; cursor: pointer; }
   .tbtn:hover { border-color: var(--accent); color: var(--accent); }
+  .langmenu { position: fixed; z-index: 200; background: var(--card); border: 1px solid var(--border);
+              border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.14); padding: 4px; min-width: 150px; }
+  .langitem { padding: 8px 14px; border-radius: 7px; cursor: pointer; font-size: 13px; white-space: nowrap; color: var(--text); }
+  .langitem:hover { background: rgba(127,127,127,.12); }
+  .langitem.cur { color: var(--accent); font-weight: 600; }
   .content.fold { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
   .more { border: none; background: none; color: var(--link); cursor: pointer; font-size: 12px; padding: 2px 0; }
   .more:hover { text-decoration: underline; }
@@ -1736,26 +1741,46 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   };
   var $ = function (id) { return document.getElementById(id); };
 
-  /* ---------------- 中英双语（i18n） ----------------
-     语言优先级：?lang=zh|en > localStorage(sms_lang) > 浏览器语言(zh* → 中文, 其它 → 英文)
+  /* ---------------- 多语言（i18n，九语言） ----------------
+     语言优先级：?lang= > localStorage(sms_lang) > 浏览器语言(navigator.languages 逐个匹配)；支持
+     九语言 zh-CN / zh-TW / en / ja / ko / es / fr / de / pt-BR，旧值 zh→zh-CN 自动归一化，探测失败回退 en。
      静态节点标注：data-i18n(文本) / data-i18n-ph(placeholder) / data-i18n-title(title) / data-i18n-aria(aria-label)
      动态文案：T("key") 或 T("key", {n: 1})，占位符写作 {n}。
      切换语言后整页 reload：避免半渲染状态，且本地缓存过滤条件不受影响。 */
+  var LANGS = ["zh-CN", "zh-TW", "en", "ja", "ko", "es", "fr", "de", "pt-BR"];
   var LANG = (function () {
-    var v = "";
-    try { v = String(new URLSearchParams(location.search).get("lang") || "").toLowerCase(); } catch (e) {}
-    if (v !== "zh" && v !== "en") { try { v = String(localStorage.getItem("sms_lang") || "").toLowerCase(); } catch (e) { v = ""; } }
-    if (v !== "zh" && v !== "en") {
-      var nav = String(navigator.language || navigator.userLanguage || navigator.browserLanguage || "").toLowerCase();
-      v = nav.indexOf("zh") === 0 ? "zh" : (nav ? "en" : "zh");
+    /* 归一化：兼容旧值 zh/en 及常见变体（zh-CN/zh_Hans/pt 等）；未知值返回空串走下一级探测 */
+    function norm(s) {
+      var v = String(s || "").toLowerCase().replace(/_/g, "-");
+      if (v === "zh" || v === "zh-cn" || v === "zh-hans") return "zh-CN";
+      if (v === "zh-tw" || v === "zh-hk" || v === "zh-mo" || v === "zh-hant") return "zh-TW";
+      if (v === "pt") return "pt-BR";
+      return LANGS.indexOf(v) >= 0 ? v : "";
     }
+    var v = "";
+    try { v = norm(new URLSearchParams(location.search).get("lang")); } catch (e) {}
+    if (!v) { try { v = norm(localStorage.getItem("sms_lang")); } catch (e) {} }
+    if (!v) {
+      var prefs = [];
+      try { prefs = (navigator.languages && navigator.languages.length) ? Array.prototype.slice.call(navigator.languages) : []; } catch (e1) {}
+      if (!prefs.length) { try { prefs = [navigator.language || navigator.userLanguage || navigator.browserLanguage || ""]; } catch (e2) { prefs = [""]; } }
+      for (var i = 0; i < prefs.length; i++) {
+        v = norm(prefs[i]);
+        if (!v) {
+          var s2 = String(prefs[i] || "").toLowerCase().replace(/_/g, "-");
+          if (s2.indexOf("zh") === 0) v = /-(tw|hk|mo|hant)/.test(s2) ? "zh-TW" : "zh-CN";
+        }
+        if (v) break;
+      }
+    }
+    if (!v) v = "en"; /* 探测失败回退英语，绝不静默回退中文 */
     try { localStorage.setItem("sms_lang", v); } catch (e) {}
     return v;
   })();
   var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   var I18N = {
-    zh: {
-      langBtn: "EN", langTip: "Switch to English",
+    "zh-CN": {
+      langBtn: "🌐", langTip: "切换语言",
       ghRepo: "GitHub 仓库", modalClose: "关闭", devices: "设备标签",
       jumpTip: "输入页码后回车跳转", perPageTip: "每页条数",
       stats: "统计", settings: "设置",
@@ -1816,7 +1841,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       unnamed: "未命名设备"
     },
     en: {
-      langBtn: "中文", langTip: "切换到中文",
+      langBtn: "🌐", langTip: "Switch language",
       ghRepo: "GitHub repository", modalClose: "Close", devices: "Devices",
       jumpTip: "Enter a page number and press Enter", perPageTip: "Items per page",
       stats: "Stats", settings: "Settings",
@@ -1875,12 +1900,439 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       devCount: "({n})",
       justNow: "just now", minAgo: "{n} min ago", hourAgo: "{n} hr ago", today: "Today", yesterday: "Yesterday",
       unnamed: "Unnamed device"
+    },
+    "zh-TW": {
+      langBtn: "🌐", langTip: "切換語言",
+      ghRepo: "GitHub 儲存庫", modalClose: "關閉", devices: "裝置標籤",
+      jumpTip: "輸入頁碼後按 Enter 跳轉", perPageTip: "每頁筆數",
+      stats: "統計", settings: "設定",
+      grpMsg: "訊息開關", grpFilter: "篩選", grpAction: "操作",
+      dndStart: "勿擾開始小時", dndEnd: "勿擾結束小時",
+      themeAuto: "自動", themeLight: "淺色", themeDark: "深色",
+      themeTip: "切換主題（自動 / 淺色 / 深色）",
+      tabAll: "全部", tabRename: "重新命名裝置標籤", tabMerge: "合併到其他裝置", tabDel: "刪除此裝置標籤",
+      searchPh: "搜尋寄件人或內容…", clearSearch: "清除搜尋",
+      srcTip: "依來源篩選", allSources: "全部來源", srcSms: "簡訊", srcNotify: "通知",
+      rangeTip: "依時間篩選", allTime: "全部時間", d7: "近 7 天", d30: "近 30 天",
+      autoCopy: "自動複製驗證碼", notifyOn: "背景通知", soundOn: "提示音",
+      starOnly: "★ 收藏", unreadOnly: "● 未讀", starTip: "只看收藏", unreadTip: "只看未讀",
+      select: "選擇", selectTip: "進入批次選擇", done: "完成",
+      clear: "清空", clearTip: "清空目前篩選結果（軟刪除）",
+      exportCsv: "匯出 CSV", exportJson: "匯出 JSON",
+      exportCsvTip: "依目前篩選匯出 CSV", exportJsonTip: "依目前篩選匯出 JSON",
+      total: "共 {n} 則", pageOf: "第 {a} / {b} 頁",
+      prev: "上一頁", next: "下一頁", perPage: "{n} 筆/頁", jumpPh: "頁碼", go: "跳轉",
+      loading: "載入中…", emptyFilter: "沒有符合條件的訊息",
+      emptyAll: "還沒有收到訊息", emptyHint: "在手機端設定 SmsForwarder，或呼叫 /api/push 推送一則試試",
+      loadFail: "載入失敗：{m}", retry: "重試",
+      del: "刪除", unknownNum: "未知號碼", codeLabel: "驗證碼：", copy: "複製", copied: "已複製",
+      more: "展開全文", less: "收合", unread: "未讀",
+      starItemTip: "收藏/置頂", recvTip: "雙擊複製收件號", selTip: "選擇",
+      numLibTip: "常見號碼庫（僅供參考）",
+      deletedOne: "已刪除", deletedN: "已刪除 {n} 則", undo: "復原",
+      newPill: "↑ {n} 則新訊息", gotNew: "收到 {n} 則新訊息", codeCopied: "驗證碼 {c} 已複製",
+      recvCopied: "收件號已複製", newSms: "新簡訊",
+      selCount: "已選 {n} 則", selAll: "全選本頁", cancel: "取消",
+      dSource: "來源", dDevice: "裝置標籤", dRecv: "收件號", dTime: "時間", dLabel: "號碼標籤", dStatus: "狀態",
+      notSet: "（未設定）", read: "已讀", starredPrefix: "★ 收藏 · ",
+      star: "收藏置頂", unstar: "取消收藏", markUnread: "標為未讀", copyAll: "複製全文",
+      call: "撥號", setLabel: "號碼標籤",
+      labelPrompt: "為 {n} 設定標籤（留空清除）",
+      sDnd: "勿擾", sDndRange: "勿擾時段",
+      to: "至", save: "儲存", saved: "設定已儲存",
+      statTitle: "統計", statFail: "統計載入失敗", statTotal: "總訊息", statUnread: "未讀", statStarred: "收藏",
+      statSources: "來源分布", statDays: "近 7 天",
+      autoCopyOn: "已開啟驗證碼自動複製", autoCopyOff: "已關閉驗證碼自動複製",
+      notifyOnMsg: "已開啟背景通知", notifyOffMsg: "已關閉背景通知",
+      soundOnMsg: "已開啟新訊息提示音", soundOffMsg: "已關閉新訊息提示音",
+      clearedN: "已清空 {n} 則",
+      confirmDelN: "確認刪除選取的 {n} 則？",
+      scopeDevice: "此裝置的訊息", scopeFilter: "目前篩選結果", scopeAll: "全部訊息",
+      confirmClear: "確認清空{scope}？將軟刪除符合的所有訊息（此操作無法復原）。",
+      confirmClear2: "再次確認：真的要清空{scope}嗎？",
+      renamePrompt: "重新命名裝置標籤「{name}」\n留空則恢復預設名", renameFail: "重新命名失敗",
+      noOthers: "沒有可合併的其他裝置",
+      mergePrompt: "把「{a}」的全部訊息合併到哪部裝置？\n{list}\n輸入序號：",
+      invalidIdx: "序號無效",
+      mergeConfirm: "確認把「{a}」的全部訊息合併到「{b}」？\n合併後此標籤將被刪除。",
+      targetMissing: "目標裝置不存在", mergeFail: "合併失敗",
+      delDevConfirm: "刪除此裝置標籤？（須先清空其全部簡訊）",
+      hasMessages: "此裝置仍有簡訊，請先刪除全部簡訊", delFail: "刪除失敗",
+      devCount: "（{n} 則）",
+      justNow: "剛剛", minAgo: "{n} 分鐘前", hourAgo: "{n} 小時前", today: "今天", yesterday: "昨天",
+      unnamed: "未命名裝置"
+    },
+    ja: {
+      langBtn: "🌐", langTip: "言語切替",
+      ghRepo: "GitHub リポジトリ", modalClose: "閉じる", devices: "デバイスラベル",
+      jumpTip: "ページ番号を入力して Enter で移動", perPageTip: "1 ページの件数",
+      stats: "統計", settings: "設定",
+      grpMsg: "メッセージ設定", grpFilter: "絞り込み", grpAction: "操作",
+      dndStart: "通知休止の開始時刻（時）", dndEnd: "通知休止の終了時刻（時）",
+      themeAuto: "自動", themeLight: "ライト", themeDark: "ダーク",
+      themeTip: "テーマ切り替え（自動 / ライト / ダーク）",
+      tabAll: "すべて", tabRename: "デバイスラベルを変更", tabMerge: "別のデバイスへ統合", tabDel: "このデバイスラベルを削除",
+      searchPh: "送信者や本文を検索…", clearSearch: "検索をクリア",
+      srcTip: "送信元で絞り込み", allSources: "すべての送信元", srcSms: "SMS", srcNotify: "通知",
+      rangeTip: "期間で絞り込み", allTime: "全期間", d7: "過去 7 日", d30: "過去 30 日",
+      autoCopy: "認証コード自動コピー", notifyOn: "バックグラウンド通知", soundOn: "通知音",
+      starOnly: "★ スター", unreadOnly: "● 未読", starTip: "スターのみ表示", unreadTip: "未読のみ表示",
+      select: "選択", selectTip: "一括選択を開始", done: "完了",
+      clear: "消去", clearTip: "現在の絞り込み結果を消去（ソフト削除）",
+      exportCsv: "CSV をエクスポート", exportJson: "JSON をエクスポート",
+      exportCsvTip: "現在の絞り込みを CSV で出力", exportJsonTip: "現在の絞り込みを JSON で出力",
+      total: "全 {n} 件", pageOf: "{a} / {b} ページ",
+      prev: "前へ", next: "次へ", perPage: "{n} 件/ページ", jumpPh: "ページ", go: "移動",
+      loading: "読み込み中…", emptyFilter: "条件に一致するメッセージはありません",
+      emptyAll: "まだメッセージはありません", emptyHint: "スマホで SmsForwarder を設定するか、/api/push に POST して試してください",
+      loadFail: "読み込み失敗：{m}", retry: "再試行",
+      del: "削除", unknownNum: "不明な番号", codeLabel: "認証コード：", copy: "コピー", copied: "コピーしました",
+      more: "全文を表示", less: "折りたたむ", unread: "未読",
+      starItemTip: "スター/固定表示", recvTip: "ダブルクリックで宛先番号をコピー", selTip: "選択",
+      numLibTip: "よくある番号リスト（参考）",
+      deletedOne: "削除しました", deletedN: "{n} 件削除しました", undo: "元に戻す",
+      newPill: "↑ 新着 {n} 件", gotNew: "新着 {n} 件を受信", codeCopied: "認証コード {c} をコピーしました",
+      recvCopied: "宛先番号をコピーしました", newSms: "新着 SMS",
+      selCount: "{n} 件選択中", selAll: "このページを全選択", cancel: "キャンセル",
+      dSource: "送信元", dDevice: "デバイスラベル", dRecv: "宛先番号", dTime: "日時", dLabel: "番号ラベル", dStatus: "状態",
+      notSet: "（未設定）", read: "既読", starredPrefix: "★ スター · ",
+      star: "スターと固定", unstar: "スター解除", markUnread: "未読にする", copyAll: "全文をコピー",
+      call: "発信", setLabel: "番号ラベル",
+      labelPrompt: "{n} のラベルを設定（空欄で解除）",
+      sDnd: "通知休止", sDndRange: "通知休止時間帯",
+      to: "〜", save: "保存", saved: "設定を保存しました",
+      statTitle: "統計", statFail: "統計の読み込みに失敗しました", statTotal: "総メッセージ", statUnread: "未読", statStarred: "スター",
+      statSources: "送信元別", statDays: "過去 7 日",
+      autoCopyOn: "認証コード自動コピーを有効にしました", autoCopyOff: "認証コード自動コピーを無効にしました",
+      notifyOnMsg: "バックグラウンド通知を有効にしました", notifyOffMsg: "バックグラウンド通知を無効にしました",
+      soundOnMsg: "新着通知音を有効にしました", soundOffMsg: "新着通知音を無効にしました",
+      clearedN: "{n} 件消去しました",
+      confirmDelN: "選択した {n} 件を削除しますか？",
+      scopeDevice: "このデバイスのメッセージ", scopeFilter: "現在の絞り込み結果", scopeAll: "すべてのメッセージ",
+      confirmClear: "{scope}を消去しますか？一致するすべてのメッセージがソフト削除されます（取り消せません）。",
+      confirmClear2: "再確認：本当に{scope}を消去しますか？",
+      renamePrompt: "デバイスラベル「{name}」を変更\n空欄でデフォルト名に戻ります", renameFail: "名前の変更に失敗しました",
+      noOthers: "統合先の他のデバイスがありません",
+      mergePrompt: "「{a}」の全メッセージをどのデバイスに統合しますか？\n{list}\n番号を入力：",
+      invalidIdx: "番号が無効です",
+      mergeConfirm: "「{a}」の全メッセージを「{b}」に統合しますか？\n統合後、このラベルは削除されます。",
+      targetMissing: "統合先デバイスが見つかりません", mergeFail: "統合に失敗しました",
+      delDevConfirm: "このデバイスラベルを削除しますか？（先に全 SMS を消去する必要があります）",
+      hasMessages: "このデバイスにはまだ SMS があります。先にすべて削除してください", delFail: "削除に失敗しました",
+      devCount: "（{n} 件）",
+      justNow: "たった今", minAgo: "{n} 分前", hourAgo: "{n} 時間前", today: "今日", yesterday: "昨日",
+      unnamed: "名前のないデバイス"
+    },
+    ko: {
+      langBtn: "🌐", langTip: "언어 전환",
+      ghRepo: "GitHub 저장소", modalClose: "닫기", devices: "기기 라벨",
+      jumpTip: "페이지 번호 입력 후 Enter", perPageTip: "페이지당 항목 수",
+      stats: "통계", settings: "설정",
+      grpMsg: "메시지 설정", grpFilter: "필터", grpAction: "동작",
+      dndStart: "방해 금지 시작 시각(시)", dndEnd: "방해 금지 종료 시각(시)",
+      themeAuto: "자동", themeLight: "라이트", themeDark: "다크",
+      themeTip: "테마 전환(자동 / 라이트 / 다크)",
+      tabAll: "전체", tabRename: "기기 라벨 이름 변경", tabMerge: "다른 기기로 병합", tabDel: "이 기기 라벨 삭제",
+      searchPh: "발신자 또는 내용 검색…", clearSearch: "검색 지우기",
+      srcTip: "발신원별 필터", allSources: "전체 발신원", srcSms: "SMS", srcNotify: "알림",
+      rangeTip: "기간별 필터", allTime: "전체 기간", d7: "최근 7일", d30: "최근 30일",
+      autoCopy: "인증번호 자동 복사", notifyOn: "백그라운드 알림", soundOn: "알림음",
+      starOnly: "★ 즐겨찾기", unreadOnly: "● 읽지 않음", starTip: "즐겨찾기만 보기", unreadTip: "읽지 않은 것만 보기",
+      select: "선택", selectTip: "일괄 선택 시작", done: "완료",
+      clear: "비우기", clearTip: "현재 필터 결과 비우기(소프트 삭제)",
+      exportCsv: "CSV 내보내기", exportJson: "JSON 내보내기",
+      exportCsvTip: "현재 필터를 CSV로 내보내기", exportJsonTip: "현재 필터를 JSON으로 내보내기",
+      total: "총 {n}건", pageOf: "{a} / {b} 페이지",
+      prev: "이전", next: "다음", perPage: "페이지당 {n}건", jumpPh: "페이지", go: "이동",
+      loading: "불러오는 중…", emptyFilter: "조건에 맞는 메시지가 없습니다",
+      emptyAll: "아직 메시지가 없습니다", emptyHint: "휴대폰에서 SmsForwarder를 설정하거나 /api/push 로 POST 해 보세요",
+      loadFail: "불러오기 실패: {m}", retry: "다시 시도",
+      del: "삭제", unknownNum: "알 수 없는 번호", codeLabel: "인증번호:", copy: "복사", copied: "복사됨",
+      more: "전문 펼치기", less: "접기", unread: "읽지 않음",
+      starItemTip: "즐겨찾기/고정", recvTip: "더블클릭으로 수신번호 복사", selTip: "선택",
+      numLibTip: "자주 오는 번호 목록(참고용)",
+      deletedOne: "삭제됨", deletedN: "{n}건 삭제됨", undo: "실행 취소",
+      newPill: "↑ 새 메시지 {n}건", gotNew: "새 메시지 {n}건 수신", codeCopied: "인증번호 {c} 복사됨",
+      recvCopied: "수신번호 복사됨", newSms: "새 SMS",
+      selCount: "{n}건 선택됨", selAll: "이 페이지 전체 선택", cancel: "취소",
+      dSource: "발신원", dDevice: "기기 라벨", dRecv: "수신번호", dTime: "시간", dLabel: "번호 라벨", dStatus: "상태",
+      notSet: "(설정 안 됨)", read: "읽음", starredPrefix: "★ 즐겨찾기 · ",
+      star: "즐겨찾기 및 고정", unstar: "즐겨찾기 해제", markUnread: "읽지 않음으로 표시", copyAll: "전문 복사",
+      call: "전화", setLabel: "번호 라벨",
+      labelPrompt: "{n} 의 라벨 설정(비우면 해제)",
+      sDnd: "방해 금지", sDndRange: "방해 금지 시간대",
+      to: "부터", save: "저장", saved: "설정이 저장되었습니다",
+      statTitle: "통계", statFail: "통계 불러오기 실패", statTotal: "전체 메시지", statUnread: "읽지 않음", statStarred: "즐겨찾기",
+      statSources: "발신원별", statDays: "최근 7일",
+      autoCopyOn: "인증번호 자동 복사 켜짐", autoCopyOff: "인증번호 자동 복사 꺼짐",
+      notifyOnMsg: "백그라운드 알림 켜짐", notifyOffMsg: "백그라운드 알림 꺼짐",
+      soundOnMsg: "새 메시지 알림음 켜짐", soundOffMsg: "새 메시지 알림음 꺼짐",
+      clearedN: "{n}건 비움",
+      confirmDelN: "선택한 {n}건을 삭제할까요?",
+      scopeDevice: "이 기기의 메시지", scopeFilter: "현재 필터 결과", scopeAll: "전체 메시지",
+      confirmClear: "{scope}을(를) 비울까요? 일치하는 모든 메시지가 소프트 삭제됩니다(되돌릴 수 없습니다).",
+      confirmClear2: "다시 확인: 정말 {scope}을(를) 비울까요?",
+      renamePrompt: "기기 라벨 \"{name}\" 이름 변경\n비우면 기본 이름으로 복원됩니다", renameFail: "이름 변경 실패",
+      noOthers: "병합할 다른 기기가 없습니다",
+      mergePrompt: "\"{a}\"의 모든 메시지를 어느 기기로 병합할까요?\n{list}\n번호 입력:",
+      invalidIdx: "잘못된 번호입니다",
+      mergeConfirm: "\"{a}\"의 모든 메시지를 \"{b}\"(으)로 병합할까요?\n병합 후 이 라벨은 삭제됩니다.",
+      targetMissing: "대상 기기를 찾을 수 없습니다", mergeFail: "병합 실패",
+      delDevConfirm: "이 기기 라벨을 삭제할까요?(먼저 모든 SMS를 비워야 합니다)",
+      hasMessages: "이 기기에 아직 SMS가 있습니다. 먼저 모두 삭제해 주세요", delFail: "삭제 실패",
+      devCount: "({n}건)",
+      justNow: "방금", minAgo: "{n}분 전", hourAgo: "{n}시간 전", today: "오늘", yesterday: "어제",
+      unnamed: "이름 없는 기기"
+    },
+    es: {
+      langBtn: "🌐", langTip: "Cambiar idioma",
+      ghRepo: "Repositorio de GitHub", modalClose: "Cerrar", devices: "Dispositivos",
+      jumpTip: "Escribe un número de página y pulsa Enter", perPageTip: "Elementos por página",
+      stats: "Estadísticas", settings: "Ajustes",
+      grpMsg: "Opciones de mensajes", grpFilter: "Filtros", grpAction: "Acciones",
+      dndStart: "Inicio de horario silencioso", dndEnd: "Fin de horario silencioso",
+      themeAuto: "Automático", themeLight: "Claro", themeDark: "Oscuro",
+      themeTip: "Cambiar tema (automático / claro / oscuro)",
+      tabAll: "Todo", tabRename: "Renombrar etiqueta de dispositivo", tabMerge: "Fusionar en otro dispositivo", tabDel: "Eliminar esta etiqueta",
+      searchPh: "Buscar remitente o contenido…", clearSearch: "Borrar búsqueda",
+      srcTip: "Filtrar por origen", allSources: "Todos los orígenes", srcSms: "SMS", srcNotify: "Notificación",
+      rangeTip: "Filtrar por fecha", allTime: "Todo el tiempo", d7: "Últimos 7 días", d30: "Últimos 30 días",
+      autoCopy: "Copiar códigos automáticamente", notifyOn: "Alertas en segundo plano", soundOn: "Sonido",
+      starOnly: "★ Favoritos", unreadOnly: "● No leídos", starTip: "Solo favoritos", unreadTip: "Solo no leídos",
+      select: "Seleccionar", selectTip: "Entrar en selección múltiple", done: "Listo",
+      clear: "Vaciar", clearTip: "Vaciar el filtro actual (borrado suave)",
+      exportCsv: "Exportar CSV", exportJson: "Exportar JSON",
+      exportCsvTip: "Exportar el filtro actual como CSV", exportJsonTip: "Exportar el filtro actual como JSON",
+      total: "{n} mensajes", pageOf: "Página {a} de {b}",
+      prev: "Anterior", next: "Siguiente", perPage: "{n} por página", jumpPh: "Página", go: "Ir",
+      loading: "Cargando…", emptyFilter: "No hay mensajes que coincidan",
+      emptyAll: "Aún no hay mensajes", emptyHint: "Configura SmsForwarder en tu teléfono o envía un POST a /api/push para probar",
+      loadFail: "Error al cargar: {m}", retry: "Reintentar",
+      del: "Eliminar", unknownNum: "Desconocido", codeLabel: "Código:", copy: "Copiar", copied: "Copiado",
+      more: "Mostrar más", less: "Mostrar menos", unread: "No leído",
+      starItemTip: "Marcar / fijar", recvTip: "Doble toque para copiar", selTip: "Seleccionar",
+      numLibTip: "Directorio de números integrado (solo referencia)",
+      deletedOne: "Eliminado", deletedN: "{n} eliminados", undo: "Deshacer",
+      newPill: "↑ {n} nuevos", gotNew: "{n} mensaje(s) nuevo(s)", codeCopied: "Código {c} copiado",
+      recvCopied: "Número de destino copiado", newSms: "Mensaje nuevo",
+      selCount: "{n} seleccionados", selAll: "Seleccionar página", cancel: "Cancelar",
+      dSource: "Origen", dDevice: "Dispositivo", dRecv: "Destinatario", dTime: "Hora", dLabel: "Etiqueta del número", dStatus: "Estado",
+      notSet: "(sin configurar)", read: "Leído", starredPrefix: "★ Favorito · ",
+      star: "Marcar y fijar", unstar: "Quitar marca", markUnread: "Marcar como no leído", copyAll: "Copiar texto",
+      call: "Llamar", setLabel: "Etiqueta del número",
+      labelPrompt: "Etiqueta para {n} (dejar vacío para borrar)",
+      sDnd: "No molestar", sDndRange: "Horario silencioso",
+      to: "a", save: "Guardar", saved: "Ajustes guardados",
+      statTitle: "Estadísticas", statFail: "Error al cargar estadísticas", statTotal: "Total", statUnread: "No leídos", statStarred: "Favoritos",
+      statSources: "Por origen", statDays: "Últimos 7 días",
+      autoCopyOn: "Copia automática activada", autoCopyOff: "Copia automática desactivada",
+      notifyOnMsg: "Alertas en segundo plano activadas", notifyOffMsg: "Alertas en segundo plano desactivadas",
+      soundOnMsg: "Sonido activado", soundOffMsg: "Sonido desactivado",
+      clearedN: "{n} vaciados",
+      confirmDelN: "¿Eliminar los {n} mensajes seleccionados?",
+      scopeDevice: "los mensajes de este dispositivo", scopeFilter: "el filtro actual", scopeAll: "todos los mensajes",
+      confirmClear: "¿Vaciar {scope}? Todos los mensajes que coincidan se borrarán de forma suave (no se puede deshacer).",
+      confirmClear2: "Confirmar de nuevo: ¿seguro que quieres vaciar {scope}?",
+      renamePrompt: "Renombrar la etiqueta \"{name}\"\nDejar vacío para restaurar el nombre predeterminado", renameFail: "Error al renombrar",
+      noOthers: "No hay otros dispositivos para fusionar",
+      mergePrompt: "¿Fusionar todos los mensajes de \"{a}\" en qué dispositivo?\n{list}\nEscribe el número:",
+      invalidIdx: "Número no válido",
+      mergeConfirm: "¿Fusionar todos los mensajes de \"{a}\" en \"{b}\"?\nLa etiqueta \"{a}\" se eliminará.",
+      targetMissing: "Dispositivo de destino no encontrado", mergeFail: "Error al fusionar",
+      delDevConfirm: "¿Eliminar esta etiqueta de dispositivo? (primero debes vaciar todos sus SMS)",
+      hasMessages: "Este dispositivo aún tiene SMS: elimínalos primero", delFail: "Error al eliminar",
+      devCount: "({n})",
+      justNow: "ahora mismo", minAgo: "hace {n} min", hourAgo: "hace {n} h", today: "Hoy", yesterday: "Ayer",
+      unnamed: "Dispositivo sin nombre"
+    },
+    fr: {
+      langBtn: "🌐", langTip: "Changer de langue",
+      ghRepo: "Dépôt GitHub", modalClose: "Fermer", devices: "Appareils",
+      jumpTip: "Saisissez un numéro de page puis Entrée", perPageTip: "Éléments par page",
+      stats: "Statistiques", settings: "Paramètres",
+      grpMsg: "Options des messages", grpFilter: "Filtres", grpAction: "Actions",
+      dndStart: "Début des heures silencieuses", dndEnd: "Fin des heures silencieuses",
+      themeAuto: "Auto", themeLight: "Clair", themeDark: "Sombre",
+      themeTip: "Changer de thème (auto / clair / sombre)",
+      tabAll: "Tout", tabRename: "Renommer l'étiquette d'appareil", tabMerge: "Fusionner dans un autre appareil", tabDel: "Supprimer cette étiquette",
+      searchPh: "Rechercher expéditeur ou contenu…", clearSearch: "Effacer la recherche",
+      srcTip: "Filtrer par source", allSources: "Toutes les sources", srcSms: "SMS", srcNotify: "Notification",
+      rangeTip: "Filtrer par période", allTime: "Tout", d7: "7 derniers jours", d30: "30 derniers jours",
+      autoCopy: "Copie auto des codes", notifyOn: "Alertes en arrière-plan", soundOn: "Son",
+      starOnly: "★ Favoris", unreadOnly: "● Non lus", starTip: "Favoris uniquement", unreadTip: "Non lus uniquement",
+      select: "Sélectionner", selectTip: "Activer la sélection multiple", done: "Terminé",
+      clear: "Vider", clearTip: "Vider le filtre actuel (suppression logique)",
+      exportCsv: "Exporter CSV", exportJson: "Exporter JSON",
+      exportCsvTip: "Exporter le filtre actuel en CSV", exportJsonTip: "Exporter le filtre actuel en JSON",
+      total: "{n} messages", pageOf: "Page {a} sur {b}",
+      prev: "Précédent", next: "Suivant", perPage: "{n} par page", jumpPh: "Page", go: "Aller",
+      loading: "Chargement…", emptyFilter: "Aucun message correspondant",
+      emptyAll: "Aucun message pour l'instant", emptyHint: "Configurez SmsForwarder sur votre téléphone, ou envoyez un POST vers /api/push pour essayer",
+      loadFail: "Échec du chargement : {m}", retry: "Réessayer",
+      del: "Supprimer", unknownNum: "Inconnu", codeLabel: "Code :", copy: "Copier", copied: "Copié",
+      more: "Tout afficher", less: "Réduire", unread: "Non lu",
+      starItemTip: "Favori / épingler", recvTip: "Double-clic pour copier", selTip: "Sélectionner",
+      numLibTip: "Annuaire intégré (à titre indicatif)",
+      deletedOne: "Supprimé", deletedN: "{n} supprimés", undo: "Annuler",
+      newPill: "↑ {n} nouveaux", gotNew: "{n} nouveau(x) message(s)", codeCopied: "Code {c} copié",
+      recvCopied: "Numéro destinataire copié", newSms: "Nouveau message",
+      selCount: "{n} sélectionnés", selAll: "Tout sélectionner (page)", cancel: "Annuler",
+      dSource: "Source", dDevice: "Appareil", dRecv: "Destinataire", dTime: "Heure", dLabel: "Étiquette du numéro", dStatus: "Statut",
+      notSet: "(non défini)", read: "Lu", starredPrefix: "★ Favori · ",
+      star: "Favori et épingler", unstar: "Retirer le favori", markUnread: "Marquer non lu", copyAll: "Copier le texte",
+      call: "Appeler", setLabel: "Étiquette du numéro",
+      labelPrompt: "Étiquette pour {n} (laisser vide pour effacer)",
+      sDnd: "Ne pas déranger", sDndRange: "Heures silencieuses",
+      to: "à", save: "Enregistrer", saved: "Paramètres enregistrés",
+      statTitle: "Statistiques", statFail: "Échec du chargement des statistiques", statTotal: "Total", statUnread: "Non lus", statStarred: "Favoris",
+      statSources: "Par source", statDays: "7 derniers jours",
+      autoCopyOn: "Copie auto activée", autoCopyOff: "Copie auto désactivée",
+      notifyOnMsg: "Alertes en arrière-plan activées", notifyOffMsg: "Alertes en arrière-plan désactivées",
+      soundOnMsg: "Son activé", soundOffMsg: "Son désactivé",
+      clearedN: "{n} vidés",
+      confirmDelN: "Supprimer les {n} messages sélectionnés ?",
+      scopeDevice: "les messages de cet appareil", scopeFilter: "le filtre actuel", scopeAll: "tous les messages",
+      confirmClear: "Vider {scope} ? Tous les messages correspondants seront supprimés logiquement (irréversible).",
+      confirmClear2: "Confirmer à nouveau : vider vraiment {scope} ?",
+      renamePrompt: "Renommer l'étiquette \"{name}\"\nLaisser vide pour restaurer le nom par défaut", renameFail: "Échec du renommage",
+      noOthers: "Aucun autre appareil pour la fusion",
+      mergePrompt: "Fusionner tous les messages de \"{a}\" vers quel appareil ?\n{list}\nSaisissez le numéro :",
+      invalidIdx: "Numéro invalide",
+      mergeConfirm: "Fusionner tous les messages de \"{a}\" vers \"{b}\" ?\nL'étiquette \"{a}\" sera supprimée.",
+      targetMissing: "Appareil cible introuvable", mergeFail: "Échec de la fusion",
+      delDevConfirm: "Supprimer cette étiquette d'appareil ? (videz d'abord tous ses SMS)",
+      hasMessages: "Cet appareil contient encore des SMS — supprimez-les d'abord", delFail: "Échec de la suppression",
+      devCount: "({n})",
+      justNow: "à l'instant", minAgo: "il y a {n} min", hourAgo: "il y a {n} h", today: "Aujourd'hui", yesterday: "Hier",
+      unnamed: "Appareil sans nom"
+    },
+    de: {
+      langBtn: "🌐", langTip: "Sprache wechseln",
+      ghRepo: "GitHub-Repository", modalClose: "Schließen", devices: "Geräte",
+      jumpTip: "Seitennummer eingeben und Enter drücken", perPageTip: "Einträge pro Seite",
+      stats: "Statistik", settings: "Einstellungen",
+      grpMsg: "Nachrichten-Optionen", grpFilter: "Filter", grpAction: "Aktionen",
+      dndStart: "Ruhezeit Beginn", dndEnd: "Ruhezeit Ende",
+      themeAuto: "Auto", themeLight: "Hell", themeDark: "Dunkel",
+      themeTip: "Design wechseln (auto / hell / dunkel)",
+      tabAll: "Alle", tabRename: "Geräte-Label umbenennen", tabMerge: "In anderes Gerät zusammenführen", tabDel: "Dieses Geräte-Label löschen",
+      searchPh: "Absender oder Inhalt suchen…", clearSearch: "Suche löschen",
+      srcTip: "Nach Quelle filtern", allSources: "Alle Quellen", srcSms: "SMS", srcNotify: "Benachrichtigung",
+      rangeTip: "Nach Zeit filtern", allTime: "Gesamter Zeitraum", d7: "Letzte 7 Tage", d30: "Letzte 30 Tage",
+      autoCopy: "Codes automatisch kopieren", notifyOn: "Hintergrund-Benachrichtigungen", soundOn: "Ton",
+      starOnly: "★ Favoriten", unreadOnly: "● Ungelesen", starTip: "Nur Favoriten", unreadTip: "Nur Ungelesene",
+      select: "Auswählen", selectTip: "Mehrfachauswahl starten", done: "Fertig",
+      clear: "Leeren", clearTip: "Aktuellen Filter leeren (Soft-Delete)",
+      exportCsv: "CSV exportieren", exportJson: "JSON exportieren",
+      exportCsvTip: "Aktuellen Filter als CSV exportieren", exportJsonTip: "Aktuellen Filter als JSON exportieren",
+      total: "{n} Nachrichten", pageOf: "Seite {a} von {b}",
+      prev: "Zurück", next: "Weiter", perPage: "{n} pro Seite", jumpPh: "Seite", go: "Los",
+      loading: "Wird geladen…", emptyFilter: "Keine passenden Nachrichten",
+      emptyAll: "Noch keine Nachrichten", emptyHint: "Richte SmsForwarder auf dem Handy ein oder sende ein POST an /api/push",
+      loadFail: "Laden fehlgeschlagen: {m}", retry: "Erneut versuchen",
+      del: "Löschen", unknownNum: "Unbekannt", codeLabel: "Code:", copy: "Kopieren", copied: "Kopiert",
+      more: "Mehr anzeigen", less: "Weniger anzeigen", unread: "Ungelesen",
+      starItemTip: "Favorit / anheften", recvTip: "Doppeltipp zum Kopieren", selTip: "Auswählen",
+      numLibTip: "Integriertes Nummernverzeichnis (nur zur Referenz)",
+      deletedOne: "Gelöscht", deletedN: "{n} gelöscht", undo: "Rückgängig",
+      newPill: "↑ {n} neue", gotNew: "{n} neue Nachricht(en)", codeCopied: "Code {c} kopiert",
+      recvCopied: "Empfängernummer kopiert", newSms: "Neue Nachricht",
+      selCount: "{n} ausgewählt", selAll: "Seite auswählen", cancel: "Abbrechen",
+      dSource: "Quelle", dDevice: "Gerät", dRecv: "Empfänger", dTime: "Zeit", dLabel: "Nummern-Label", dStatus: "Status",
+      notSet: "(nicht gesetzt)", read: "Gelesen", starredPrefix: "★ Favorit · ",
+      star: "Favorit & anheften", unstar: "Favorit entfernen", markUnread: "Als ungelesen markieren", copyAll: "Text kopieren",
+      call: "Anrufen", setLabel: "Nummern-Label",
+      labelPrompt: "Label für {n} (leer lassen zum Entfernen)",
+      sDnd: "Nicht stören", sDndRange: "Ruhezeit",
+      to: "bis", save: "Speichern", saved: "Einstellungen gespeichert",
+      statTitle: "Statistik", statFail: "Statistik konnte nicht geladen werden", statTotal: "Gesamt", statUnread: "Ungelesen", statStarred: "Favoriten",
+      statSources: "Nach Quelle", statDays: "Letzte 7 Tage",
+      autoCopyOn: "Auto-Kopieren aktiviert", autoCopyOff: "Auto-Kopieren deaktiviert",
+      notifyOnMsg: "Hintergrund-Benachrichtigungen aktiviert", notifyOffMsg: "Hintergrund-Benachrichtigungen deaktiviert",
+      soundOnMsg: "Ton aktiviert", soundOffMsg: "Ton deaktiviert",
+      clearedN: "{n} geleert",
+      confirmDelN: "{n} ausgewählte Nachricht(en) löschen?",
+      scopeDevice: "die Nachrichten dieses Geräts", scopeFilter: "den aktuellen Filter", scopeAll: "alle Nachrichten",
+      confirmClear: "{scope} leeren? Alle passenden Nachrichten werden soft-gelöscht (kann nicht rückgängig gemacht werden).",
+      confirmClear2: "Erneut bestätigen: {scope} wirklich leeren?",
+      renamePrompt: "Geräte-Label \"{name}\" umbenennen\nLeer lassen für den Standardnamen", renameFail: "Umbenennen fehlgeschlagen",
+      noOthers: "Keine anderen Geräte zum Zusammenführen",
+      mergePrompt: "Alle Nachrichten von \"{a}\" in welches Gerät zusammenführen?\n{list}\nNummer eingeben:",
+      invalidIdx: "Ungültige Nummer",
+      mergeConfirm: "Alle Nachrichten von \"{a}\" nach \"{b}\" zusammenführen?\nDas Label \"{a}\" wird entfernt.",
+      targetMissing: "Zielgerät nicht gefunden", mergeFail: "Zusammenführen fehlgeschlagen",
+      delDevConfirm: "Dieses Geräte-Label löschen? (zuvor alle SMS leeren)",
+      hasMessages: "Dieses Gerät hat noch SMS — bitte zuerst löschen", delFail: "Löschen fehlgeschlagen",
+      devCount: "({n})",
+      justNow: "gerade eben", minAgo: "vor {n} Min.", hourAgo: "vor {n} Std.", today: "Heute", yesterday: "Gestern",
+      unnamed: "Unbenanntes Gerät"
+    },
+    "pt-BR": {
+      langBtn: "🌐", langTip: "Mudar idioma",
+      ghRepo: "Repositório do GitHub", modalClose: "Fechar", devices: "Dispositivos",
+      jumpTip: "Digite o número da página e pressione Enter", perPageTip: "Itens por página",
+      stats: "Estatísticas", settings: "Configurações",
+      grpMsg: "Opções de mensagens", grpFilter: "Filtros", grpAction: "Ações",
+      dndStart: "Início do horário silencioso", dndEnd: "Fim do horário silencioso",
+      themeAuto: "Automático", themeLight: "Claro", themeDark: "Escuro",
+      themeTip: "Alternar tema (automático / claro / escuro)",
+      tabAll: "Tudo", tabRename: "Renomear etiqueta do dispositivo", tabMerge: "Mesclar em outro dispositivo", tabDel: "Excluir esta etiqueta",
+      searchPh: "Pesquisar remetente ou conteúdo…", clearSearch: "Limpar pesquisa",
+      srcTip: "Filtrar por origem", allSources: "Todas as origens", srcSms: "SMS", srcNotify: "Notificação",
+      rangeTip: "Filtrar por período", allTime: "Todo o período", d7: "Últimos 7 dias", d30: "Últimos 30 dias",
+      autoCopy: "Copiar códigos automaticamente", notifyOn: "Alertas em segundo plano", soundOn: "Som",
+      starOnly: "★ Favoritos", unreadOnly: "● Não lidas", starTip: "Somente favoritas", unreadTip: "Somente não lidas",
+      select: "Selecionar", selectTip: "Entrar na seleção múltipla", done: "Concluído",
+      clear: "Limpar", clearTip: "Limpar o filtro atual (exclusão suave)",
+      exportCsv: "Exportar CSV", exportJson: "Exportar JSON",
+      exportCsvTip: "Exportar o filtro atual como CSV", exportJsonTip: "Exportar o filtro atual como JSON",
+      total: "{n} mensagens", pageOf: "Página {a} de {b}",
+      prev: "Anterior", next: "Próxima", perPage: "{n} por página", jumpPh: "Página", go: "Ir",
+      loading: "Carregando…", emptyFilter: "Nenhuma mensagem correspondente",
+      emptyAll: "Nenhuma mensagem ainda", emptyHint: "Configure o SmsForwarder no celular ou envie um POST para /api/push para testar",
+      loadFail: "Falha ao carregar: {m}", retry: "Tentar novamente",
+      del: "Excluir", unknownNum: "Desconhecido", codeLabel: "Código:", copy: "Copiar", copied: "Copiado",
+      more: "Mostrar mais", less: "Mostrar menos", unread: "Não lida",
+      starItemTip: "Favoritar / fixar", recvTip: "Toque duplo para copiar", selTip: "Selecionar",
+      numLibTip: "Diretório de números integrado (somente referência)",
+      deletedOne: "Excluída", deletedN: "{n} excluídas", undo: "Desfazer",
+      newPill: "↑ {n} novas", gotNew: "{n} nova(s) mensagem(ns)", codeCopied: "Código {c} copiado",
+      recvCopied: "Número do destinatário copiado", newSms: "Nova mensagem",
+      selCount: "{n} selecionadas", selAll: "Selecionar página", cancel: "Cancelar",
+      dSource: "Origem", dDevice: "Dispositivo", dRecv: "Destinatário", dTime: "Hora", dLabel: "Etiqueta do número", dStatus: "Status",
+      notSet: "(não definido)", read: "Lida", starredPrefix: "★ Favorita · ",
+      star: "Favoritar e fixar", unstar: "Remover favorito", markUnread: "Marcar como não lida", copyAll: "Copiar texto",
+      call: "Ligar", setLabel: "Etiqueta do número",
+      labelPrompt: "Etiqueta para {n} (deixe vazio para limpar)",
+      sDnd: "Não perturbe", sDndRange: "Horário silencioso",
+      to: "até", save: "Salvar", saved: "Configurações salvas",
+      statTitle: "Estatísticas", statFail: "Falha ao carregar estatísticas", statTotal: "Total", statUnread: "Não lidas", statStarred: "Favoritas",
+      statSources: "Por origem", statDays: "Últimos 7 dias",
+      autoCopyOn: "Cópia automática ativada", autoCopyOff: "Cópia automática desativada",
+      notifyOnMsg: "Alertas em segundo plano ativados", notifyOffMsg: "Alertas em segundo plano desativados",
+      soundOnMsg: "Som ativado", soundOffMsg: "Som desativado",
+      clearedN: "{n} limpas",
+      confirmDelN: "Excluir as {n} mensagens selecionadas?",
+      scopeDevice: "as mensagens deste dispositivo", scopeFilter: "o filtro atual", scopeAll: "todas as mensagens",
+      confirmClear: "Limpar {scope}? Todas as mensagens correspondentes serão excluídas de forma suave (não pode ser desfeito).",
+      confirmClear2: "Confirmar novamente: realmente limpar {scope}?",
+      renamePrompt: "Renomear a etiqueta \"{name}\"\nDeixe vazio para restaurar o nome padrão", renameFail: "Falha ao renomear",
+      noOthers: "Nenhum outro dispositivo para mesclar",
+      mergePrompt: "Mesclar todas as mensagens de \"{a}\" para qual dispositivo?\n{list}\nDigite o número:",
+      invalidIdx: "Número inválido",
+      mergeConfirm: "Mesclar todas as mensagens de \"{a}\" para \"{b}\"?\nA etiqueta \"{a}\" será removida.",
+      targetMissing: "Dispositivo de destino não encontrado", mergeFail: "Falha ao mesclar",
+      delDevConfirm: "Excluir esta etiqueta de dispositivo? (primeiro limpe todos os SMS)",
+      hasMessages: "Este dispositivo ainda tem SMS — exclua-os primeiro", delFail: "Falha ao excluir",
+      devCount: "({n})",
+      justNow: "agora mesmo", minAgo: "há {n} min", hourAgo: "há {n} h", today: "Hoje", yesterday: "Ontem",
+      unnamed: "Dispositivo sem nome"
     }
   };
   function T(key, vars) {
-    var m = I18N[LANG] || I18N.zh;
+    var m = I18N[LANG] || I18N.en;
     var s = m[key];
-    if (s === undefined) s = I18N.zh[key];
+    if (s === undefined) s = I18N.en[key];
     if (s === undefined) return key;
     if (vars) {
       for (var k in vars) {
@@ -1891,7 +2343,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   }
   /* 静态节点翻译（在首屏渲染前调用，避免中英文闪烁） */
   function applyI18n() {
-    document.documentElement.lang = LANG === "zh" ? "zh-CN" : "en";
+    document.documentElement.lang = LANG;
     var each = function (sel, attr, fn) {
       var ns = document.querySelectorAll("[" + attr + "]");
       for (var i = 0; i < ns.length; i++) fn(ns[i], T(ns[i].getAttribute(attr)));
@@ -1913,20 +2365,46 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     for (var i = 0; i < nums.length; i++) html += '<option value="' + nums[i] + '">' + esc(T("perPage", { n: nums[i] })) + '</option>';
     sel.innerHTML = html;
   }
-  /* 语言切换：写入 localStorage 后整页重载（避免半渲染状态；筛选条件不落盘，重载即回到默认视图） */
+  /* 语言切换：九语言菜单（自名显示），选择后写入 localStorage 并整页重载 */
+  var LANG_NAMES = { "zh-CN": "简体中文", "zh-TW": "繁體中文", "en": "English", "ja": "日本語", "ko": "한국어", "es": "Español", "fr": "Français", "de": "Deutsch", "pt-BR": "Português (BR)" };
+  function openLangMenu(b) {
+    var menu = null;
+    function close() { if (menu) { menu.remove(); menu = null; document.removeEventListener("click", close); } }
+    b.onclick = function (ev) {
+      ev.stopPropagation();
+      if (menu) { close(); return; }
+      menu = document.createElement("div");
+      menu.className = "langmenu";
+      for (var i = 0; i < LANGS.length; i++) {
+        (function (code) {
+          var it = document.createElement("div");
+          it.className = "langitem" + (code === LANG ? " cur" : "");
+          it.textContent = LANG_NAMES[code];
+          it.onclick = function (e2) {
+            e2.stopPropagation();
+            if (code === LANG) { close(); return; }
+            try { localStorage.setItem("sms_lang", code); } catch (e) {}
+            try {
+              var u = new URL(location.href);
+              u.searchParams.set("lang", code);
+              location.replace(u.toString());
+              return;
+            } catch (e) { location.reload(); }
+          };
+          menu.appendChild(it);
+        })(LANGS[i]);
+      }
+      document.body.appendChild(menu);
+      var r = b.getBoundingClientRect();
+      menu.style.top = (r.bottom + 6) + "px";
+      menu.style.right = Math.max(8, window.innerWidth - r.right) + "px";
+      document.addEventListener("click", close);
+    };
+  }
   function initLang() {
     var b = $("langbtn");
     if (!b) return;
-    b.onclick = function () {
-      var next = LANG === "zh" ? "en" : "zh";
-      try { localStorage.setItem("sms_lang", next); } catch (e) {}
-      try {
-        var u = new URL(location.href);
-        u.searchParams.set("lang", next);
-        location.replace(u.toString());
-        return;
-      } catch (e) { location.reload(); }
-    };
+    openLangMenu(b);
   }
   applyI18n();
   buildPerPage();
@@ -1940,7 +2418,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var d = new Date(String(utc).replace(" ", "T") + "Z");
     return isNaN(d.getTime()) ? null : d;
   }
-  var LOCALE = LANG === "zh" ? "zh-CN" : "en-US";
+  var LOCALES = { "zh-CN": "zh-CN", "zh-TW": "zh-TW", "en": "en-US", "ja": "ja-JP", "ko": "ko-KR", "es": "es-ES", "fr": "fr-FR", "de": "de-DE", "pt-BR": "pt-BR" };
+  var LOCALE = LOCALES[LANG] || "en-US";
   function pad2(s) { s = String(s); return s.length < 2 ? "0" + s : s; }
   /* 取北京时间字段：优先 Intl（Asia/Shanghai 固定时区）；无 Intl / 无时区数据的旧环境按 UTC+8 手算 */
   function partsOf(d) {
@@ -1967,8 +2446,35 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var d = parseUTC(utc);
     if (!d) return String(utc || "");
     var v = partsOf(d);
-    if (LANG === "zh") return v.year + "年" + v.pmonth + "月" + v.pday + "日 " + v.phour + ":" + v.pminute + ":" + v.psecond;
+    if (LANG === "zh-CN" || LANG === "zh-TW" || LANG === "ja")
+      return v.year + "年" + v.pmonth + "月" + v.pday + "日 " + v.phour + ":" + v.pminute + ":" + v.psecond;
+    if (LANG === "ko")
+      return v.year + "년 " + Number(v.pmonth) + "월 " + Number(v.pday) + "일 " + v.phour + ":" + v.pminute + ":" + v.psecond;
+    try {
+      return new Intl.DateTimeFormat(LOCALE, { timeZone: "Asia/Shanghai", year: "numeric", month: "short", day: "numeric",
+        hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(d);
+    } catch (e) {}
     return MONTHS[Number(v.month) - 1] + " " + Number(v.day) + ", " + v.year + " " + v.phour + ":" + v.pminute + ":" + v.psecond;
+  }
+  /* 短日期（跨年带年份）：zh 系/ja/ko 走年月日模板，其余走 Intl 本地格式，最终兜底英文月名 */
+  function fmtShort(d, v, now, withTime) {
+    if (LANG === "zh-CN" || LANG === "zh-TW" || LANG === "ja") {
+      var yr = v.year === now.year ? "" : v.year + "年";
+      return yr + Number(v.pmonth) + "月" + Number(v.pday) + "日" + (withTime ? " " + v.phour + ":" + v.pminute : "");
+    }
+    if (LANG === "ko") {
+      var yk = v.year === now.year ? "" : v.year + "년 ";
+      return yk + Number(v.pmonth) + "월 " + Number(v.pday) + "일" + (withTime ? " " + v.phour + ":" + v.pminute : "");
+    }
+    try {
+      var op = { timeZone: "Asia/Shanghai", month: "short", day: "numeric", hour12: false };
+      if (v.year !== now.year) op.year = "numeric";
+      if (withTime) { op.hour = "2-digit"; op.minute = "2-digit"; }
+      return new Intl.DateTimeFormat(LOCALE, op).format(d);
+    } catch (e) {}
+    var yr2 = v.year === now.year ? "" : ", " + v.year;
+    var base = MONTHS[Number(v.month) - 1] + " " + Number(v.day) + yr2;
+    return withTime ? base + " " + v.phour + ":" + v.pminute : base;
   }
   /* 相对时间：刚刚 / N 分钟前 / N 小时前 / 更早显示短日期；悬停卡片可看完整时间 */
   function relTime(utc) {
@@ -1978,13 +2484,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (diff < 60) return T("justNow");
     if (diff < 3600) return T("minAgo", { n: Math.floor(diff / 60) });
     if (diff < 86400) return T("hourAgo", { n: Math.floor(diff / 3600) });
-    var v = partsOf(d), now = partsOf(new Date());
-    if (LANG === "zh") {
-      var yr = v.year === now.year ? "" : v.year + "年";
-      return yr + Number(v.pmonth) + "月" + Number(v.pday) + "日 " + v.phour + ":" + v.pminute;
-    }
-    var yr2 = v.year === now.year ? "" : ", " + v.year;
-    return MONTHS[Number(v.month) - 1] + " " + Number(v.day) + yr2 + " " + v.phour + ":" + v.pminute;
+    return fmtShort(d, partsOf(d), partsOf(new Date()), true);
   }
   /* 日期分组标签：今天 / 昨天 / M月D日（跨年带年份） */
   function dayLabel(utc) {
@@ -1996,12 +2496,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       if (dd === nd) return T("today");
       if (nd - dd === 1) return T("yesterday");
     }
-    if (LANG === "zh") {
-      var yr = v.year === now.year ? "" : v.year + "年";
-      return yr + Number(v.pmonth) + "月" + Number(v.pday) + "日";
-    }
-    var yr2 = v.year === now.year ? "" : ", " + v.year;
-    return MONTHS[Number(v.month) - 1] + " " + Number(v.day) + yr2;
+    return fmtShort(d, v, now, false);
   }
   /* 验证码提取（级联策略，借鉴 SmsForwarder 关键词集 / otp-message-extractor 防误报 / expo-sms-listener 级联）：
      ① 码在前+分隔式(8-2-307是您的取件码) → ② 码在前+数字码(123456是您的验证码)
@@ -2114,7 +2609,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   function numLabel(s) {
     var d = normalizeNum(s);
     if (!d) return "";
-    return state.labels[d] || (LANG === "zh" ? NUM_LABELS[d] : NUM_LABELS_EN[d]) || "";
+    return state.labels[d] || (/^zh/.test(LANG) ? NUM_LABELS[d] : NUM_LABELS_EN[d]) || "";
   }
   /* 归属地：仅对 11 位手机号按需查后端 /api/phone；前端按号码缓存，最多 3 并发 */
   var areaCache = {};
@@ -2997,13 +3492,19 @@ const LOGIN_HTML = String.raw`<!DOCTYPE html>
   .err { color: #b91c1c; font-size: 12px; min-height: 18px; margin-top: 8px; }
   .langbtn { position: absolute; top: 8px; right: 10px; border: 1px solid var(--border); background: none;
              color: var(--muted, #6b7280); border-radius: 6px; padding: 3px 8px; font-size: 11px; cursor: pointer; }
+  .langmenu { position: fixed; z-index: 200; background: var(--card, #fff); border: 1px solid var(--border, #e2e5e9);
+              border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.14); padding: 4px; min-width: 150px; }
+  .langitem { padding: 8px 14px; border-radius: 7px; cursor: pointer; font-size: 13px; white-space: nowrap;
+              color: var(--text, #1f2328); }
+  .langitem:hover { background: rgba(127,127,127,.12); }
+  .langitem.cur { color: #2f7cf6; font-weight: 600; }
   .foot { color: var(--faint, #9aa3ab); font-size: 12px; margin-top: 14px; }
   .foot a { color: var(--faint, #9aa3ab); }
 </style>
 </head>
 <body>
 <div class="box">
-  <button class="langbtn" id="langbtn" type="button">EN</button>
+  <button class="langbtn" id="langbtn" type="button">🌐</button>
   <h1>__SITE_NAME__</h1>
   <input type="password" id="pw" data-i18n-ph="loginPw" placeholder="管理密码" autofocus autocomplete="current-password">
   <button id="go" data-i18n="loginBtn">登 录</button>
@@ -3012,29 +3513,68 @@ const LOGIN_HTML = String.raw`<!DOCTYPE html>
 </div>
 <script>
 (function () {
-  /* 登录页中英双语：语言探测与主页面一致（?lang > localStorage > 浏览器语言） */
+  /* 登录页多语言：语言探测与主页面一致（?lang > localStorage > 浏览器语言），旧值 zh→zh-CN 归一化 */
+  var LANGS = ["zh-CN", "zh-TW", "en", "ja", "ko", "es", "fr", "de", "pt-BR"];
   var LANG = (function () {
-    var v = "";
-    try { v = String(new URLSearchParams(location.search).get("lang") || "").toLowerCase(); } catch (e) {}
-    if (v !== "zh" && v !== "en") { try { v = String(localStorage.getItem("sms_lang") || "").toLowerCase(); } catch (e) { v = ""; } }
-    if (v !== "zh" && v !== "en") {
-      var nav = String(navigator.language || navigator.userLanguage || "").toLowerCase();
-      v = nav.indexOf("zh") === 0 ? "zh" : (nav ? "en" : "zh");
+    function norm(s) {
+      var v = String(s || "").toLowerCase().replace(/_/g, "-");
+      if (v === "zh" || v === "zh-cn" || v === "zh-hans") return "zh-CN";
+      if (v === "zh-tw" || v === "zh-hk" || v === "zh-mo" || v === "zh-hant") return "zh-TW";
+      if (v === "pt") return "pt-BR";
+      return LANGS.indexOf(v) >= 0 ? v : "";
     }
+    var v = "";
+    try { v = norm(new URLSearchParams(location.search).get("lang")); } catch (e) {}
+    if (!v) { try { v = norm(localStorage.getItem("sms_lang")); } catch (e) {} }
+    if (!v) {
+      var prefs = [];
+      try { prefs = (navigator.languages && navigator.languages.length) ? Array.prototype.slice.call(navigator.languages) : []; } catch (e1) {}
+      if (!prefs.length) { try { prefs = [navigator.language || navigator.userLanguage || ""]; } catch (e2) { prefs = [""]; } }
+      for (var i = 0; i < prefs.length; i++) {
+        v = norm(prefs[i]);
+        if (!v) {
+          var s2 = String(prefs[i] || "").toLowerCase().replace(/_/g, "-");
+          if (s2.indexOf("zh") === 0) v = /-(tw|hk|mo|hant)/.test(s2) ? "zh-TW" : "zh-CN";
+        }
+        if (v) break;
+      }
+    }
+    if (!v) v = "en"; /* 探测失败回退英语，绝不静默回退中文 */
     try { localStorage.setItem("sms_lang", v); } catch (e) {}
     return v;
   })();
   var D = {
-    zh: { loginPw: "管理密码", loginBtn: "登 录", wrongPw: "密码错误",
-          tooMany: "尝试次数过多，请 10 分钟后再试", loginFail: "登录失败", netErr: "网络错误",
-          title: " - 登录", btnLang: "EN", tipLang: "Switch to English" },
+    "zh-CN": { loginPw: "管理密码", loginBtn: "登 录", wrongPw: "密码错误",
+               tooMany: "尝试次数过多，请 10 分钟后再试", loginFail: "登录失败", netErr: "网络错误",
+               title: " - 登录", btnLang: "🌐", tipLang: "切换语言" },
+    "zh-TW": { loginPw: "管理密碼", loginBtn: "登 入", wrongPw: "密碼錯誤",
+               tooMany: "嘗試次數過多，請 10 分鐘後再試", loginFail: "登入失敗", netErr: "網路錯誤",
+               title: " - 登入", btnLang: "🌐", tipLang: "切換語言" },
     en: { loginPw: "Admin password", loginBtn: "Sign in", wrongPw: "Wrong password",
           tooMany: "Too many attempts. Try again in 10 minutes.", loginFail: "Sign-in failed", netErr: "Network error",
-          title: " - Sign in", btnLang: "中文", tipLang: "切换到中文" }
+          title: " - Sign in", btnLang: "🌐", tipLang: "Switch language" },
+    ja: { loginPw: "管理パスワード", loginBtn: "ログイン", wrongPw: "パスワードが違います",
+          tooMany: "試行回数が多すぎます。10 分後に再試行してください", loginFail: "ログインに失敗しました", netErr: "ネットワークエラー",
+          title: " - ログイン", btnLang: "🌐", tipLang: "言語切替" },
+    ko: { loginPw: "관리자 비밀번호", loginBtn: "로그인", wrongPw: "비밀번호가 틀렸습니다",
+          tooMany: "시도 횟수가 너무 많습니다. 10분 후 다시 시도해 주세요", loginFail: "로그인 실패", netErr: "네트워크 오류",
+          title: " - 로그인", btnLang: "🌐", tipLang: "언어 전환" },
+    es: { loginPw: "Contraseña de administrador", loginBtn: "Iniciar sesión", wrongPw: "Contraseña incorrecta",
+          tooMany: "Demasiados intentos. Reinténtalo en 10 minutos.", loginFail: "Error al iniciar sesión", netErr: "Error de red",
+          title: " - Iniciar sesión", btnLang: "🌐", tipLang: "Cambiar idioma" },
+    fr: { loginPw: "Mot de passe administrateur", loginBtn: "Se connecter", wrongPw: "Mot de passe incorrect",
+          tooMany: "Trop de tentatives. Réessayez dans 10 minutes.", loginFail: "Échec de la connexion", netErr: "Erreur réseau",
+          title: " - Connexion", btnLang: "🌐", tipLang: "Changer de langue" },
+    de: { loginPw: "Admin-Passwort", loginBtn: "Anmelden", wrongPw: "Falsches Passwort",
+          tooMany: "Zu viele Versuche. Bitte in 10 Minuten erneut versuchen.", loginFail: "Anmeldung fehlgeschlagen", netErr: "Netzwerkfehler",
+          title: " - Anmelden", btnLang: "🌐", tipLang: "Sprache wechseln" },
+    "pt-BR": { loginPw: "Senha de administrador", loginBtn: "Entrar", wrongPw: "Senha incorreta",
+               tooMany: "Muitas tentativas. Tente novamente em 10 minutos.", loginFail: "Falha ao entrar", netErr: "Erro de rede",
+               title: " - Entrar", btnLang: "🌐", tipLang: "Mudar idioma" }
   };
-  function T(k) { return (D[LANG] && D[LANG][k]) || D.zh[k] || k; }
+  function T(k) { return (D[LANG] && D[LANG][k]) || D.en[k] || k; }
   function apply() {
-    document.documentElement.lang = LANG === "zh" ? "zh-CN" : "en";
+    document.documentElement.lang = LANG;
     document.title = __SITE_NAME_JSON__ + T("title");
     var ns = document.querySelectorAll("[data-i18n]");
     for (var i = 0; i < ns.length; i++) ns[i].textContent = T(ns[i].getAttribute("data-i18n"));
@@ -3054,15 +3594,40 @@ const LOGIN_HTML = String.raw`<!DOCTYPE html>
     img.src = l.getAttribute("href");
   })();
   (function () {
+    /* 登录页九语言菜单（自名显示），选择后写入 localStorage 并整页重载 */
+    var NAMES = { "zh-CN": "简体中文", "zh-TW": "繁體中文", "en": "English", "ja": "日本語", "ko": "한국어", "es": "Español", "fr": "Français", "de": "Deutsch", "pt-BR": "Português (BR)" };
     var b = document.getElementById("langbtn");
-    if (b) b.onclick = function () {
-      var next = LANG === "zh" ? "en" : "zh";
-      try { localStorage.setItem("sms_lang", next); } catch (e) {}
-      try {
-        var u = new URL(location.href);
-        u.searchParams.set("lang", next);
-        location.replace(u.toString());
-      } catch (e) { location.reload(); }
+    if (!b) return;
+    var menu = null;
+    function close() { if (menu) { menu.remove(); menu = null; document.removeEventListener("click", close); } }
+    b.onclick = function (ev) {
+      ev.stopPropagation();
+      if (menu) { close(); return; }
+      menu = document.createElement("div");
+      menu.className = "langmenu";
+      for (var i = 0; i < LANGS.length; i++) {
+        (function (code) {
+          var it = document.createElement("div");
+          it.className = "langitem" + (code === LANG ? " cur" : "");
+          it.textContent = NAMES[code];
+          it.onclick = function (e2) {
+            e2.stopPropagation();
+            if (code === LANG) { close(); return; }
+            try { localStorage.setItem("sms_lang", code); } catch (e) {}
+            try {
+              var u = new URL(location.href);
+              u.searchParams.set("lang", code);
+              location.replace(u.toString());
+            } catch (e) { location.reload(); }
+          };
+          menu.appendChild(it);
+        })(LANGS[i]);
+      }
+      document.body.appendChild(menu);
+      var r = b.getBoundingClientRect();
+      menu.style.top = (r.bottom + 6) + "px";
+      menu.style.right = Math.max(8, window.innerWidth - r.right) + "px";
+      document.addEventListener("click", close);
     };
   })();
   var pw = document.getElementById("pw");

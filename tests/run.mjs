@@ -275,23 +275,75 @@ async function main() {
   const i18nLit = coreSrc.slice(coreSrc.indexOf("{", i18nAt), i18nClose + 1);
   let I18N = null;
   try { I18N = new Function("return " + i18nLit + ";")(); } catch (e) { I18N = null; }
-  check(!!I18N && !!I18N.zh && !!I18N.en, "管理页内置 zh / en 两套字典");
-  if (I18N && I18N.zh && I18N.en) {
-    const zk = Object.keys(I18N.zh).sort(), ek = Object.keys(I18N.en).sort();
+  const CORE_LANGS = ["zh-CN", "zh-TW", "en", "ja", "ko", "es", "fr", "de", "pt-BR"];
+  check(!!I18N && CORE_LANGS.every(function (l) { return I18N[l]; }), "管理页内置九语言字典（zh-CN/zh-TW/en/ja/ko/es/fr/de/pt-BR）");
+  if (I18N && I18N["zh-CN"] && I18N.en) {
     const has = function (o, k) { return Object.prototype.hasOwnProperty.call(o, k); };
-    const missingEn = zk.filter(function (k) { return !has(I18N.en, k); });
-    const extra = ek.filter(function (k) { return !has(I18N.zh, k); });
-    check(missingEn.length === 0 && extra.length === 0,
-      "中英字典键集一致（zh " + zk.length + " 项，缺失：" + (missingEn.join(",") || "无") + "，多余：" + (extra.join(",") || "无") + "）");
-    check(String(I18N.en.total).indexOf("{n}") >= 0 && String(I18N.zh.total).indexOf("{n}") >= 0,
-      "带变量的文案保留 {n} 占位符");
-    /* 值语言校验（键集一致不防值互换）：zh 值须含中文、en 值不得含中文；
-       langBtn/langTip 为语言切换按钮，有意显示目标语言，白名单放行 */
-    const langSafe = { langBtn: 1, langTip: 1 };
-    const badLang = zk.filter(function (k) {
-      return !langSafe[k] && (/[\u4e00-\u9fff]/.test(I18N.en[k]) || !/[\u4e00-\u9fff]/.test(I18N.zh[k]));
-    });
-    check(badLang.length === 0, "zh 值含中文 / en 值不含中文（防 zh/en 值互换，违例：" + (badLang.join(",") || "无") + "）");
+    const zk = Object.keys(I18N["zh-CN"]).sort();
+    /* 1) 九语言键集与 zh-CN 完全一致（防漏翻） */
+    let keyMismatch = "";
+    for (const L of CORE_LANGS) {
+      if (!I18N[L]) continue;
+      const lk = Object.keys(I18N[L]).sort();
+      const missing = zk.filter(function (k) { return !has(I18N[L], k); });
+      const extra = lk.filter(function (k) { return !has(I18N["zh-CN"], k); });
+      if (missing.length || extra.length) keyMismatch += L + "(缺:" + missing.join(",") + " 多:" + extra.join(",") + "); ";
+    }
+    check(!keyMismatch, "九语言键集一致（zh-CN " + zk.length + " 项；差异：" + (keyMismatch || "无") + "）");
+    /* 2) 带变量的文案保留占位符 */
+    let phMissing = "";
+    for (const L of CORE_LANGS) {
+      if (!I18N[L]) continue;
+      if (String(I18N[L].total).indexOf("{n}") < 0 || String(I18N[L].pageOf).indexOf("{a}") < 0) phMissing += L + " ";
+    }
+    check(!phMissing, "九语言 total/pageOf 保留 {n}/{a} 占位符（违例：" + (phMissing || "无") + "）");
+    /* 3) 空值守护：任何语言的任何键不得为空串 */
+    let empties = "";
+    for (const L of CORE_LANGS) {
+      if (!I18N[L]) continue;
+      for (const k of zk) if (String(I18N[L][k] == null ? "" : I18N[L][k]).trim() === "") empties += L + "." + k + " ";
+    }
+    check(!empties, "九语言无空值（空：" + (empties || "无") + "）");
+    /* 4) 值语言守护（键集一致不防值互换/静默回退）：
+       zh-CN 值须含中文；en/es/fr/de/pt-BR 值不得含任何 CJK（汉字/假名/谚文）；
+       ja 至少一键含假名、ko 至少一键含谚文；langBtn 为 🌐 符号，白名单放行 */
+    const cjk = /[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/;
+    const langSafe = { langBtn: 1 };
+    let badLang = "";
+    for (const L of CORE_LANGS) {
+      if (!I18N[L]) continue;
+      if (L === "zh-CN") {
+        const bad = zk.filter(function (k) { return !langSafe[k] && !/[\u4e00-\u9fff]/.test(String(I18N[L][k])); });
+        if (bad.length) badLang += L + ":" + bad.join(",") + "; ";
+      } else if (L === "zh-TW") {
+        /* 繁体抽查：特征键须为台湾用语（简体字回退即失败） */
+        const twProbe = { devices: "裝置", settings: "設定", del: "刪除", save: "儲存", loading: "載入" };
+        const bad = Object.keys(twProbe).filter(function (k) { return String(I18N[L][k]).indexOf(twProbe[k]) < 0; });
+        if (bad.length) badLang += L + ":" + bad.join(",") + "; ";
+      } else if (L === "ja") {
+        /* 日语大量使用纯汉字词（設定/削除/統計），不能按"含假名"逐键校验；
+           改用日语特征词抽查：設/削/コ 等字形在简体中文里不会出现，可防误用简体中文 */
+        const jaProbe = { settings: "設定", del: "削除", copy: "コピー", save: "保存" };
+        const bad = Object.keys(jaProbe).filter(function (k) { return String(I18N[L][k]).indexOf(jaProbe[k]) < 0; });
+        if (bad.length) badLang += L + ":" + bad.join(",") + "; ";
+      } else if (L === "ko") {
+        const anyHangul = zk.some(function (k) { return /[\uac00-\ud7af]/.test(String(I18N[L][k])); });
+        if (!anyHangul) badLang += L + "(谚文缺失); ";
+      } else { /* en / es / fr / de / pt-BR */
+        const bad = zk.filter(function (k) { return !langSafe[k] && cjk.test(String(I18N[L][k])); });
+        if (bad.length) badLang += L + ":" + bad.join(",") + "; ";
+      }
+    }
+    check(!badLang, "值语言守护（zh 系含中文、拉丁系无 CJK、ja 含假名、ko 含谚文；违例：" + (badLang || "无") + "）");
+    /* 5) 拉丁系与 en 复制检测：多数键值不得与 en 完全相同（纯符号/品牌词键白名单外抽样容差） */
+    const latin = ["es", "fr", "de", "pt-BR"];
+    let copied = "";
+    for (const L of latin) {
+      if (!I18N[L]) continue;
+      const same = zk.filter(function (k) { return String(I18N[L][k]) === String(I18N.en[k]); });
+      if (same.length > zk.length * 0.5) copied += L + "(" + same.length + "项同en) ";
+    }
+    check(!copied, "拉丁系译文非 en 原样复制（违例：" + (copied || "无") + "）");
   }
   const pageHtml = await (await fetchApp(R("GET", "/", {}), e0)).text();
   check(/data-i18n="stats"/.test(pageHtml) && /data-i18n-ph="searchPh"/.test(pageHtml),
@@ -308,7 +360,9 @@ async function main() {
   const eLogin = env({ ENABLE_AUTH: "true", ADMIN_PASSWORD: "secret" });
   const loginHtml = await (await fetchApp(R("GET", "/", {}), eLogin)).text();
   check(/loginPw/.test(loginHtml) && /Sign in/.test(loginHtml) && /id="langbtn"/.test(loginHtml),
-    "登录页同样支持中英切换");
+    "登录页同样支持多语言切换");
+  check(/ログイン/.test(loginHtml) && /Anmelden/.test(loginHtml) && /Entrar/.test(loginHtml) && /Se connecter/.test(loginHtml),
+    "登录页 D 字典含九语言文案（ja/de/pt-BR/fr 抽查）");
   const mani = await (await fetchApp(R("GET", "/manifest.webmanifest", {}), e0)).json();
   check(mani && mani.lang && mani.scope === "/" && Array.isArray(mani.display_override),
     "manifest 含 lang / scope / display_override");
@@ -343,22 +397,74 @@ async function main() {
   }
   check(!!mkI18n, "i18n / 日期函数可在沙箱中求值");
   if (mkI18n) {
-    const z = mkI18n("zh"), en = mkI18n("en");
+    const z = mkI18n("zh-CN"), en = mkI18n("en");
     check(z.T("total", { n: 3 }) === "共 3 条" && en.T("total", { n: 3 }) === "3 messages",
       "文案插值按语言输出（共 3 条 / 3 messages）");
     check(z.T("pageOf", { a: 1, b: 4 }) === "第 1 / 4 页" && en.T("pageOf", { a: 1, b: 4 }) === "Page 1 of 4",
       "分页文案按语言输出");
     check(z.T("noSuchKey") === "noSuchKey", "缺失键回退为键名（不抛错）");
+    /* 旧值兼容：T 兜底链为 I18N[LANG] → I18N.en，绝不静默回退中文 */
+    check(en.T("devices") === "Devices" && mkI18n("zh-TW").T("devices") === "裝置標籤",
+      "zh-TW 字典生效（繁体输出）");
+    check(mkI18n("fr").T("del") === "Supprimer" && mkI18n("de").T("save") === "Speichern",
+      "fr / de 字典生效");
     const t = "2026-10-19 10:30:00"; /* UTC → 北京 18:30 */
-    check(z.fmtTime(t) === "2026年10月19日 18:30:00", "中文完整时间格式");
-    check(en.fmtTime(t) === "Oct 19, 2026 18:30:00", "英文完整时间格式");
+    check(z.fmtTime(t) === "2026年10月19日 18:30:00", "中文完整时间格式（不变）");
+    check(zhTW_fmtTime(mkI18n, t), "zh-TW / ja 年月日完整时间格式");
+    check(/Oct\s*19.*18:30/.test(en.fmtTime(t)) && /2026/.test(en.fmtTime(t)),
+      "英文完整时间格式走 Intl（含 Oct 19 / 2026 / 18:30）");
     const nowMs = Date.now();
     const nowUtc = new Date(nowMs).toISOString().replace("T", " ").slice(0, 19);
     check(z.dayLabel(nowUtc) === "今天" && en.dayLabel(nowUtc) === "Today", "日期分组标签按语言输出");
+    check(mkI18n("ja").dayLabel(nowUtc) === "今日" && mkI18n("ko").dayLabel(nowUtc) === "오늘"
+      && mkI18n("es").dayLabel(nowUtc) === "Hoy" && mkI18n("de").dayLabel(nowUtc) === "Heute",
+      "ja/ko/es/de 日期分组标签输出");
     check(en.relTime(new Date(nowMs - 5 * 60000).toISOString().replace("T", " ").slice(0, 19)) === "5 min ago",
       "英文相对时间（5 min ago）");
     check(z.relTime(new Date(nowMs - 5 * 60000).toISOString().replace("T", " ").slice(0, 19)) === "5 分钟前",
       "中文相对时间（5 分钟前）");
+    check(mkI18n("ja").relTime(new Date(nowMs - 5 * 60000).toISOString().replace("T", " ").slice(0, 19)) === "5 分前"
+      && mkI18n("ko").relTime(new Date(nowMs - 5 * 60000).toISOString().replace("T", " ").slice(0, 19)) === "5분 전",
+      "ja/ko 相对时间输出");
+  }
+
+  /* 语言探测归一化：旧值 zh/en 兼容、变体映射、探测失败回退 en（绝不回退中文） */
+  {
+    const probeStart = coreSrc.indexOf("var LANGS = [");
+    const probeEnd = coreSrc.indexOf("var MONTHS =");
+    let probe = null;
+    if (probeStart > 0 && probeEnd > probeStart) {
+      try {
+        const body = coreSrc.slice(probeStart, probeEnd) + "\nreturn LANG;";
+        probe = function (opts) {
+          const o = opts || {};
+          return new Function("location", "localStorage", "navigator", body)(
+            { search: o.qs ? "?lang=" + o.qs : "" },
+            { getItem: function () { return o.ls === undefined ? null : o.ls; }, setItem: function () {} },
+            { languages: o.navs, language: o.nav || "" }
+          );
+        };
+      } catch (e) { probe = null; }
+    }
+    check(!!probe, "语言探测段可在沙箱中求值");
+    if (probe) {
+      check(probe({ qs: "zh" }) === "zh-CN" && probe({ ls: "zh" }) === "zh-CN", "旧值 zh → zh-CN 归一化（?lang 与 localStorage 双通道）");
+      check(probe({ qs: "zh-TW" }) === "zh-TW" && probe({ qs: "zh_HK" }) === "zh-TW", "繁体变体归一化 zh-TW");
+      check(probe({ qs: "pt" }) === "pt-BR" && probe({ ls: "pt" }) === "pt-BR", "pt → pt-BR 归一化");
+      check(probe({ qs: "fr" }) === "fr" && probe({ ls: "ja" }) === "ja" && probe({ ls: "ko" }) === "ko", "九语言代码直通");
+      check(probe({ qs: "xx", ls: "de" }) === "de", "?lang 非法时回退 localStorage");
+      check(probe({ navs: ["pt", "en"] }) === "pt-BR" && probe({ navs: ["zh_HK", "en"] }) === "zh-TW",
+        "navigator.languages 逐个匹配（含变体）");
+      check(probe({}) === "en", "探测全空回退 en（不回退中文）");
+    }
+  }
+
+  /* zh-TW/ja 完整时间格式（年月日模板）——独立 helper 便于失败定位 */
+  function zhTW_fmtTime(mk, t) {
+    try {
+      const tw = mk("zh-TW").fmtTime(t), ja = mk("ja").fmtTime(t);
+      return tw === "2026年10月19日 18:30:00" && ja === "2026年10月19日 18:30:00";
+    } catch (e) { return false; }
   }
 
   /* 验证码提取七级级联回归：码在前（①②）必须先于关键词在前（③④）——关键词在前模式
