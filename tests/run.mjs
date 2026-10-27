@@ -25,7 +25,7 @@ function cleanup() {
 
 const db = new LocalDatabase(DB);
 function env(extra) {
-  return Object.assign({ DB: db, RECEIVE_TOKEN: "tok", ENABLE_AUTH: "", ADMIN_PASSWORD: "", RETENTION_DAYS: "30" }, extra || {});
+  return Object.assign({ DB: db, RECEIVE_TOKEN: "tok", ENABLE_AUTH: "", ADMIN_PASSWORD: "", SESSION_SECRET: "test-session-secret-0123456789abcdef", RETENTION_DAYS: "30" }, extra || {});
 }
 function R(method, path, opts) {
   opts = opts || {};
@@ -234,7 +234,7 @@ async function main() {
   r = await call("POST", "/api/push?token=tok", eAuth, { body: { content: "still works under auth" } });
   check(r.status === 200, "开登录后 /api/push 仍可推送（公开接口）");
   r = await call("GET", "/api/messages", env({ ENABLE_AUTH: "true", ADMIN_PASSWORD: "" }));
-  check(r.status === 200, "ENABLE_AUTH=true 但未设密码 → 免登录可访问（不锁死）");
+  check(r.status === 401, "ENABLE_AUTH=true 但密码为空 → 受保护接口 401（不放行，安全默认）");
 
   group("写入接口限速");
   let saw429 = false, allowed = 0;
@@ -521,6 +521,160 @@ async function main() {
     } finally {
       globalThis.fetch = realFetch;
     }
+  }
+
+  group("会话安全（无状态随机 Session / 签名 / TTL / 密钥策略）");
+  {
+    const eS = env({ ENABLE_AUTH: "true", ADMIN_PASSWORD: "sesspw" });
+    const sessAt = coreSrc.indexOf("const SESSION_TTL_MS");
+    const sessEnd = coreSrc.indexOf("/* 是否 HTTPS", sessAt);
+    check(sessAt !== -1 && sessEnd > sessAt, "会话：核心含无状态 Session 实现区");
+    /* 沙箱工厂：每次调用生成相互独立的"实例"（独立闭包状态），等效多实例夹具 */
+    const makeInstance = (secret) => new Function("safeEqual",
+      coreSrc.slice(sessAt, sessEnd) + "\nreturn { sessionSign: sessionSign, sessionParse: sessionParse };"
+    )((a, b) => a === b);
+    const instA = makeInstance("test-session-secret-0123456789abcdef");
+    const instB = makeInstance("test-session-secret-0123456789abcdef"); /* 与 A 同密钥、状态独立 */
+    const instX = makeInstance("another-rotated-secret-fedcba9876543210"); /* 不同密钥 */
+    const eEnv = (secret) => ({ ADMIN_PASSWORD: "sesspw", SESSION_SECRET: secret });
+
+    /* 1 错误密码拒绝 */
+    r = await call("POST", "/api/login", eS, { body: { password: "wrong" } });
+    check(r.status === 403, "会话：错误密码 → 403");
+
+    /* 2 正确密码 + Cookie 属性（http 环境） */
+    r = await call("POST", "/api/login", eS, { body: { password: "sesspw" } });
+    const sc1 = r.setCookie;
+    check(r.status === 200 && sc1.indexOf("sms_auth=") === 0, "会话：正确密码 → 200 + Set-Cookie");
+    check(sc1.indexOf("HttpOnly") !== -1, "会话：Cookie 含 HttpOnly");
+    check(sc1.indexOf("SameSite=Lax") !== -1, "会话：Cookie 含 SameSite=Lax");
+    check(sc1.indexOf("Path=/") !== -1, "会话：Cookie 含 Path=/");
+    check(sc1.indexOf("Max-Age=1800") !== -1, "会话：Cookie Max-Age=1800（TTL 30 分钟）");
+    check(sc1.indexOf("Secure") === -1, "会话：http 环境 Cookie 不带 Secure（自动降级）");
+    const tok1 = sc1.split("sms_auth=")[1].split(";")[0];
+
+    /* 3 https 环境 Secure 属性 */
+    const rHttps = await fetchApp(new Request("https://localhost/api/login", {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: "sesspw" }),
+    }), eS);
+    check((rHttps.headers.get("Set-Cookie") || "").indexOf("Secure") !== -1, "会话：https 环境 Cookie 含 Secure");
+    await rHttps.text();
+
+    /* 4 随机性：两次登录不同 + 不再是 sha256(password) 确定性派生 */
+    r = await call("POST", "/api/login", eS, { body: { password: "sesspw" } });
+    const tok2 = r.setCookie.split("sms_auth=")[1].split(";")[0];
+    check(tok1 !== tok2, "会话：两次登录产生不同随机 Session");
+    const oldDigest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode("sms-gateway-auth-v1|sesspw"));
+    const oldDerived = Array.from(new Uint8Array(oldDigest)).map(b => b.toString(16).padStart(2, "0")).join("");
+    check(tok1 !== oldDerived && tok1.split(".").length === 3 && tok1.split(".")[0].length === 32,
+      "会话：Session 为 nonce.exp.sig 三段随机 token，非密码哈希");
+
+    /* 5/6/7 鉴权访问：带 Cookie 可访问 / 无 Cookie 拒绝 / 篡改签名拒绝 */
+    r = await call("GET", "/api/messages", eS, { cookie: "sms_auth=" + tok1 });
+    check(r.status === 200, "会话：登录 Cookie 可访问管理 API");
+    r = await call("GET", "/api/messages", eS);
+    check(r.status === 401, "会话：无 Cookie → 401");
+    r = await call("GET", "/api/messages", eS, { cookie: "sms_auth=" + tok1.slice(0, -3) + "aaa" });
+    check(r.status === 401, "会话：篡改签名 → 401");
+
+    /* 8/9 篡改 nonce / 篡改过期时间（签名不匹配）→ 拒绝 */
+    const [n1, e1, s1] = tok1.split(".");
+    const flip = (hex) => (hex[0] === "0" ? "1" : "0") + hex.slice(1);
+    r = await call("GET", "/api/messages", eS, { cookie: "sms_auth=" + flip(n1) + "." + e1 + "." + s1 });
+    check(r.status === 401, "会话：篡改 nonce → 401");
+    r = await call("GET", "/api/messages", eS, { cookie: "sms_auth=" + n1 + "." + (Number(e1) + 600000) + "." + s1 });
+    check(r.status === 401, "会话：篡改过期时间 → 401");
+
+    /* 10 过期：同 nonce 重签过去 exp（合法签名）→ 401 */
+    const expiredTok = n1 + "." + (Date.now() - 1000) + "." + (await instA.sessionSign(eEnv("test-session-secret-0123456789abcdef"), n1, String(Date.now() - 1000)));
+    r = await call("GET", "/api/messages", eS, { cookie: "sms_auth=" + expiredTok });
+    check(r.status === 401, "会话：Session 过期 → 401");
+
+    /* 11 随机伪造（错误密钥签发的"合法格式"token）→ 拒绝 */
+    const forged = "deadbeefdeadbeefdeadbeefdeadbeef." + (Date.now() + 60000) + "." + (await instX.sessionSign(eEnv("another-rotated-secret-fedcba9876543210"), "deadbeefdeadbeefdeadbeefdeadbeef", String(Date.now() + 60000)));
+    r = await call("GET", "/api/messages", eS, { cookie: "sms_auth=" + forged });
+    check(r.status === 401, "会话：错误密钥伪造 token → 401");
+
+    /* 12/13/14 多实例等效验证：独立实例同密钥互验；新实例无内存状态也可验证（无状态证明） */
+    const parsed1 = await instB.sessionParse(eEnv("test-session-secret-0123456789abcdef"), tok1);
+    check(!!parsed1 && parsed1.exp > Date.now(), "会话：独立实例 B（同密钥）验证实例 A 签发的 token 通过");
+    const parsedX = await instX.sessionParse(eEnv("another-rotated-secret-fedcba9876543210"), tok1);
+    check(parsedX === null, "会话：不同密钥实例验证同一 token 失败（密钥轮换即失效）");
+    r = await call("GET", "/api/messages", eS, { cookie: "sms_auth=" + tok2 });
+    check(r.status === 200, "会话：签发后未做任何实例登记，验签直接通过（无状态）");
+
+    /* 15/16 logout 无状态语义：清 Cookie；浏览器不再携带即失效；旧 Token TTL 内可重放（显式记录的限制） */
+    r = await call("POST", "/api/logout", eS, { cookie: "sms_auth=" + tok2 });
+    check(r.status === 200 && (r.setCookie.indexOf("Max-Age=0") !== -1 || r.setCookie.indexOf("Expires=Thu, 01 Jan 1970") !== -1),
+      "会话：logout → 200 + 清除 Cookie");
+    r = await call("GET", "/api/messages", eS);
+    check(r.status === 401, "会话：logout 后浏览器不携带 Cookie → 无法访问");
+    r = await call("GET", "/api/messages", eS, { cookie: "sms_auth=" + tok2 });
+    check(r.status === 200, "会话：logout 前复制的 Token 在 TTL 内仍可重放（无状态限制，显式记录）");
+    const parsedAfterLogout = await instB.sessionParse(eEnv("test-session-secret-0123456789abcdef"), tok2);
+    check(!!parsedAfterLogout, "会话：logout 不做跨实例吊销（独立实例验证仍通过，TTL 内有效）");
+
+    /* 17/18 密钥缺失：安全失败（登录 500、鉴权 401），无密码派生回退路径；日志不含密钥 */
+    const eNoSec = env({ ENABLE_AUTH: "true", ADMIN_PASSWORD: "sesspw", SESSION_SECRET: "" });
+    let warned = "";
+    const realWarn = console.warn;
+    console.warn = (...a) => { warned += a.join(" "); };
+    try {
+      r = await call("POST", "/api/login", eNoSec, { body: { password: "sesspw" } });
+    } finally { console.warn = realWarn; }
+    check(r.status === 500, "会话：SESSION_SECRET 缺失 → 登录 500（安全失败）");
+    check(!JSON.stringify(r.data).match(/sesspw|secret value/i), "会话：缺失密钥错误信息不含密码或密钥值");
+    r = await call("GET", "/api/messages", eNoSec, { cookie: "sms_auth=" + tok1 });
+    check(r.status === 401, "会话：SESSION_SECRET 缺失 → 鉴权一律 401（不开放管理接口）");
+    check(!warned.match(/test-session-secret|sesspw/), "会话：告警日志不含密钥值与密码");
+
+    /* 19 密钥轮换：换 SESSION_SECRET 后旧 Token 立即失效 */
+    const eRot = env({ ENABLE_AUTH: "true", ADMIN_PASSWORD: "sesspw", SESSION_SECRET: "rotated-secret-9876543210abcdefgh" });
+    r = await call("GET", "/api/messages", eRot, { cookie: "sms_auth=" + tok1 });
+    check(r.status === 401, "会话：轮换 SESSION_SECRET 后旧 Token 失效");
+    r = await call("POST", "/api/login", eRot, { body: { password: "sesspw" } });
+    check(r.status === 200, "会话：轮换后新密钥登录正常");
+
+    /* 20 Session 不经 URL 传递：登录响应体不含 token */
+    check(JSON.stringify(r.data || {}).indexOf("token") === -1, "会话：登录响应体不含 token（不经 URL/正文传递）");
+  }
+
+  group("鉴权配置矩阵（配置缺失一律不放行，配置错误区别于密码错误）");
+  {
+    /* 1 密码缺失 + 密钥存在：受保护接口拒绝、登录页拦截，不得免登录放行 */
+    const eNoPw = env({ ENABLE_AUTH: "true", ADMIN_PASSWORD: "", SESSION_SECRET: "matrix-secret-0123456789abcdef" });
+    r = await call("GET", "/api/messages", eNoPw);
+    check(r.status === 401, "矩阵：开登录+密码缺失 → 受保护接口 401");
+    const noPwPage = await (await fetchApp(R("GET", "/", {}), eNoPw)).text();
+    check(/登 录/.test(noPwPage), "矩阵：开登录+密码缺失 → 访问 / 返回登录页（不放行管理页）");
+
+    /* 2 密码为空串与缺失行为一致 */
+    r = await call("GET", "/api/messages", env({ ENABLE_AUTH: "true", ADMIN_PASSWORD: "", SESSION_SECRET: "matrix-secret-0123456789abcdef" }));
+    check(r.status === 401, "矩阵：密码空串与缺失行为一致 → 401");
+
+    /* 3 登录接口返回明确的服务端配置错误（非密码错误 403），响应不泄露敏感值 */
+    r = await call("POST", "/api/login", eNoPw, { body: { password: "anything" } });
+    check(r.status === 500 && JSON.stringify(r.data).indexOf("not configured") !== -1,
+      "矩阵：密码缺失登录 → 500 server auth not configured（配置错误非 403）");
+    check(!JSON.stringify(r.data).match(/matrix-secret|anything/), "矩阵：配置错误响应不含密钥值或提交的密码");
+
+    /* 4 密码存在 + SESSION_SECRET 缺失：登录安全失败、受保护接口拒绝 */
+    const eNoSec = env({ ENABLE_AUTH: "true", ADMIN_PASSWORD: "matrixpw", SESSION_SECRET: "" });
+    r = await call("POST", "/api/login", eNoSec, { body: { password: "matrixpw" } });
+    check(r.status === 500, "矩阵：密钥缺失登录 → 500（安全失败，不签发 Session）");
+    r = await call("GET", "/api/messages", eNoSec);
+    check(r.status === 401, "矩阵：密钥缺失 → 受保护接口 401");
+
+    /* 5 双缺失：受保护接口仍拒绝（配置缺失不得解释为关闭鉴权） */
+    r = await call("GET", "/api/messages", env({ ENABLE_AUTH: "true", ADMIN_PASSWORD: "", SESSION_SECRET: "" }));
+    check(r.status === 401, "矩阵：密码+密钥双缺失 → 受保护接口 401");
+
+    /* 6 未启用开关：原有公开模式保持不变 */
+    const eOff = env({ ENABLE_AUTH: "false", ADMIN_PASSWORD: "matrixpw", SESSION_SECRET: "matrix-secret-0123456789abcdef" });
+    r = await call("GET", "/api/messages", eOff);
+    check(r.status === 200, "矩阵：ENABLE_AUTH=false → 公开模式不受影响");
+    r = await call("POST", "/api/login", eOff, { body: { password: "matrixpw" } });
+    check(r.status === 400, "矩阵：ENABLE_AUTH=false 登录接口 → 400 auth disabled（原行为）");
   }
 
   console.log("\n===== 结果：" + pass + " 通过，" + fail + " 失败 =====");

@@ -10,7 +10,10 @@
         "description": "推送鉴权密钥：自己编一个足够长的随机字符串（手机端接入 URL 中 `token=` 需与之一致）"
       },
       "ADMIN_PASSWORD": {
-        "description": "管理页登录密码（`ENABLE_AUTH=true` 时生效），建议强密码；留空则管理页免登录并输出告警"
+        "description": "管理页登录密码（`ENABLE_AUTH=true` 时生效），建议强密码；漏配时管理接口一律拒绝访问（配置缺失不放行）"
+      },
+      "SESSION_SECRET": {
+        "description": "登录会话签名密钥：高熵随机值（≥32 位随机字符串，与密码独立），开启登录时必须配置；缺失则登录/鉴权安全失败，轮换后旧会话全部失效"
       }
     }
   }

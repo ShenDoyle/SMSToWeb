@@ -25,6 +25,8 @@
  *   SITE_ICON        — 网站图标 URL（可选）：默认 jsdelivr favicon；设置了但加载失败自动回退默认
  *   （Secret）RECEIVE_TOKEN   — 推送鉴权（/api/receive 与 /api/push 共用）
  *   （Secret）ADMIN_PASSWORD  — 登录密码（仅 ENABLE_AUTH="true" 时需要；登录连续失败 5 次锁 10 分钟）
+ *   （Secret）SESSION_SECRET  — 登录会话签名密钥（高熵随机值，与密码独立；ENABLE_AUTH="true" 时
+ *       必须配置，缺失则登录与鉴权安全失败；轮换即全部会话失效重新登录）
  */
 
 const CORS = {
@@ -111,27 +113,72 @@ function bgRun(ctx, p) {
 const AUTH_COOKIE = "sms_auth";
 
 /* 开关是否处于开启状态（仅字符串 "true" 视为开启）。
-   开启但未设 ADMIN_PASSWORD 时按免登录处理并告警一次——避免"开了登录却忘设密码"把自己锁死在登录页外 */
+   安全策略：开关开启即视为鉴权生效——ADMIN_PASSWORD 缺失/为空时不免登录放行，
+   受保护接口一律拒绝（isAuthed）、登录接口返回服务端配置错误（handleLogin），
+   仅输出不含敏感值的一次性告警；避免"配置缺失被解释为关闭鉴权"的放行风险 */
 let warnedAuthNoPw = false;
 function authEnabled(env) {
   if (String(env.ENABLE_AUTH || "").trim().toLowerCase() !== "true") return false;
   if (!String(env.ADMIN_PASSWORD || "")) {
     if (!warnedAuthNoPw) {
       warnedAuthNoPw = true;
-      console.warn("ENABLE_AUTH=true 但未设置 ADMIN_PASSWORD：已按免登录处理，设置密码后即启用登录");
+      console.warn("ENABLE_AUTH=true 但未设置 ADMIN_PASSWORD：管理接口已全部拒绝访问，配置密码并配置 SESSION_SECRET 后恢复登录");
     }
-    return false;
   }
   return true;
 }
 
-/* 无状态登录凭证：SHA-256("sms-gateway-auth-v1|" + 密码)，密码不变则凭证稳定，无需存储 */
-async function authCookieValue(password) {
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode("sms-gateway-auth-v1|" + password)
-  );
-  return Array.from(new Uint8Array(digest)).map(function (b) { return b.toString(16).padStart(2, "0"); }).join("");
+/* 无状态签名 Session：nonce(128 位 CSPRNG) + exp + HMAC-SHA256 签名。
+   - 验证只依赖 Token 内容、密钥与当前时间，任何 Worker 实例/节点/冷启动后均可独立验证，
+     无进程内会话状态，多实例/边缘部署天然一致；
+   - HMAC 密钥来自独立高熵环境变量 SESSION_SECRET（与登录密码完全解耦）；
+   - SESSION_SECRET 未配置时安全失败：拒绝签发与验证（登录返回 500、鉴权一律 401），
+     绝不静默回退到 ADMIN_PASSWORD 派生——防止"密码即密钥"的离线爆破面；
+   - 退出为无状态语义：/api/logout 仅清除浏览器 Cookie；已复制的有效 Token 在 TTL 内
+     （最长 30 分钟）仍可重放；更换 SESSION_SECRET 或 ADMIN_PASSWORD 前者使旧签名立即失效 */
+const SESSION_TTL_MS = 30 * 60 * 1000;
+
+let sessionKeyCache = null, sessionKeyRaw = null;
+/* 派生 HMAC 密钥；SESSION_SECRET 缺失 → 返回 null（调用方安全失败）。缓存按密钥指纹键控，轮换即生效 */
+async function sessionHmacKey(env) {
+  const secret = String(env.SESSION_SECRET || "").trim();
+  if (!secret) return null;
+  if (!sessionKeyCache || sessionKeyRaw !== secret) {
+    sessionKeyCache = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    sessionKeyRaw = secret;
+  }
+  return sessionKeyCache;
+}
+
+async function sessionSign(env, nonce, exp) {
+  const key = await sessionHmacKey(env);
+  if (!key) return ""; /* 无密钥 → 空签名，签发/验证双方都会安全失败 */
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(nonce + "." + exp));
+  let s = "";
+  for (const b of new Uint8Array(sig)) s += String.fromCharCode(b);
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/* 严格结构 + 签名校验：返回 { nonce, exp } 或 null（篡改/格式错/密钥不符一律 null） */
+async function sessionParse(env, token) {
+  const parts = String(token || "").split(".");
+  if (parts.length !== 3) return null;
+  const nonce = parts[0], expStr = parts[1], sig = parts[2];
+  if (!/^[0-9a-f]{32}$/.test(nonce) || !/^\d{10,15}$/.test(expStr)) return null;
+  const expect = await sessionSign(env, nonce, expStr);
+  if (!expect || !safeEqual(sig, expect)) return null;
+  return { nonce: nonce, exp: Number(expStr) };
+}
+
+/* 登录成功签发：随机 nonce + 过期时间 + HMAC 签名（无任何服务端登记） */
+async function createSession(env) {
+  const key = await sessionHmacKey(env);
+  if (!key) return null; /* SESSION_SECRET 未配置 → 安全失败，拒绝签发 */
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  let nonce = "";
+  for (const b of bytes) nonce += b.toString(16).padStart(2, "0");
+  const exp = Date.now() + SESSION_TTL_MS;
+  return nonce + "." + exp + "." + (await sessionSign(env, nonce, String(exp)));
 }
 
 /* 是否 HTTPS：据此决定 cookie 是否带 Secure。局域网 IP / 无 TLS 的 http 自托管若强制 Secure，
@@ -156,11 +203,13 @@ function getCookie(request, name) {
   return "";
 }
 
-/* 管理接口/页面统一鉴权：开关关闭直接放行；开启则校验登录 cookie */
+/* 管理接口/页面统一鉴权：开关关闭直接放行；开启则无状态校验随机 Session（严格验签 + 过期） */
 async function isAuthed(request, env) {
   if (!authEnabled(env)) return true;
   if (!env.ADMIN_PASSWORD) return false; /* 开启登录但未设密码 → 一律拒绝（安全默认） */
-  return getCookie(request, AUTH_COOKIE) === (await authCookieValue(env.ADMIN_PASSWORD));
+  const sess = await sessionParse(env, getCookie(request, AUTH_COOKIE));
+  if (!sess) return false; /* 缺失/篡改/签名不符/密钥未配置 */
+  return sess.exp > Date.now(); /* 过期 → 重新登录 */
 }
 
 /* 登录限速（简单内存态，实例重启即清零；Serverless 多实例下为尽力而为的软限制）：
@@ -211,7 +260,11 @@ function recordLoginFail(request) {
 }
 
 async function handleLogin(request, env) {
-  if (!authEnabled(env) || !env.ADMIN_PASSWORD) return json({ success: false, error: "auth disabled" }, 400);
+  if (!authEnabled(env)) return json({ success: false, error: "auth disabled" }, 400);
+  if (!env.ADMIN_PASSWORD) {
+    /* 开关开启但密码未配置：服务端配置错误（区别于普通密码错误 403），不泄露敏感值，不记失败限流 */
+    return json({ success: false, error: "server auth not configured" }, 500);
+  }
   if (loginLocked(request)) return json({ success: false, error: "too many attempts" }, 429);
   let body;
   try { body = await request.json(); } catch { return json({ success: false, error: "invalid json" }, 400); }
@@ -221,11 +274,12 @@ async function handleLogin(request, env) {
     return json({ success: false, error: "wrong password" }, 403);
   }
   clearLoginFail(request);
-  const token = await authCookieValue(env.ADMIN_PASSWORD);
+  const token = await createSession(env);
+  if (!token) return json({ success: false, error: "session secret not configured" }, 500);
   return new Response(JSON.stringify({ success: true }), {
     headers: {
       "Content-Type": "application/json; charset=utf-8",
-      "Set-Cookie": authCookieHeader(request, token, 604800),
+      "Set-Cookie": authCookieHeader(request, token, SESSION_TTL_MS / 1000),
       ...SECURITY_HEADERS, ...CORS,
     },
   });
@@ -248,7 +302,9 @@ function allowWrite(request) {
   return rec.count <= WRITE_RATE_LIMIT;
 }
 
-function handleLogout(request) {
+async function handleLogout(request, env) {
+  /* 无状态退出：仅清除浏览器 Cookie；已签发 Token 在 TTL（最长 30 分钟）内仍可重放，
+     更换 SESSION_SECRET / ADMIN_PASSWORD 可立即使旧 Token 验签失败 */
   return new Response(JSON.stringify({ success: true }), {
     headers: {
       "Content-Type": "application/json; charset=utf-8",
@@ -3090,7 +3146,7 @@ export async function fetchApp(request, env, ctx) {
         return await handleLogin(request, env);
       }
       if (path === "/api/logout" && request.method === "POST") {
-        return handleLogout(request);
+        return handleLogout(request, env);
       }
       /* 定时清理 HTTP 触发（与移植平台入口级 /api/cron 行为一致）：
          Cloudflare 平台 cron 之外，也允许外部调度器调 GET /api/cron?token=<RECEIVE_TOKEN> 触发 */

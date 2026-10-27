@@ -14,7 +14,8 @@
 点上方按钮，Cloudflare 自动完成：克隆代码到你的 GitHub → **自动创建 D1 数据库并执行建表** → 绑定资源 → 配置 CI（之后你仓库每次 push 自动重新部署）→ 上线。过程中按提示填两个密钥：
 
 - `RECEIVE_TOKEN`：推送鉴权密钥，自己编一个足够长的随机字符串（手机端接入 URL 中 `token=` 与之保持一致）
-- `ADMIN_PASSWORD`：管理页登录密码（**强烈建议设置**——管理页承载短信验证码等敏感内容；留空则免登录运行并告警）
+- `ADMIN_PASSWORD`：管理页登录密码（**强烈建议设置**——管理页承载短信验证码等敏感内容；`ENABLE_AUTH="true"` 但漏配时管理接口一律拒绝访问，不会免登录放行）
+- `SESSION_SECRET`：登录会话签名密钥，**开启登录时必须配置**——高熵随机值（≥32 位随机字符串，如 `node -e "console.log(crypto.randomBytes(32).toString('hex'))"` 生成），与密码完全独立；缺失时登录与鉴权安全失败（登录 500、管理接口 401），不会回退用密码派生；轮换后所有旧会话立即失效
 
 > 绑自定义域名（如 `sms.example.com`）：部署完成后进入 Worker → 设置 → 域和路由 → 添加自定义域。
 > 下方手动教程保留给不想走一键流程、或想逐步理解每一步的用户。
@@ -61,6 +62,7 @@
 2. **添加密钥**（类型选「密钥/Secret」）：
    - 名称 `RECEIVE_TOKEN`，值自己编一个足够长的随机字符串（不要使用任何教程示例值，越长越好）
    - 名称 `ADMIN_PASSWORD`，值自己编一个管理页登录密码（仅当 `ENABLE_AUTH="true"` 时才需要）
+   - 名称 `SESSION_SECRET`，值一组高熵随机字符串（≥32 位随机值，与密码独立；仅当 `ENABLE_AUTH="true"` 时才需要）
 3. 每次添加后点 **部署/保存**
 
 > 改这些值随时生效，不用重新粘贴代码。修改 `RECEIVE_TOKEN` 后记得同步更新手机端 URL 里的 `token=`。
@@ -127,6 +129,7 @@ npx wrangler login
 npx wrangler d1 execute sms-gateway-db --file=schema.sql --remote
 npx wrangler secret put RECEIVE_TOKEN
 npx wrangler secret put ADMIN_PASSWORD   # 仅开登录时需要
+npx wrangler secret put SESSION_SECRET   # 仅开登录时需要（高熵随机值，与密码独立）
 npx wrangler deploy
 ```
 

@@ -59,6 +59,7 @@ Turso 提供 SQLite 兼容数据库（免费额度：100 个数据库、5GB 存�
 | `RECEIVE_TOKEN` | 自己编的长随机串 | 推送鉴权，勿用示例值 |
 | `ENABLE_AUTH` | `false` | 要登录改 `true` |
 | `ADMIN_PASSWORD` | 自己编的密码 | 仅 `ENABLE_AUTH="true"` 时需要 |
+| `SESSION_SECRET` | 高熵随机值（≥32 位随机字符串） | 仅 `ENABLE_AUTH="true"` 时需要；与密码独立，与其他平台分别配置独立值；缺失时登录/鉴权安全失败，轮换后旧会话全部失效 |
 | `RETENTION_DAYS` | `30` | 数据保留天数 |
 | `CRON_SECRET` | **与 RECEIVE_TOKEN 相同的值** | Vercel Cron 调 /api/cron 时自动附带 `Bearer $CRON_SECRET` |
 | `FEISHU_WEBHOOK`（可选 `FEISHU_SECRET`） | （可选）飞书群机器人 Webhook | 配置后新消息自动转发飞书群；机器人安全设置选「签名校验」时另配 `FEISHU_SECRET` |

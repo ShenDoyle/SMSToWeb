@@ -1,5 +1,8 @@
 # Deploy to Cloudflare 按钮流程会读取本文件，在部署时弹窗提示填写以下密钥
 # 推送鉴权密钥：自己编一个足够长的随机字符串；手机端接入 URL 中 token= 必须与之一致
 RECEIVE_TOKEN=change-me-to-a-long-random-string
-# 管理页登录密码（wrangler.toml 中 ENABLE_AUTH="true" 时生效）；不填则管理页免登录并输出告警，强烈建议设置
+# 管理页登录密码（wrangler.toml 中 ENABLE_AUTH="true" 时生效）；漏配时管理接口一律拒绝访问（配置缺失不放行），强烈建议设置
 ADMIN_PASSWORD=change-me-to-a-strong-password
+# 登录会话签名密钥：高熵随机值（≥32 位随机字符串，与密码独立），开启登录时必须配置
+# 生成示例：node -e "console.log(crypto.randomBytes(32).toString('hex'))"
+SESSION_SECRET=change-me-to-a-32-byte-random-secret

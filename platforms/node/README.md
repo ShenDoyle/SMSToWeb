@@ -82,6 +82,7 @@ curl "http://127.0.0.1:8787/api/push?token=<RECEIVE_TOKEN>" -H "Content-Type: ap
 | `RECEIVE_TOKEN` | 自己编的长随机串 | 推送鉴权，勿用示例值 |
 | `ENABLE_AUTH` | `false` | 要登录改 `true`（**安全强烈建议开启**：管理页承载短信验证码等敏感内容，默认免登录意味着知道域名即可查看全部消息） |
 | `ADMIN_PASSWORD` | 自己编的密码 | 仅 `ENABLE_AUTH="true"` 时需要 |
+| `SESSION_SECRET` | 高熵随机值（≥32 位随机字符串） | 仅 `ENABLE_AUTH="true"` 时需要；与密码独立；缺失时登录/鉴权安全失败，轮换后旧会话全部失效 |
 | `RETENTION_DAYS` | `30` | 数据保留天数 |
 | `PORT` | 默认 `8787` | 一般无需设置（Railway 自动注入） |
 | `FEISHU_WEBHOOK`（可选 `FEISHU_SECRET`） | （可选）飞书群机器人 Webhook | 配置后新消息自动转发飞书群；机器人安全设置选「签名校验」时另配 `FEISHU_SECRET` |
