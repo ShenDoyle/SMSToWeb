@@ -365,7 +365,7 @@ async function main() {
      允许跨短 gap，曾把「123456是您的验证码，您有2000积分待领取」里的 2000 误当验证码 */
   group("验证码提取（七级级联回归）");
   {
-    const ecStart = coreSrc.indexOf("function extractCode");
+    const ecStart = coreSrc.indexOf("function extractCode(");  /* 带括号避免命中后端 extractCodeLite */
     const ecEnd = coreSrc.indexOf("/* 内容链接化");
     let extractCode = null;
     try { extractCode = new Function(coreSrc.slice(ecStart, ecEnd) + "\nreturn extractCode;")(); } catch (e) { extractCode = null; }
@@ -389,6 +389,137 @@ async function main() {
         try { got = extractCode(c[0]); } catch (e) { got = "<throw:" + e.message + ">"; }
         check(got === c[1], c[2] + "：" + JSON.stringify(c[0]) + " → " + JSON.stringify(got));
       }
+    }
+  }
+
+  /* 服务端轻量验证码检测（extractCodeLite，供 11 渠道通知三态渲染共用）：
+     与前端 extractCode 同级联顺序铁律——码在前先于关键词在前，检测前剥离手机号/日期/时间/金额/单号 */
+  group("服务端轻量验证码检测 extractCodeLite");
+  {
+    const eclStart = coreSrc.indexOf("function extractCodeLite");
+    const eclEnd = coreSrc.indexOf("function buildNotifyInfo");
+    let extractCodeLite = null;
+    try { extractCodeLite = new Function(coreSrc.slice(eclStart, eclEnd) + "\nreturn extractCodeLite;")(); } catch (e) { extractCodeLite = null; }
+    check(!!extractCodeLite, "extractCodeLite 可在沙箱中求值");
+    if (extractCodeLite) {
+      const cases = [
+        ["123456是您的验证码", "123456", "码在前"],
+        ["123456是您的验证码，您有2000积分待领取", "123456", "码在前优先于后续数字（回归）"],
+        ["您的验证码是482910，10分钟内有效", "482910", "关键词在前"],
+        ["验证码 1234 5678，请分别输入", "12345678", "分隔码先于纯数字"],
+        ["G-383838 是您的 Google 验证码", "383838", "Google 风格"],
+        ["验证码 482910，请勿告知 13812345678", "482910", "剥离手机号"],
+        ["您消费2000元，验证码是482910", "482910", "剥离金额（回归：不得取 2000）"],
+        ["2026-10-27 发出，验证码482910", "482910", "剥离日期"],
+        ["【某App】您的订单20261020123456已发出", "", "无验证码关键词不提取"],
+        ["1234567890是您的验证码", "", "超长数字串不从内部截取"],
+      ];
+      for (const c of cases) {
+        let got;
+        try { got = extractCodeLite(c[0]); } catch (e) { got = "<throw:" + e.message + ">"; }
+        check(got === c[1], c[2] + "：" + JSON.stringify(c[0]) + " → " + JSON.stringify(got));
+      }
+    }
+  }
+
+  /* 11 渠道通知渲染 E2E：fetch 桩拦截 postNotify 出站请求，断言各渠道 payload。
+     node 平台 bgRun 无 ctx → dispatchNotify 内联 await，响应返回前转发已完成 */
+  group("11 渠道通知渲染（fetch 桩 E2E）");
+  {
+    const realFetch = globalThis.fetch;
+    const hits = [];
+    globalThis.fetch = async function (url, opts) {
+      hits.push({ url: String(url), headers: (opts && opts.headers) || {}, body: (opts && typeof opts.body === "string" ? opts.body : "") });
+      return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+    };
+    try {
+      const eN = env({
+        NOTIFY_LINK: "https://sms.example.com",
+        FEISHU_WEBHOOK: "https://open.feishu.cn/open-apis/bot/v2/hook/x",
+        WECOM_WEBHOOK: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=x",
+        DINGTALK_WEBHOOK: "https://oapi.dingtalk.com/robot/send?access_token=x",
+        SERVERCHAN_SENDKEY: "sct-x",
+        PUSHPLUS_TOKEN: "pp-x",
+        TELEGRAM_BOT_TOKEN: "tg-tok",
+        TELEGRAM_CHAT_ID: "12345",
+        BARK_DEVICE_KEY: "bark-key",
+        BARK_URL: "https://bark.example.com",
+        NTFY_URL: "https://ntfy.sh/sms-topic",
+        GOTIFY_URL: "https://gotify.example.com",
+        GOTIFY_TOKEN: "g-tok",
+        RESEND_API_KEY: "re-x",
+        MAIL_TO: "a@example.com",
+        MAIL_FROM: "s@example.com",
+        GENERIC_WEBHOOKS: "https://gw.example.com/hook",
+      });
+      const T = "🔐 验证码 726418 · Gitee";
+      const hit = (kw) => hits.find(h => h.url.indexOf(kw) !== -1);
+      const J = (h) => JSON.parse(h.body);
+
+      /* 回合 1：含验证码短信 → verify 态，11 渠道各 1 次。
+         独立 XFF 桶：套件前段写入限速测试已耗尽默认 IP 的 120 次/分配额，换 IP 避开 429 */
+      const XFF = { "X-Forwarded-For": "203.0.113.77" };
+      let rr = await call("POST", "/api/receive?token=tok", eN, { body: { name: "主力机", sim: "13800000000", from: "Gitee", content: "您的验证码是726418，5分钟内有效", time: "2026-10-27 14:23:45" }, headers: XFF });
+      check(rr.status === 200 && rr.data && rr.data.duplicated === false, "verify 态 receive 入库成功");
+      check(hits.length === 11, "配置 11 渠道 → 转发 11 次（got " + hits.length + "）");
+
+      const fh = J(hit("open.feishu.cn"));
+      check(fh.msg_type === "interactive" && fh.card.header.template === "violet" && fh.card.header.title.content === "🔐 验证码提醒", "飞书：interactive + violet 卡头");
+      check(JSON.stringify(fh.card.elements).indexOf("726418") !== -1 && JSON.stringify(fh.card.elements).indexOf("https://sms.example.com") !== -1, "飞书：码入卡片 + 打开管理页按钮");
+
+      const wc = J(hit("qyapi.weixin.qq.com")).markdown.content;
+      check(wc.indexOf("> `726418`") !== -1 && wc.indexOf("[打开管理页](https://sms.example.com)") !== -1, "企微：引用块放码 + 链接行");
+
+      const dd = J(hit("oapi.dingtalk.com")).markdown;
+      check(dd.title === T && dd.text.indexOf("### 🔐 验证码提醒") === 0 && dd.text.indexOf("**726418**") !== -1, "钉钉：title 进会话列表 + ### 标题");
+
+      const sc = new URLSearchParams(hit("sctapi.ftqq.com").body);
+      check(sc.get("title") === T && sc.get("desp").indexOf("**726418**") !== -1, "Server酱：title ≤32 + desp markdown");
+
+      const pp = J(hit("pushplus.plus"));
+      check(pp.title === T && pp.template === "markdown" && pp.content.indexOf("**726418**") !== -1, "PushPlus：markdown 模板");
+
+      const tg = J(hit("api.telegram.org"));
+      check(tg.parse_mode === "HTML" && tg.link_preview_options.is_disabled === true && tg.text.indexOf("<blockquote><b>726418</b>") !== -1 && tg.text.indexOf("来源：<b>Gitee</b>") !== -1, "Telegram：HTML + blockquote 放码");
+
+      const bk = J(hit("bark.example.com"));
+      check(bk.title === T && bk.copy === "726418" && bk.autoCopy === 1 && bk.level === "timeSensitive" && bk.group === "sms" && bk.url === "https://sms.example.com", "Bark：码进 title + copy 自动复制 + timeSensitive + url");
+
+      const nf = J(hit("ntfy.sh"));
+      check(nf.topic === "sms-topic" && nf.tags[0] === "lock" && nf.priority === 4 && nf.click === "https://sms.example.com", "ntfy：lock tag + priority 4 + click");
+
+      const gt = J(hit("gotify.example.com"));
+      check(gt.priority === 8 && gt.extras["client::display"].contentType === "text/markdown" && gt.message.indexOf("**726418**") !== -1, "Gotify：extras markdown + priority 8");
+
+      const rs = J(hit("api.resend.com"));
+      check(rs.subject === T && rs.html.indexOf("726418") !== -1 && rs.html.indexOf("border:2px dashed") !== -1 && rs.text.indexOf("【🔐 验证码提醒】726418") !== -1, "Resend：HTML 模板 + 纯文本降级");
+
+      const gw = J(hit("gw.example.com"));
+      check(gw.type === "verify" && gw.code === "726418" && gw.sender === "Gitee", "通用 Webhook：payload 含 type/code");
+
+      /* 回合 2：无验证码 push（notify）→ 三态切换与可选字段省略 */
+      hits.length = 0;
+      rr = await call("POST", "/api/push?token=tok", eN, { body: { source: "notify", sender: "NAS-Download", name: "家庭NAS", content: "qBittorrent：镜像下载完成（5.2 GB）", time: "2026-10-27 15:00:00" }, headers: XFF });
+      check(rr.status === 200, "notify 态 push 入库成功");
+      check(hits.length === 11, "notify 态仍转发 11 次");
+      check(J(hit("open.feishu.cn")).card.header.template === "turquoise", "飞书：notify 态 turquoise 卡头");
+      const bk2 = J(hit("bark.example.com"));
+      check(bk2.copy === undefined && bk2.autoCopy === undefined && bk2.level === "active" && bk2.group === "notify", "Bark：无码省略 copy + active");
+      const nf2 = J(hit("ntfy.sh"));
+      check(nf2.priority === 3 && nf2.tags === undefined, "ntfy：无码 priority 3 且无 tags");
+      check(J(hit("gotify.example.com")).priority === 5, "Gotify：无码 priority 5");
+      const gw2 = J(hit("gw.example.com"));
+      check(gw2.type === "notify" && gw2.code === "", "通用 Webhook：notify 态 type/code");
+
+      /* 回合 3：无验证码短信 → sms 态 + Telegram HTML 转义 */
+      hits.length = 0;
+      rr = await call("POST", "/api/receive?token=tok", eN, { body: { name: "主力机", sim: "13800000000", from: "中国联通", content: "话费余额<10元，请及时充值", time: "2026-10-27 15:10:00" }, headers: XFF });
+      check(rr.status === 200, "sms 态 receive 入库成功");
+      check(J(hit("open.feishu.cn")).card.header.template === "blue", "飞书：sms 态 blue 卡头");
+      check(J(hit("api.telegram.org")).text.indexOf("话费余额&lt;10元") !== -1, "Telegram：HTML 转义 <");
+      check(J(hit("gw.example.com")).type === "sms", "通用 Webhook：sms 态 type");
+    } finally {
+      globalThis.fetch = realFetch;
     }
   }
 

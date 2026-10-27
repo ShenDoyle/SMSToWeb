@@ -67,6 +67,7 @@ Turso 提供 SQLite 兼容数据库（免费额度：100 个数据库、5GB 存�
 | `RESEND_API_KEY` + `MAIL_TO` | （可选）邮件（Resend） | 可选 `MAIL_FROM`，默认 `onboarding@resend.dev` |
 | `GENERIC_WEBHOOKS`（可选 `GENERIC_WEBHOOK_TEMPLATE` / `GENERIC_WEBHOOK_HEADERS`） | （可选）通用 Webhook | 逗号分隔多个 URL；可选模板自定义请求体，`GENERIC_WEBHOOK_HEADERS`（JSON 字符串）自定义请求头 |
 | `SITE_NAME` / `SITE_ICON` | （可选） | 网站名 / 图标 URL |
+| `NOTIFY_LINK` | （可选） | 管理页首页地址；配置后所有通知渠道附「打开管理页」入口，未配置自动省略 |
 
 保存后等待自动重新部署生效。
 

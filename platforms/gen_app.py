@@ -57,6 +57,7 @@ ENV_KEYS = [
     "PHONE_AREA_API",
     "SITE_NAME",
     "SITE_ICON",
+    "NOTIFY_LINK",
     "FEISHU_WEBHOOK",
     "FEISHU_SECRET",
     "WECOM_WEBHOOK",

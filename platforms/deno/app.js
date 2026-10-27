@@ -316,7 +316,8 @@ function normalizeTime(t) {
 
 /* ---------------- 多渠道通知转发（可选：配置哪个渠道变量就转发到哪个渠道） ----------------
  * 新消息入库成功后并发转发到全部已配置渠道；单个渠道失败只记日志，不影响其他渠道与主流程；
- * 全部渠道变量未配置时不发任何请求。渠道与变量清单一览：
+ * 全部渠道变量未配置时不发任何请求。消息按「验证码/短信/通知」三态渲染（各渠道样式经统一设计，
+ * 服务端共用一次精简验证码检测）。渠道与变量清单一览：
  *   飞书        FEISHU_WEBHOOK
  *   企业微信    WECOM_WEBHOOK
  *   钉钉        DINGTALK_WEBHOOK（可选 DINGTALK_SECRET 加签）
@@ -329,9 +330,11 @@ function normalizeTime(t) {
  *   Gotify      GOTIFY_URL + GOTIFY_TOKEN
  *   邮件        RESEND_API_KEY + MAIL_TO（可选 MAIL_FROM，默认 onboarding@resend.dev）
  *   通用        GENERIC_WEBHOOKS（逗号分隔多个 URL；可选 GENERIC_WEBHOOK_TEMPLATE 自定义请求体，
- *               占位符 {{title}}/{{content}}/{{time}}/{{source}}/{{sender}}/{{device}}；
+ *               占位符 {{title}}/{{content}}/{{time}}/{{source}}/{{sender}}/{{device}}/{{type}}/{{code}}；
  *               可选 GENERIC_WEBHOOK_HEADERS 自定义请求头，JSON 对象字符串，
  *               如 {"Authorization":"Bearer xxx","X-Api-Key":"yyy"}）
+ *   跳转        NOTIFY_LINK（可选：站点首页地址；配置后各渠道卡片/消息附「打开管理页」入口，
+ *               未配置则各渠道自动省略对应元素）
  */
 
 /* UTC 时间串 → 北京时间串（用于通知消息展示） */
@@ -392,19 +395,123 @@ async function hmacSha256Base64(secret, payload) {
   return btoa(bin);
 }
 
+/* 服务端精简版验证码检测（与前端七级级联语义对齐的轻量三态版，通知样式共用）：
+ * ① 码在前（必须先于关键词在前——防「123456是您的验证码，您有2000积分」取 2000）
+ * ② 关键词在前：a.分隔码（防 1234 5678 被截断成 1234） b.紧邻数字（非数字间隔 ≤8）
+ * ③ Google 风格 G-123456。
+ * 检测前剥离手机号/日期/时间/金额/单号等干扰串；仅用于转发标题与卡片高亮，检测失败自动走普通样式 */
+function extractCodeLite(content) {
+  const s0 = String(content || "");
+  if (!s0) return "";
+  let s = s0
+    .replace(/\+?\d[\d-]{7,11}\d/g, " ")                                    /* 手机号/座机（≥9 位数字串） */
+    .replace(/\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?/g, " ")                    /* 日期 */
+    .replace(/\d{1,2}:\d{2}(?::\d{2})?/g, " ")                              /* 时间 */
+    .replace(/[¥￥$]\s*\d+(?:\.\d+)?\s*元?/g, " ").replace(/\d+(?:\.\d+)?\s*元/g, " ")  /* 金额 */
+    .replace(/(?:订单|工单|账单|流水|快递|运单|取件)[号码]?[:：#]?\s*[A-Za-z0-9-]{6,}/g, " ");  /* 各类单号 */
+  let m;
+  /* ① 码在前：123456…验证码（码与关键词间允许 ≤4 个非字母数字符号 + 可选连接词） */
+  m = s.match(/(?:^|[^0-9A-Za-z])(\d{4,8})[^\dA-Za-z]{0,4}(?:是您?的|是你?的|为你?的|的)?(?:登录|注册|支付|校验|身份)?验证码/);
+  if (m) return m[1];
+  /* ②a 关键词在前 + 分隔码：验证码…1234 5678 / 1234-5678（两侧各 3-4 位） */
+  m = s.match(/验证码(?:登录|注册|支付|校验)?[^\d]{0,6}?(\d{3,4})[ -](\d{3,4})(?![0-9])/);
+  if (m) return m[1] + m[2];
+  /* ②b 关键词在前 + 紧邻数字：验证码…123456（非数字间隔 ≤8，不跨句） */
+  m = s.match(/验证码(?:登录|注册|支付|校验)?[^\d]{0,8}?(\d{4,8})/);
+  if (m) return m[1];
+  /* ③ Google 风格：G-123456 */
+  m = s.match(/[Gg]-(\d{3,8})(?![0-9])/);
+  if (m) return m[1];
+  return "";
+}
+
+/* 转发消息归一化：一次验证码检测 + 三态标题，全部渠道共享结果。
+ * title 策略（通知栏只显示 title 的渠道与邮件主题共用）：
+ *   验证码 → 「🔐 验证码 <码> · <发件方>」；短信 → 「💬 短信 · <发件人>」；通知 → 「🔔 通知 · <应用名>」 */
+function buildNotifyInfo(env, msg) {
+  const code = extractCodeLite(msg.content);
+  const isSms = msg.source === "sms";
+  const sender = String(msg.sender || "");
+  const info = {
+    code: code,
+    type: code ? "verify" : (isSms ? "sms" : "notify"),
+    link: trimEnv(env && env.NOTIFY_LINK),
+    sender: sender,
+    device: String(msg.device || ""),
+    content: String(msg.content || ""),
+    time: String(msg.time || ""),
+    source: msg.source || "notify",
+    title: "",
+  };
+  info.title = code
+    ? "🔐 验证码 " + code + (sender ? " · " + sender : "")
+    : (isSms ? "💬 短信" + (sender ? " · " + sender : "")
+             : "🔔 通知" + (sender ? " · " + sender : ""));
+  return info;
+}
+
+/* 渠道卡片头部文案与配色（三态）：飞书 template / 各渠道标题统一走这里 */
+function notifyStyle(info) {
+  if (info.type === "verify") return { title: "🔐 验证码提醒", tpl: "violet", label: "验证码提醒" };
+  if (info.type === "sms") return { title: "💬 新短信", tpl: "blue", label: "新短信" };
+  return { title: "🔔 设备通知", tpl: "turquoise", label: "设备通知" };
+}
+
+/* HTML 转义（Telegram / 邮件等 HTML 渠道共用）：只处理 & < > 三个字符 */
+function escHtml(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/* 统一纯文本版式（设计稿兜底规范）：HTML/Markdown 不可用或需降级时的统一版式 */
+function plainBody(info) {
+  const L = [];
+  if (info.code) {
+    L.push("【" + notifyStyle(info).title + "】" + info.code + "（5 分钟内有效）");
+    L.push("来源：" + (info.sender || "-") + (info.device ? " · " + info.device : ""));
+  } else {
+    L.push(info.title);
+    L.push(info.content || "（空内容）");
+  }
+  L.push("────────────────");
+  L.push("🕐 " + (info.time || "-") + (info.device ? " · " + info.device : ""));
+  if (info.link) L.push("打开管理页：" + info.link);
+  return L.join("\n");
+}
+
 /**
  * 把一条已入库消息转发到全部已配置的通知渠道。
  * msg: { title, content, time, source, sender, device }
  * 返回 Promise（配合 ctx.waitUntil 保证 Worker 响应后仍在后台完成发送）。
  */
 function dispatchNotify(env, msg) {
-  const text = msg.title + "\n" + String(msg.content || "") + (msg.time ? "\n" + msg.time : "");
   const jobs = [];
   const t = trimEnv;
+  const info = buildNotifyInfo(env, msg);  /* 验证码检测与跳转链接全渠道只算一次 */
 
   const feishu = t(env.FEISHU_WEBHOOK);
   if (feishu) jobs.push(async function () {
-    const payload = { msg_type: "text", content: { text: text } };
+    /* Interactive 卡片三态渲染（violet 验证码 / blue 短信 / turquoise 通知） */
+    const st = notifyStyle(info);
+    const els = [];
+    const headLine = (info.type === "notify" ? "来源 " : "发件人 ")
+      + "**" + (info.sender || "-") + "**" + (info.device ? " · " + info.device : "");
+    els.push({ tag: "div", text: { tag: "lark_md", content: headLine } });
+    if (info.code) {
+      els.push({ tag: "div", text: { tag: "lark_md", content: "**" + info.code + "**\n5 分钟内有效，泄露有风险，请勿转发" } });
+    } else {
+      els.push({ tag: "div", text: { tag: "lark_md", content: info.content || "（空内容）" } });
+    }
+    els.push({ tag: "hr" });
+    els.push({ tag: "note", elements: [{ tag: "plain_text",
+      content: "🕐 " + (info.time || "-") + " · " + (info.type === "notify" ? "通知" : "短信") + (info.sender ? " · " + info.sender : "") }] });
+    if (info.link) {
+      els.push({ tag: "action", actions: [{ tag: "button", text: { tag: "plain_text", content: "打开管理页" }, type: "primary", url: info.link }] });
+    }
+    const payload = { msg_type: "interactive", card: {
+      config: { wide_screen_mode: true },
+      header: { template: st.tpl, title: { tag: "plain_text", content: st.title } },
+      elements: els,
+    } };
     const feishuSecret = t(env.FEISHU_SECRET);
     if (feishuSecret) {
       /* 飞书签名校验（机器人安全设置选「签名校验」时必配）：
@@ -418,11 +525,33 @@ function dispatchNotify(env, msg) {
 
   const wecom = t(env.WECOM_WEBHOOK);
   if (wecom) jobs.push(async function () {
-    await postNotify(wecom, null, JSON.stringify({ msgtype: "text", text: { content: text } }));
+    /* 企微群机器人 markdown：不支持 action 按钮 → 链接行；comment 灰字承载体裁元信息；上限 4096 字节 */
+    const st = notifyStyle(info);
+    let md = "# " + st.title + "\n";
+    if (info.code) {
+      md += "> `" + info.code + "`\n> 5 分钟内有效，泄露有风险，请勿转发\n\n";
+      md += "<font color=\"info\">来源</font> **" + (info.sender || "-") + "**" + (info.device ? " · " + info.device : "") + "\n";
+    } else {
+      md += info.content + "\n\n";
+      md += "<font color=\"comment\">🕐 " + (info.time || "-") + (info.sender ? " · " + info.sender : "") + (info.device ? " · " + info.device : "") + "</font>";
+    }
+    if (info.link) md += "\n[打开管理页](" + info.link + ")";
+    try {
+      const enc = new TextEncoder().encode(md);
+      if (enc.length > 4096) md = new TextDecoder().decode(enc.slice(0, 4090)) + "…";
+    } catch (e) { /* 极老运行时无 TextEncoder 时按原样发送 */ }
+    await postNotify(wecom, null, JSON.stringify({ msgtype: "markdown", markdown: { content: md } }));
   });
 
   const dingtalk = t(env.DINGTALK_WEBHOOK);
   if (dingtalk) jobs.push(async function () {
+    /* 钉钉 markdown：### 标题 + 列表元信息；title 字段（≤32 字）进会话列表预览；加签逻辑不变 */
+    const st = notifyStyle(info);
+    let md = "### " + st.title + "\n\n";
+    if (info.code) md += "**" + info.code + "**（5 分钟内有效，请勿转发）\n\n";
+    else md += info.content + "\n\n";
+    md += "- 来源：" + (info.sender || "-") + "\n- 设备：" + (info.device || "-") + "\n- 时间：" + (info.time || "-");
+    if (info.link) md += "\n\n[打开管理页](" + info.link + ")";
     let url = dingtalk;
     const secret = t(env.DINGTALK_SECRET);
     if (secret) {
@@ -430,37 +559,87 @@ function dispatchNotify(env, msg) {
       const sign = await hmacSha256Base64(secret, ts + "\n" + secret);
       url += (url.indexOf("?") === -1 ? "?" : "&") + "timestamp=" + ts + "&sign=" + encodeURIComponent(sign);
     }
-    await postNotify(url, null, JSON.stringify({ msgtype: "text", text: { content: text } }));
+    await postNotify(url, null, JSON.stringify({ msgtype: "markdown", markdown: { title: info.title.slice(0, 32), text: md } }));
   });
 
   const serverchan = t(env.SERVERCHAN_SENDKEY);
   if (serverchan) jobs.push(async function () {
-    const desp = String(msg.content || "") + (msg.time ? "\n\n" + msg.time : "");
+    /* Server酱：通知栏只显示 title（≤32 字）→ 验证码进 title；desp 走 markdown 详情页 */
+    let desp;
+    if (info.code) {
+      desp = "**" + info.code + "**（5 分钟内有效，请勿转发）\n\n> " + (info.sender || "-") + (info.device ? " · " + info.device : "") + "\n> 🕐 " + (info.time || "-");
+    } else {
+      desp = info.content + (info.time ? "\n\n> 🕐 " + info.time : "");
+    }
+    if (info.link) desp += "\n\n[打开管理页](" + info.link + ")";
+    const scTitle = info.title.length > 32 ? info.title.slice(0, 31) + "…" : info.title;
     await postNotify(
       "https://sctapi.ftqq.com/" + encodeURIComponent(serverchan) + ".send",
       { "Content-Type": "application/x-www-form-urlencoded" },
-      new URLSearchParams({ title: msg.title, desp: desp }).toString()
+      new URLSearchParams({ title: scTitle, desp: desp }).toString()
     );
   });
 
   const pushplus = t(env.PUSHPLUS_TOKEN);
   if (pushplus) jobs.push(async function () {
+    /* PushPlus：template=markdown，title 策略与 Server酱一致 */
+    let content;
+    if (info.code) {
+      content = "**" + info.code + "**（5 分钟内有效，请勿转发）\n\n> " + (info.sender || "-") + (info.device ? " · " + info.device : "") + "\n> 🕐 " + (info.time || "-");
+    } else {
+      content = info.content + (info.time ? "\n\n> 🕐 " + info.time : "");
+    }
+    if (info.link) content += "\n\n[打开管理页](" + info.link + ")";
     await postNotify("https://www.pushplus.plus/send", null,
-      JSON.stringify({ token: pushplus, title: msg.title, content: text, template: "txt" }));
+      JSON.stringify({ token: pushplus, title: info.title, content: content, template: "markdown" }));
   });
 
   const tgBot = t(env.TELEGRAM_BOT_TOKEN), tgChat = t(env.TELEGRAM_CHAT_ID);
   if (tgBot && tgChat) jobs.push(async function () {
-    await postNotify("https://api.telegram.org/bot" + tgBot + "/sendMessage", null,
-      /* Telegram sendMessage 上限 4096 字符：超限整条 400 静默失败，发送前截断 */
-      JSON.stringify({ chat_id: tgChat, text: text.slice(0, 4096) }));
+    /* Telegram：parse_mode=HTML（只需转义 & < > 三个字符，比 MarkdownV2 的十余个特殊字符转义稳得多）；
+       blockquote 放验证码（Bot API 7.0+）；链接预览关闭保持消息干净。
+       sendMessage 上限 4096 字符（超限整条 400 静默失败）：>4000 时去格式降级纯文本版式再截断 */
+    const st = notifyStyle(info);
+    let html = "<b>" + escHtml(st.title) + "</b>\n";
+    if (info.code) {
+      html += "<blockquote><b>" + escHtml(info.code) + "</b>（5 分钟内有效，请勿转发）</blockquote>"
+        + "来源：<b>" + escHtml(info.sender || "-") + "</b>" + (info.device ? " · " + escHtml(info.device) : "") + "\n"
+        + "🕐 " + escHtml(info.time || "-") + " · " + (info.type === "notify" ? "通知" : "短信");
+    } else {
+      html += escHtml(info.content) + "\n"
+        + "🕐 " + escHtml(info.time || "-") + (info.sender ? " · " + escHtml(info.sender) : "") + (info.device ? " · " + escHtml(info.device) : "");
+    }
+    if (info.link) html += "\n<a href=\"" + escHtml(info.link) + "\">打开管理页 →</a>";
+    let tgPayload;
+    if (html.length > 4000) {
+      tgPayload = { chat_id: tgChat, link_preview_options: { is_disabled: true }, text: (plainBody(info) + "\n…").slice(0, 4096) };
+    } else {
+      tgPayload = { chat_id: tgChat, parse_mode: "HTML", link_preview_options: { is_disabled: true }, text: html };
+    }
+    await postNotify("https://api.telegram.org/bot" + tgBot + "/sendMessage", null, JSON.stringify(tgPayload));
   });
 
   const barkKey = t(env.BARK_DEVICE_KEY);
   if (barkKey) jobs.push(async function () {
+    /* Bark 行为参数：验证码进 title 保证锁屏完整可见；copy+autoCopy 通知一点即复制验证码；
+       验证码 level=timeSensitive 穿透专注模式（普通消息 active）；group 按 sms/notify 分组；
+       url 点击跳管理页（NOTIFY_LINK），icon 复用站点图标 SITE_ICON */
     const server = (t(env.BARK_URL) || "https://api.day.app").replace(/\/+$/, "");
-    await postNotify(server + "/push", null,
-      JSON.stringify({ device_key: barkKey, title: msg.title, body: text, group: "SMSToWeb" }));
+    const bark = {
+      device_key: barkKey,
+      title: info.title,
+      subtitle: info.code
+        ? (info.device ? info.device : "") + (info.device && info.sender ? " · " : "") + (info.sender || "")
+        : (info.device || ""),
+      body: info.code ? "5 分钟内有效，泄露有风险，请勿转发。点击查看完整内容。" : info.content,
+      level: info.code ? "timeSensitive" : "active",
+      group: info.type === "notify" ? "notify" : "sms",
+    };
+    if (info.code) { bark.copy = info.code; bark.autoCopy = 1; }
+    if (info.link) bark.url = info.link;
+    const icon = t(env.SITE_ICON);
+    if (icon) bark.icon = icon;
+    await postNotify(server + "/push", null, JSON.stringify(bark));
   });
 
   const ntfy = t(env.NTFY_URL);
@@ -478,30 +657,74 @@ function dispatchNotify(env, msg) {
     if (ntfyTok) {
       ntfyHeaders.Authorization = ntfyTok.indexOf(":") !== -1 ? "Basic " + btoa(ntfyTok) : "Bearer " + ntfyTok;
     }
-    await postNotify(u.origin + path.slice(0, slash + 1), ntfyHeaders,
-      JSON.stringify({ topic: topic, title: msg.title, message: text }));
+    const ntfyBody = {
+      topic: topic,
+      title: info.title,
+      message: info.code
+        ? (info.sender || "-") + (info.device ? " · " + info.device : "") + " · 5 分钟内有效，泄露有风险，请勿转发"
+        : info.content,
+      priority: info.code ? 4 : 3,
+    };
+    if (info.code) ntfyBody.tags = ["lock"];  /* 渲染 🔐 emoji */
+    if (info.link) ntfyBody.click = info.link;
+    await postNotify(u.origin + path.slice(0, slash + 1), ntfyHeaders, JSON.stringify(ntfyBody));
   });
 
   const gotifyUrl = t(env.GOTIFY_URL), gotifyToken = t(env.GOTIFY_TOKEN);
   if (gotifyUrl && gotifyToken) jobs.push(async function () {
+    /* Gotify：extras client::display contentType=text/markdown 让 Android 客户端渲染 markdown；
+       验证码 priority 8、普通 5 */
+    let md;
+    if (info.code) {
+      md = "**" + info.code + "**（5 分钟内有效，请勿转发）\n\n> " + (info.sender || "-") + (info.device ? " · " + info.device : "")
+        + "\n> 🕐 " + (info.time || "-") + " · " + (info.type === "notify" ? "通知" : "短信");
+    } else {
+      md = info.content + (info.time ? "\n\n> 🕐 " + info.time : "");
+    }
+    if (info.link) md += "\n\n[打开管理页](" + info.link + ")";
     await postNotify(gotifyUrl.replace(/\/+$/, "") + "/message?token=" + encodeURIComponent(gotifyToken), null,
-      JSON.stringify({ title: msg.title, message: text, priority: 5 }));
+      JSON.stringify({ title: info.title, message: md, priority: info.code ? 8 : 5,
+        extras: { "client::display": { contentType: "text/markdown" } } }));
   });
 
   const resendKey = t(env.RESEND_API_KEY), mailTo = t(env.MAIL_TO);
   if (resendKey && mailTo) jobs.push(async function () {
+    /* Resend：完整 HTML 模板（全部内联 CSS，兼容邮件客户端）；subject 复用统一标题策略（验证码进主题）；
+       text 附统一纯文本版式，作为不支持 HTML 的客户端的降级 */
+    const st = notifyStyle(info);
+    const accent = info.type === "verify" ? "#7b45e6" : (info.type === "sms" ? "#2563eb" : "#0d9488");
+    const metaRows = [
+      ["来源", (info.sender || "-") + "（" + (info.type === "notify" ? "通知" : "短信") + "）"],
+      ["设备", info.device || "-"],
+      ["时间", info.time || "-"],
+    ].map(function (r) {
+      return '<tr><td style="padding:6px 12px 6px 0;color:#9ca3af;vertical-align:top;">' + r[0]
+        + '</td><td style="padding:6px 0;">' + escHtml(r[1]) + "</td></tr>";
+    }).join("");
+    const html = '<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,\'PingFang SC\',\'Microsoft YaHei\',sans-serif;max-width:560px;margin:0 auto;padding:24px;">'
+      + '<span style="display:inline-block;padding:4px 14px;border-radius:999px;background:' + accent + ';color:#fff;font-size:13px;">' + st.label + "</span>"
+      + (info.code
+        ? '<div style="margin:20px 0;padding:18px 16px;border:2px dashed ' + accent + ';border-radius:12px;text-align:center;font-size:32px;font-weight:700;letter-spacing:6px;color:' + accent + ';">' + escHtml(info.code) + "</div>"
+          + '<p style="margin:0 0 16px;color:#6b7280;font-size:14px;">5 分钟内有效，泄露有风险，请勿转发。</p>'
+        : '<p style="margin:16px 0;font-size:15px;line-height:1.7;color:#111827;white-space:pre-wrap;">' + escHtml(info.content || "（空内容）") + "</p>")
+      + '<table style="border-collapse:collapse;font-size:14px;color:#374151;margin:0 0 20px;">' + metaRows + "</table>"
+      + (info.link ? '<a href="' + escHtml(info.link) + '" style="display:inline-block;padding:10px 28px;background:' + accent + ';color:#fff;border-radius:8px;text-decoration:none;font-size:14px;">打开管理页</a>' : "")
+      + '<p style="margin:28px 0 0;padding-top:12px;border-top:1px solid #e5e7eb;color:#9ca3af;font-size:12px;">由 SMSToWeb 自动发送 · 请勿回复本邮件</p>'
+      + "</div>";
     const to = mailTo.split(/[,;，；]/).map(function (s) { return s.trim(); }).filter(Boolean);
     await postNotify("https://api.resend.com/emails",
       { Authorization: "Bearer " + resendKey },
       JSON.stringify({
         from: t(env.MAIL_FROM) || "onboarding@resend.dev",
         to: to,
-        subject: msg.title,
-        text: text,
+        subject: info.title,
+        html: html,
+        text: plainBody(info),
       }));
   });
 
-  /* 通用 Webhook：默认 POST JSON {title,content,time,source,sender,device}；
+  /* 通用 Webhook：默认 POST JSON {title,content,time,source,sender,device,type,code}
+     （type=verify|sms|notify，code=轻量检测出的验证码，未检出为空串）；
      配置 GENERIC_WEBHOOK_TEMPLATE 后按模板渲染请求体（可解析为 JSON 则按 JSON 发送，否则按纯文本），
      第三方 API（短信网关、自建系统等）由此接入 */
   const genericUrls = String(env.GENERIC_WEBHOOKS || "").split(",").map(function (s) { return s.trim(); })
@@ -510,6 +733,7 @@ function dispatchNotify(env, msg) {
     const payload = {
       title: msg.title, content: String(msg.content || ""), time: msg.time || "",
       source: msg.source || "", sender: msg.sender || "", device: msg.device || "",
+      type: info.type, code: info.code,
     };
     let genericBody = JSON.stringify(payload);
     let genericCt = "application/json";
