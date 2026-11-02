@@ -2,7 +2,8 @@
  * SMSToWeb 零依赖测试套件（需 Node 22.13+，用到内置 node:sqlite）
  * 直接测生成的平台无关核心 platforms/node/app.js 的 fetchApp / runCron / handleCronRequest，
  * 覆盖：收发、去重、列表、来源筛选、长轮询、删除、正文截断、定时清理、cron 鉴权、
- *       登录鉴权、http cookie 降级、防锁死、写入限速、管理页开关 UI。
+ *       登录鉴权、http cookie 降级、防锁死、写入限速、管理页开关 UI、
+*       令牌边界（并发重名/轮换审计/前缀不泄漏/节流端到端/开关边界值）、令牌管理与登录限速。
  * 运行：node tests/run.mjs   （退出码 0=全过，1=有失败，2=异常）
  */
 import { fetchApp, runCron, handleCronRequest, createToken, listTokens, findTokenByHash, revokeToken, rotateToken, touchLastUsed } from "../platforms/node/app.js";
@@ -68,6 +69,7 @@ async function call(method, path, e, opts) {
 async function main() {
   const e0 = env();
 
+  /* ===== 第 0 步组：schema 幂等自愈 ===== */
   group("schema 幂等自愈（旧库缺列 → 运行时自动补列，不再 500）");
   {
     const legacyPath = join(tmpdir(), "smstoweb_legacy_" + process.pid + ".db");
@@ -118,6 +120,7 @@ async function main() {
     cleanupPath(legacyPath);
   }
 
+  /* ===== 第 4 步组：旧库 + 新代码端到端 ===== */
   group("旧库 + 新代码端到端（第 4 步：legacy 无 tokens 表 → 首请求自愈 → 令牌全链路可用）");
   {
     const upPath = join(tmpdir(), "smstoweb_upgrade_" + process.pid + ".db");
@@ -192,6 +195,7 @@ async function main() {
     cleanupPath(upPath);
   }
 
+  /* ===== 第 1 步组：令牌数据层 ===== */
   group("令牌数据层（tokens 表 + 哈希存储 + 吊销/轮换/节流，零鉴权行为变更）");
   {
     const tokPath = join(tmpdir(), "smstoweb_tokens_" + process.pid + ".db");
@@ -271,6 +275,7 @@ async function main() {
     cleanupPath(tokPath);
   }
 
+  /* ===== 第 2 步组：接入鉴权 ===== */
   group("接入鉴权（库内令牌优先 + 环境变量兜底 + DISABLE_RECEIVE_TOKEN + fail-closed）");
   {
     const auPath = join(tmpdir(), "smstoweb_auth_" + process.pid + ".db");
@@ -337,6 +342,7 @@ async function main() {
     cleanupPath(auPath);
   }
 
+  /* ===== 第 3 步组：令牌管理 API ===== */
   group("令牌管理 API + CSRF + 收发联动（第 3 步）");
   {
     const mtPath = join(tmpdir(), "smstoweb_mtok_" + process.pid + ".db");
@@ -419,6 +425,139 @@ async function main() {
     cleanupPath(mtPath);
   }
 
+  /* ===== 第 5 步组：令牌边界补钉（并发重名 / 轮换审计 / 前缀不泄漏 / 节流端到端 / 开关边界值）===== */
+  group("第 5 步 · 令牌边界补钉（并发/审计/前缀/节流/开关边界）");
+  {
+    const b5Path = join(tmpdir(), "smstoweb_b5tok_" + process.pid + ".db");
+    cleanupPath(b5Path);
+    const rawB5 = new DatabaseSync(b5Path);
+    const bDb = makeD1(rawB5);
+    const eB5 = { DB: bDb, RECEIVE_TOKEN: "tok", ENABLE_AUTH: "true", ADMIN_PASSWORD: "secret", SESSION_SECRET: "test-session-secret-0123456789abcdef", RETENTION_DAYS: "30" };
+    const XB = { "X-Forwarded-For": "203.0.113.61, 10.0.0.61" };
+    const HB = (extra) => Object.assign({}, XB, extra || {});
+
+    /* 登录拿会话（本组写调用共 16 次，远低于 120/分，同桶安全） */
+    let rb = await call("POST", "/api/login", eB5, { headers: HB(), body: { password: "secret" } });
+    check(rb.status === 200, "边界组：登录 → 200");
+    const ckB = "sms_auth=" + ((rb.setCookie.match(/sms_auth=([^;]*)/) || [])[1] || "");
+
+    /* 1) 同名并发创建：Promise.all 同事件循环背靠背两次 → 恰好一次成功、一次 NAME_TAKEN（部分唯一索引真实时序生效） */
+    const cc = await Promise.all([
+      call("POST", "/api/tokens", eB5, { headers: HB(), body: { name: "race-dev" }, cookie: ckB }),
+      call("POST", "/api/tokens", eB5, { headers: HB(), body: { name: "race-dev" }, cookie: ckB }),
+    ]);
+    const okCnt = cc.filter(x => x.status === 200).length;
+    const takenCnt = cc.filter(x => x.status === 400 && x.data && x.data.error === "NAME_TAKEN").length;
+    check(okCnt === 1 && takenCnt === 1, "同名并发创建两次 → 恰好 1 次成功 + 1 次 NAME_TAKEN（部分唯一索引时序生效）");
+    const raceOk = cc.find(x => x.status === 200);
+    check(!!raceOk && typeof raceOk.data.token === "string" && raceOk.data.token_prefix === raceOk.data.token.slice(0, 12), "并发成功方返回一次性明文与一致前缀");
+
+    /* 2) 轮换后审计完整性 + token_prefix 不泄漏：列表 2 行（旧行 revoked_at 非空 + 新行活跃同名），响应体 grep 无明文 */
+    rb = await call("POST", "/api/tokens", eB5, { headers: HB(), body: { name: "audit-dev" }, cookie: ckB });
+    const atok = rb.data.token, aid1 = rb.data.id;
+    check(typeof rb.data.token_prefix === "string" && rb.data.token_prefix.length === 12 && rb.data.token_prefix !== rb.data.token, "token_prefix 固定 12 位且不等于完整明文");
+    rb = await call("POST", "/api/tokens/rotate", eB5, { headers: HB(), body: { id: aid1 }, cookie: ckB });
+    check(rb.status === 200, "轮换 audit-dev → 200");
+    const aid2 = rb.data.id, atok2 = rb.data.token;
+    rb = await call("GET", "/api/tokens", eB5, { headers: HB(), cookie: ckB });
+    const rows = rb.data.list.filter(t => t.name === "audit-dev");
+    const oldRow = rows.find(t => t.id === aid1), newRow = rows.find(t => t.id === aid2);
+    check(rows.length === 2, "轮换后列表含 audit-dev 2 行（旧行保留审计）");
+    check(!!oldRow && !!newRow && oldRow.revoked_at !== null && newRow.revoked_at === null, "旧行 revoked_at 非空 + 新行活跃（审计完整性）");
+    check(!!oldRow && !!newRow && oldRow.name === newRow.name, "旧行与新行 name 相同（部分唯一索引让出命名在 API 层成立）");
+    const auditStr = JSON.stringify(rb.data);
+    check(auditStr.indexOf(atok) === -1 && auditStr.indexOf(atok2) === -1, "轮换后列表响应不含任何明文（grep 全响应体）");
+    check(rows.every(t => (t.token_prefix || "").length === 12), "列表行 token_prefix 长度固定 12");
+
+    /* 3) last_used_at 节流端到端：真实 /api/receive 路径，60s 窗口内第二次接收不产生第二次写（哨兵时间戳法，确定性判定） */
+    rb = await call("POST", "/api/receive", eB5, { headers: HB({ "X-Receive-Token": atok2 }), body: { name: "节流机", sim: "13900000001", from: "10086", content: "throttle-1", time: "2026-11-02 12:00:00" } });
+    check(rb.status === 200, "节流：第 1 次 /api/receive（库内令牌）→ 200");
+    await bDb.prepare("UPDATE tokens SET last_used_at = '2099-01-01 00:00:00' WHERE id = ?").bind(aid2).run();
+    rb = await call("POST", "/api/receive", eB5, { headers: HB({ "X-Receive-Token": atok2 }), body: { name: "节流机", sim: "13900000001", from: "10086", content: "throttle-2", time: "2026-11-02 12:01:00" } });
+    check(rb.status === 200, "节流：第 2 次 /api/receive → 200");
+    let tu = await bDb.prepare("SELECT last_used_at FROM tokens WHERE id = ?").bind(aid2).first();
+    check(!!tu && tu.last_used_at === "2099-01-01 00:00:00", "60s 窗口内第二次接收未产生第二次写（哨兵时间未被覆盖）");
+    await bDb.prepare("UPDATE tokens SET last_used_at = '2000-01-01 00:00:00' WHERE id = ?").bind(aid2).run();
+    rb = await call("POST", "/api/receive", eB5, { headers: HB({ "X-Receive-Token": atok2 }), body: { name: "节流机", sim: "13900000001", from: "10086", content: "throttle-3", time: "2026-11-02 12:02:00" } });
+    tu = await bDb.prepare("SELECT last_used_at FROM tokens WHERE id = ?").bind(aid2).first();
+    check(rb.status === 200 && !!tu && tu.last_used_at !== "2000-01-01 00:00:00", "窗口过期后接收恢复写 last_used_at（节流双侧边界）");
+
+    /* 4) DISABLE_RECEIVE_TOKEN 边界值矩阵：仅 trim+lowercase 后等于 "true" 停用；"1"/"yes"/""/未设 不停用 */
+    const disCases = [
+      ["true", 403], ["TRUE", 403], [" true ", 403],
+      ["1", 200], ["yes", 200], ["", 200], [undefined, 200],
+    ];
+    for (const dc of disCases) {
+      const ev = Object.assign({}, eB5);
+      if (dc[0] === undefined) delete ev.DISABLE_RECEIVE_TOKEN; else ev.DISABLE_RECEIVE_TOKEN = dc[0];
+      const rr = await call("POST", "/api/push?token=tok", ev, { headers: HB(), body: { content: "dis-" + String(dc[0]), time: "2026-11-02 12:03:00" } });
+      check(rr.status === dc[1], "开关边界值 DISABLE_RECEIVE_TOKEN=" + JSON.stringify(dc[0] === undefined ? "未设" : dc[0]) + " → " + dc[1] + (dc[1] === 403 ? "（停用兜底）" : "（兜底启用）"));
+    }
+
+    rawB5.close();
+    cleanupPath(b5Path);
+  }
+
+  /* ===== 第 5 步组：限速回归补钉（receive 429 / 令牌管理写接口 429 / 登录锁定，各用独立 XFF 桶）===== */
+  group("第 5 步 · 限速回归补钉（receive/令牌管理/登录）");
+  {
+    /* 1) /api/receive 写入限速 120/IP/min：恰好第 121 次 → 429 */
+    const r5Path = join(tmpdir(), "smstoweb_r5recv_" + process.pid + ".db");
+    cleanupPath(r5Path);
+    const rawR5 = new DatabaseSync(r5Path);
+    const eR5 = { DB: makeD1(rawR5), RECEIVE_TOKEN: "tok", ENABLE_AUTH: "", ADMIN_PASSWORD: "", SESSION_SECRET: "test-session-secret-0123456789abcdef", RETENTION_DAYS: "30" };
+    const XR = { "X-Forwarded-For": "203.0.113.62, 10.0.0.62" };
+    const rStatuses = [];
+    for (let i = 0; i < 125; i++) {
+      const rr = await call("POST", "/api/receive?token=tok", eR5, { headers: XR, body: { name: "限速机", sim: "13800000062", from: "10086", content: "rl-" + i, time: "2026-11-02 12:10:00" } });
+      rStatuses.push(rr.status);
+    }
+    check(rStatuses.slice(0, 120).every(s => s === 200), "receive 限速：前 120 次全部 200");
+    check(rStatuses[120] === 429, "receive 限速：第 121 次 → 429");
+    check(rStatuses.slice(121).every(s => s === 429), "receive 限速：窗口内后续请求持续 429");
+    rawR5.close();
+    cleanupPath(r5Path);
+
+    /* 2) 令牌管理写接口复用 allowWrite：POST /api/tokens 第 121 次 → 429，同桶耗尽后 revoke/rotate 亦 429 */
+    const t5Path = join(tmpdir(), "smstoweb_r5tok_" + process.pid + ".db");
+    cleanupPath(t5Path);
+    const rawT5 = new DatabaseSync(t5Path);
+    const eT5 = { DB: makeD1(rawT5), RECEIVE_TOKEN: "tok", ENABLE_AUTH: "true", ADMIN_PASSWORD: "secret", SESSION_SECRET: "test-session-secret-0123456789abcdef", RETENTION_DAYS: "30" };
+    const XT = { "X-Forwarded-For": "203.0.113.63, 10.0.0.63" };
+    let rt = await call("POST", "/api/login", eT5, { headers: XT, body: { password: "secret" } });
+    const ckT = "sms_auth=" + ((rt.setCookie.match(/sms_auth=([^;]*)/) || [])[1] || "");
+    const tStatuses = [];
+    for (let i = 0; i < 122; i++) {
+      const rr = await call("POST", "/api/tokens", eT5, { headers: XT, body: { name: "rl-" + i }, cookie: ckT });
+      tStatuses.push(rr.status);
+    }
+    check(tStatuses.slice(0, 120).every(s => s === 200), "令牌管理限速：POST /api/tokens 前 120 次（唯一名）全部 200");
+    check(tStatuses[120] === 429, "令牌管理限速：POST /api/tokens 第 121 次 → 429（复用 allowWrite）");
+    check(tStatuses[121] === 429, "令牌管理限速：第 122 次持续 429");
+    rt = await call("POST", "/api/tokens/revoke", eT5, { headers: XT, body: { id: "x" }, cookie: ckT });
+    check(rt.status === 429, "令牌管理限速：同桶耗尽后 revoke → 429（写接口共用限速）");
+    rt = await call("POST", "/api/tokens/rotate", eT5, { headers: XT, body: { id: "x" }, cookie: ckT });
+    check(rt.status === 429, "令牌管理限速：同桶耗尽后 rotate → 429（写接口共用限速）");
+    rawT5.close();
+    cleanupPath(t5Path);
+
+    /* 3) 登录限速：同 IP 连续失败 5 次锁定 10 分钟——第 6 次即使密码正确也 429 */
+    const l5Path = join(tmpdir(), "smstoweb_r5login_" + process.pid + ".db");
+    cleanupPath(l5Path);
+    const rawL5 = new DatabaseSync(l5Path);
+    const eL5 = { DB: makeD1(rawL5), RECEIVE_TOKEN: "tok", ENABLE_AUTH: "true", ADMIN_PASSWORD: "secret", SESSION_SECRET: "test-session-secret-0123456789abcdef", RETENTION_DAYS: "30" };
+    const XL = { "X-Forwarded-For": "203.0.113.64, 10.0.0.64" };
+    for (let i = 0; i < 5; i++) {
+      const rr = await call("POST", "/api/login", eL5, { headers: XL, body: { password: "wrong-" + i } });
+      check(rr.status === 403, "登录限速：第 " + (i + 1) + " 次错误密码 → 403（尚未锁定）");
+    }
+    const r6 = await call("POST", "/api/login", eL5, { headers: XL, body: { password: "secret" } });
+    check(r6.status === 429, "登录限速：5 次失败后第 6 次即使密码正确 → 429（锁 10 分钟）");
+    rawL5.close();
+    cleanupPath(l5Path);
+  }
+
+  /* ===== 基线组（第 0 步前既有）：收发核心 ===== */
   group("收发 / 去重 / 列表 / 筛选 / 长轮询 / 删除 / 截断（免登录）");
   let r = await call("POST", "/api/push", e0, { body: { content: "no token here" } });
   check(r.status === 403, "push 无 token → 403（未命中库内与环境变量，fail-closed，状态码同旧版）");
@@ -456,6 +595,7 @@ async function main() {
   const homeHtml = await home.text();
   check(home.status === 200 && /class="switch"/.test(homeHtml) && /自动复制验证码/.test(homeHtml), "管理页渲染且含新开关 UI");
 
+  /* ===== 基线组（第 0 步前既有）：定时清理 ===== */
   group("定时清理 runCron / cron HTTP 鉴权");
   await db.prepare("INSERT INTO messages(device_id, sender, content, received_at, source) SELECT id,'old','old msg xyz','2000-01-01 00:00:00','sms' FROM devices LIMIT 1").run();
   const before = (await db.prepare("SELECT COUNT(*) AS n FROM messages WHERE content='old msg xyz'").first()).n;
@@ -467,6 +607,7 @@ async function main() {
   r = await handleCronRequest(R("GET", "/api/cron?token=tok", {}), e0);
   check(r.status === 200, "/api/cron 带 token → 200");
 
+  /* ===== 基线组（第 0 步前既有）：设备别名 ===== */
   group("设备别名 / 合并 / 动态来源");
   await call("POST", "/api/push?token=tok", e0, { body: { name: "手机A", content: "a-one", time: "2026-10-18 09:00:00" } });
   await call("POST", "/api/push?token=tok", e0, { body: { name: "手机B", content: "b-one", time: "2026-10-18 09:01:00" } });
@@ -497,6 +638,7 @@ async function main() {
   r = await call("POST", "/api/devices/merge", e0, { body: { from: devB.id, to: devB.id } });
   check(r.status === 400, "合并到自身 → 400");
 
+  /* ===== 基线组（第 0 步前既有）：时间范围 ===== */
   group("时间范围 / 分页 / 导出");
   await db.prepare("INSERT INTO messages(device_id, sender, content, received_at, source) SELECT id,'oldsender','range-old','2000-01-01 00:00:00','sms' FROM devices LIMIT 1").run();
   r = await call("GET", "/api/messages?range=1d&limit=100", e0);
@@ -522,6 +664,7 @@ async function main() {
   const csv2 = await er2.text();
   check(/'=1\+1/.test(csv2), "CSV 公式注入被前置单引号防护");
 
+  /* ===== 基线组（第 0 步前既有）：号码归属地 ===== */
   group("号码归属地 / 内置号码库");
   r = await call("GET", "/api/phone?number=13800138000", env({ PHONE_AREA_ENABLED: "false" }));
   check(r.data && r.data.found === false && r.data.disabled === true, "PHONE_AREA_ENABLED=false → 不外呼、返回 disabled");
@@ -540,6 +683,7 @@ async function main() {
   const page2 = await (await fetchApp(R("GET", "/", {}), e0)).text();
   check(/NUM_LABELS/.test(page2) && /fillAreas/.test(page2), "管理页内置号码库与归属地填充逻辑存在");
 
+  /* ===== 基线组（第 0 步前既有）：批量软删除 ===== */
   group("批量删除 / 恢复 / 清空（软删除）");
   await call("POST", "/api/push?token=tok", e0, { body: { name: "批量设备", content: "batch-1", time: "2026-10-19 08:00:00" } });
   await call("POST", "/api/push?token=tok", e0, { body: { name: "批量设备", content: "batch-2", time: "2026-10-19 08:01:00" } });
@@ -565,6 +709,7 @@ async function main() {
   r = await call("DELETE", "/api/devices/" + devBatch.id, e0);
   check(r.data && r.data.success === true && r.data.deleted === 1, "软删全部消息后可直接删除设备标签（UI × 有出现条件）");
 
+  /* ===== 基线组（第 0 步前既有）：收藏/统计/PWA ===== */
   group("收藏 / 已读 / 统计 / PWA");
   const mlist = (await call("GET", "/api/messages?limit=100", e0)).data.list;
   const mid = mlist[0].id;
@@ -587,6 +732,7 @@ async function main() {
   const swr = await fetchApp(R("GET", "/sw.js", {}), e0);
   check(swr.status === 200 && /addEventListener/.test(await swr.text()), "service worker 可访问");
 
+  /* ===== 基线组（第 0 步前既有）：登录鉴权 ===== */
   group("登录鉴权 / http cookie 降级 / 防锁死");
   const eAuth = env({ ENABLE_AUTH: "true", ADMIN_PASSWORD: "secret" });
   r = await call("GET", "/api/messages", eAuth);
@@ -607,6 +753,7 @@ async function main() {
   r = await call("GET", "/api/messages", env({ ENABLE_AUTH: "true", ADMIN_PASSWORD: "" }));
   check(r.status === 401, "ENABLE_AUTH=true 但密码为空 → 受保护接口 401（不放行，安全默认）");
 
+  /* ===== 基线组（第 0 步前既有）：写入限速 ===== */
   group("写入接口限速");
   let saw429 = false, allowed = 0;
   for (let i = 0; i < 260 && !saw429; i++) {
@@ -615,6 +762,7 @@ async function main() {
   }
   check(saw429 && allowed >= 1 && allowed < 260, "限速生效：放行一批后开始返回 429");
 
+  /* ===== 基线组（第 0 步前既有）：安全响应头 ===== */
   group("安全响应头 / /api/cron HTTP 触发（CF 入口）/ XFF 防伪造");
   const homeR = await fetchApp(R("GET", "/", {}), e0);
   check(homeR.status === 200 && homeR.headers.get("X-Content-Type-Options") === "nosniff", "管理页响应带 X-Content-Type-Options: nosniff");
@@ -638,6 +786,7 @@ async function main() {
   }
   check(saw429xff, "XFF 左段伪造不绕过写入限速（clientIp 取末段）");
 
+  /* ===== 基线组（第 0 步前既有）：多语言/兼容 ===== */
   group("中英双语 / 移动端 / 平台兼容");
   const coreSrc = readFileSync(new URL("../src/worker.js", import.meta.url), "utf8");
   /* 取出 I18N 字面量求值，检查中英字典键集完全一致（防漏翻） */
@@ -840,6 +989,7 @@ async function main() {
 
   /* 验证码提取七级级联回归：码在前（①②）必须先于关键词在前（③④）——关键词在前模式
      允许跨短 gap，曾把「123456是您的验证码，您有2000积分待领取」里的 2000 误当验证码 */
+  /* ===== 基线组（第 0 步前既有）：验证码提取 ===== */
   group("验证码提取（七级级联回归）");
   {
     const ecStart = coreSrc.indexOf("function extractCode(");  /* 带括号避免命中后端 extractCodeLite */
@@ -871,6 +1021,7 @@ async function main() {
 
   /* 服务端轻量验证码检测（extractCodeLite，供 11 渠道通知三态渲染共用）：
      与前端 extractCode 同级联顺序铁律——码在前先于关键词在前，检测前剥离手机号/日期/时间/金额/单号 */
+  /* ===== 基线组（第 0 步前既有）：extractCodeLite ===== */
   group("服务端轻量验证码检测 extractCodeLite");
   {
     const eclStart = coreSrc.indexOf("function extractCodeLite");
@@ -901,6 +1052,7 @@ async function main() {
 
   /* 11 渠道通知渲染 E2E：fetch 桩拦截 postNotify 出站请求，断言各渠道 payload。
      node 平台 bgRun 无 ctx → dispatchNotify 内联 await，响应返回前转发已完成 */
+  /* ===== 基线组（第 0 步前既有）：通知渲染 ===== */
   group("11 渠道通知渲染（fetch 桩 E2E）");
   {
     const realFetch = globalThis.fetch;
@@ -1000,6 +1152,7 @@ async function main() {
     }
   }
 
+  /* ===== 基线组（第 0 步前既有）：会话安全 ===== */
   group("会话安全（无状态随机 Session / 签名 / TTL / 密钥策略）");
   {
     const eS = env({ ENABLE_AUTH: "true", ADMIN_PASSWORD: "sesspw" });
@@ -1116,6 +1269,7 @@ async function main() {
     check(JSON.stringify(r.data || {}).indexOf("token") === -1, "会话：登录响应体不含 token（不经 URL/正文传递）");
   }
 
+  /* ===== 基线组（第 0 步前既有）：鉴权配置矩阵 ===== */
   group("鉴权配置矩阵（配置缺失一律不放行，配置错误区别于密码错误）");
   {
     /* 1 密码缺失 + 密钥存在：受保护接口拒绝、登录页拦截，不得免登录放行 */
