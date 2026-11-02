@@ -1,6 +1,6 @@
 # SMSToWeb — 短信/通知上云网关
 
-[English](../../README.md) | **简体中文** | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
+[English](../../../README.md) | **简体中文** | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
 > 本仓库文档以英语为主维护版本；本中文版与其它语言译文存放于 `docs/i18n/`，可能滞后于英语主版。
 
@@ -34,15 +34,15 @@
 
 | 平台 | 部署方式 | 定时清理 | 详细教程 |
 |---|---|---|---|
-| **Cloudflare**（推荐） | Worker + D1 | 平台 cron | [platforms/cloudflare/README.md](../../platforms/cloudflare/README.md) |
-| Vercel | Edge Function + Turso | 平台 cron | [platforms/vercel/README.md](../../platforms/vercel/README.md) |
-| Deno Deploy | Deno 原生 + Turso | Deno.cron | [platforms/deno/README.md](../../platforms/deno/README.md) |
-| Netlify | Functions v2 + Turso | Scheduled Function | [platforms/netlify/README.md](../../platforms/netlify/README.md) |
-| 腾讯 EdgeOne Makers | Functions + Turso | 外部 cron | [platforms/edgeone/README.md](../../platforms/edgeone/README.md) |
-| Fly.io / Railway / VPS | Docker（Node 22）+ Turso/本地 SQLite | 进程内置 | [platforms/node/README.md](../../platforms/node/README.md) |
+| **Cloudflare**（推荐） | Worker + D1 | 平台 cron | [platforms/cloudflare/README.md](../../../platforms/cloudflare/README.md) |
+| Vercel | Edge Function + Turso | 平台 cron | [platforms/vercel/README.md](../../../platforms/vercel/README.md) |
+| Deno Deploy | Deno 原生 + Turso | Deno.cron | [platforms/deno/README.md](../../../platforms/deno/README.md) |
+| Netlify | Functions v2 + Turso | Scheduled Function | [platforms/netlify/README.md](../../../platforms/netlify/README.md) |
+| 腾讯 EdgeOne Makers | Functions + Turso | 外部 cron | [platforms/edgeone/README.md](../../../platforms/edgeone/README.md) |
+| Fly.io / Railway / VPS | Docker（Node 22）+ Turso/本地 SQLite | 进程内置 | [platforms/node/README.md](../../../platforms/node/README.md) |
 
 > 每个平台目录**完全自包含**（代码 + schema + 独立文档，零 npm 依赖、无需构建），点上表「详细教程」即可按步骤部署。功能与数据表结构全平台一致，可随时互相迁移。
-> 平台对比与通用准备（Turso 数据库）见 [platforms/README.md](../../platforms/README.md)。
+> 平台对比与通用准备（Turso 数据库）见 [platforms/README.md](../../../platforms/README.md)。
 
 ### 各平台运行时差异（部署前看一眼）
 
@@ -67,7 +67,7 @@
 
 所有平台把消息推进同一个网页：手机短信走 `/api/receive`（安卓 SmsForwarder），其余一切通知走通用接口 `/api/push`。
 
-分步配置（每平台附可直接复制的命令/脚本）：**[docs/多平台接入部署指南.md](../../docs/多平台接入部署指南.md)**
+分步配置（每平台附可直接复制的命令/脚本）：**[docs/多平台接入部署指南.md](../../../docs/多平台接入部署指南.md)**
 
 **通用推送接口速览**（详细字段见接入指南）：
 
@@ -119,4 +119,4 @@ Cloudflare 平台额外需要 `DB`（D1 绑定）；其余平台需要 `TURSO_DA
 
 ## License
 
-[MIT](../../LICENSE) © 2026 [左立方](https://cbm.im/)
+[MIT](../../../LICENSE) © 2026 [左立方](https://cbm.im/)

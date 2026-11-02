@@ -24,6 +24,9 @@ jobs:
             exit 1
           fi
 
+      - name: schema 引用与内嵌一致性校验（只读）
+        run: python platforms/gen_app.py --check
+
       - name: 语法检查
         run: |
           for f in src/worker.js platforms/shared/app.js platforms/node/server.mjs platforms/node/db.js \

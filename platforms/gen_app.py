@@ -15,14 +15,20 @@
      （worker.js 与 src/worker.js 逐字节一致；wrangler.toml 为本目录静态文件，不参与同步）
   6. 各平台入口文件内的 ENV_KEYS 白名单块 — 渠道/站点环境变量统一清单，
      由本脚本的 ENV_KEYS 列表生成（保证六平台透传的变量集合一致，防漂移）
+  7. src/worker.js 内的 SCHEMA_SQL 内嵌块 — 由根 schema.sql 同步（运行时幂等自愈
+     ensureSchema 的唯一事实源；schema.sql 更新后重跑本脚本即自动内嵌）
+  8. schema 引用校验 — 代码中 SQL 引用的表/限定列必须存在于根 schema.sql，
+     缺失即报错退出（CI 与本地均执行；--check 模式只校验不写盘）
 
 各平台目录因此完全自包含：入口文件只引用本目录内的 app.js / db.js，可独立部署、
 互不依赖。src/worker.js、shared/db.js、根 schema.sql 或本脚本 ENV_KEYS 有更新后
 重新执行本脚本即可全量同步。
 
-用法：python platforms/gen_app.py
+用法：python platforms/gen_app.py          # 全量同步 + 全部校验
+      python platforms/gen_app.py --check # 只校验（同步状态 + 引用完整性），不写盘
 """
 from pathlib import Path
+import re
 import shutil
 import sys
 
@@ -85,6 +91,9 @@ ENV_KEYS = [
 ENV_BEGIN = "/* ==== ENV_KEYS BEGIN（由 platforms/gen_app.py 同步，勿手工修改）==== */"
 ENV_END = "/* ==== ENV_KEYS END ==== */"
 
+SCHEMA_BEGIN = "/* ==== SCHEMA_SQL BEGIN（由 platforms/gen_app.py 从根 schema.sql 同步，勿手工修改）==== */"
+SCHEMA_END = "/* ==== SCHEMA_SQL END ==== */"
+
 FETCH_SIG = "async fetch(request, env, ctx) {"
 SCHED_SIG = "async scheduled(event, env) {"
 
@@ -121,6 +130,17 @@ export async function handleCronRequest(request, env) {
   }
   await runCron(env);
   return json({ success: true });
+}
+
+/* ---------------- 接入令牌数据层导出（供测试与第 3 步管理 API 复用） ---------------- */
+
+export {
+  createToken,
+  listTokens,
+  findTokenByHash,
+  revokeToken,
+  rotateToken,
+  touchLastUsed,
 }
 """
 
@@ -183,6 +203,111 @@ def sync_entry_env_keys() -> None:
         print("[ok] 同步 ENV_KEYS 白名单 %s" % rel)
 
 
+def schema_block() -> str:
+    """生成 src/worker.js 内的 SCHEMA_SQL 内嵌块（含首尾标记）。
+
+    运行时 ensureSchema 以此为唯一事实源做幂等自愈，故 schema.sql 内容会被内嵌为
+    JS 模板字面量——反引号与 ${ 会破坏字面量/生成过程，出现即报错拒绝。"""
+    schema = (REPO_ROOT / "schema.sql").read_text(encoding="utf-8")
+    for bad in ("`", "${"):
+        if bad in schema:
+            print("schema.sql 含 %r，无法安全内嵌 worker.js（请改写该字符）" % bad, file=sys.stderr)
+            sys.exit(1)
+    return "%s\nconst SCHEMA_SQL = `\n%s\n`;\n%s" % (SCHEMA_BEGIN, schema.rstrip("\n"), SCHEMA_END)
+
+
+def sync_schema_block() -> None:
+    """把根 schema.sql 同步进 src/worker.js 的 SCHEMA_SQL 标记块（缺失标记块即报错）。"""
+    text = SRC.read_text(encoding="utf-8")
+    if SCHEMA_BEGIN not in text or SCHEMA_END not in text:
+        print("SCHEMA_SQL 标记块缺失: src/worker.js", file=sys.stderr)
+        sys.exit(1)
+    if text.count(SCHEMA_BEGIN) != 1 or text.count(SCHEMA_END) != 1:
+        print("SCHEMA_SQL 标记块重复: src/worker.js", file=sys.stderr)
+        sys.exit(1)
+    b0 = text.index(SCHEMA_BEGIN)
+    b1 = text.index(SCHEMA_END) + len(SCHEMA_END)
+    out = text[:b0] + schema_block() + text[b1:]
+    SRC.write_text(out, encoding="utf-8", newline="\n")
+    if SRC.read_text(encoding="utf-8") != out:
+        print("SCHEMA_SQL 同步校验失败: src/worker.js", file=sys.stderr)
+        sys.exit(1)
+    print("[ok] 同步 SCHEMA_SQL 内嵌块 src/worker.js")
+
+
+def parse_schema_tables(schema_text: str) -> dict:
+    """解析 schema.sql → { 表名: {列名集合} }（取 CREATE TABLE IF NOT EXISTS 语句）。"""
+    tables = {}
+    for m in re.finditer(r"CREATE TABLE IF NOT EXISTS (\w+)\s*\(([\s\S]*?)\)\s*;", schema_text):
+        cols = set()
+        for line in m.group(2).splitlines():
+            t = re.sub(r"--.*$", "", line).strip().rstrip(",").strip()
+            if not t:
+                continue
+            first = t.split()[0]
+            if first.upper() in ("PRIMARY", "UNIQUE", "FOREIGN", "CHECK", "CONSTRAINT"):
+                continue
+            cols.add(first)
+        tables[m.group(1)] = cols
+    return tables
+
+
+def check_schema_refs() -> None:
+    """schema 引用校验：代码中 SQL 引用的表与限定列（表.列）必须存在于根 schema.sql。
+
+    覆盖方式为关键字清单 + 正则（零依赖，非完整 SQL 解析）：
+      - 仅匹配大写 SQL 关键字上下文，与本项目「SQL 关键字一律大写」的书写约定一致；
+      - 扫描前剥掉注释（/* */ 与 //），避免文档注释里的 SQL 示例误报；
+      - 跳过 SQL 语法噪音词（SET/OR/ADD 等），兼容 upsert（DO UPDATE SET）与
+        UPDATE OR IGNORE 等冲突子句写法；
+      - 限定列校验覆盖 `表.列` 字面引用（别名引用如 m.col 不在本检查范围内，
+        由 CI 的测试套件与运行时自愈兜底）。"""
+    schema_text = (REPO_ROOT / "schema.sql").read_text(encoding="utf-8")
+    tables = parse_schema_tables(schema_text)
+    code = SRC.read_text(encoding="utf-8")
+    # 仅用于扫描的副本：剥掉块注释、行注释与行内 //（URL 会被误删，但扫描不受影响）
+    scan = re.sub(r"/\*[\s\S]*?\*/", " ", code)
+    scan = re.sub(r"//[^\n]*", " ", scan)
+    noise = {"SELECT", "SET", "OR", "AND", "NOT", "NULL", "INTO", "VALUES", "ADD", "COLUMN",
+             "TABLE", "IF", "EXISTS", "DEFAULT", "IGNORE", "REPLACE", "DO", "ON", "CONFLICT",
+             "RETURNING", "WHERE", "KEY", "CASE", "WHEN", "THEN", "ELSE", "END"}
+    problems = []
+
+    table_ctx = re.finditer(
+        r"\b(?:FROM|JOIN|INSERT INTO|UPDATE(?:\s+OR\s+\w+)?|ALTER TABLE)\s+`?(\w+)`?", scan)
+    for m in table_ctx:
+        t = m.group(1)
+        if t.upper() in noise:
+            continue
+        if t not in tables:
+            problems.append("引用了 schema.sql 中不存在的表: %s（第 %d 行附近）" % (t, scan[:m.start()].count("\n") + 1))
+
+    for m in re.finditer(r"\b(\w+)\.(\w+)\b", scan):
+        t, c = m.group(1), m.group(2)
+        if t in tables and c not in tables[t]:
+            problems.append("引用了 %s 表中不存在的列: %s.%s（第 %d 行附近）" % (t, t, c, scan[:m.start()].count("\n") + 1))
+
+    if problems:
+        for p in problems:
+            print("schema 引用校验失败: %s" % p, file=sys.stderr)
+        sys.exit(1)
+    print("[ok] schema 引用校验通过（表 %s）" % ", ".join(sorted(tables)))
+
+
+def check_sync_state() -> None:
+    """--check 模式：只校验不写盘——SCHEMA_SQL 内嵌块与根 schema.sql 一致。"""
+    text = SRC.read_text(encoding="utf-8")
+    if SCHEMA_BEGIN not in text or SCHEMA_END not in text:
+        print("SCHEMA_SQL 标记块缺失: src/worker.js", file=sys.stderr)
+        sys.exit(1)
+    b0 = text.index(SCHEMA_BEGIN)
+    b1 = text.index(SCHEMA_END) + len(SCHEMA_END)
+    if text[b0:b1] != schema_block():
+        print("SCHEMA_SQL 内嵌块与根 schema.sql 不一致：请运行 python platforms/gen_app.py", file=sys.stderr)
+        sys.exit(1)
+    print("[ok] SCHEMA_SQL 内嵌块与根 schema.sql 一致")
+
+
 def sync_platforms(shared_app_text: str, db_text: str) -> None:
     """把唯一源同步为各平台目录内的独立副本（各平台目录因此自包含）。"""
     schema_text = (REPO_ROOT / "schema.sql").read_text(encoding="utf-8")
@@ -220,12 +345,18 @@ def sync_cloudflare(schema_text: str) -> None:
 
 
 def main() -> int:
+    if "--check" in sys.argv[1:]:
+        check_sync_state()
+        check_schema_refs()
+        return 0
+    sync_schema_block()
     text = SRC.read_text(encoding="utf-8")
     shared_app_text = generate_shared_app(text)
     db_text = (SHARED_DIR / "db.js").read_text(encoding="utf-8")
     sync_platforms(shared_app_text, db_text)
     sync_cloudflare((REPO_ROOT / "schema.sql").read_text(encoding="utf-8"))
     sync_entry_env_keys()
+    check_schema_refs()
     return 0
 
 

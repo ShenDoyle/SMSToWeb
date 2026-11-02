@@ -36,3 +36,20 @@ CREATE INDEX IF NOT EXISTS idx_messages_source ON messages(source, received_at D
 -- ALTER TABLE messages ADD COLUMN deleted_at TEXT;
 -- ALTER TABLE messages ADD COLUMN starred INTEGER NOT NULL DEFAULT 0;
 -- ALTER TABLE messages ADD COLUMN read_at TEXT;
+
+-- 接入令牌表：多命名令牌 + 单设备可吊销 + 哈希存储（明文只在创建/轮换时返回一次，库内只存 SHA-256）
+CREATE TABLE IF NOT EXISTS tokens (
+  id            TEXT    PRIMARY KEY,
+  name          TEXT    NOT NULL,
+  token_hash    TEXT    NOT NULL,
+  token_prefix  TEXT    NOT NULL DEFAULT '',
+  created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+  last_used_at  TEXT,
+  revoked_at    TEXT
+);
+-- 活跃令牌命名唯一（部分索引：吊销行保留原名作审计痕迹，不占用命名）
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tokens_name_active ON tokens(name) WHERE revoked_at IS NULL;
+-- 鉴权主路径：按哈希精确查找（SHA-256 定长，唯一索引即防碰撞重复）
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tokens_hash ON tokens(token_hash);
+-- 吊销过滤辅助索引（第 2 步鉴权与第 3 步后台列表按 revoked_at 过滤）
+CREATE INDEX IF NOT EXISTS idx_tokens_revoked ON tokens(revoked_at);

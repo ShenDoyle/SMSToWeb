@@ -97,7 +97,7 @@ Cloudflare additionally needs the `DB` (D1 binding); other platforms need `TURSO
 
 > **Security recommendations**
 > 1. **Turn on admin login** (`ENABLE_AUTH="true"` + `ADMIN_PASSWORD`): the admin page holds sensitive content such as SMS OTP codes; without login, anyone who knows the domain can read every message and delete data. The login endpoint is rate-limited (5 consecutive failures per IP locks it for 10 minutes); `/api/receive` and `/api/push` are rate-limited to 120 writes per IP per minute (429 beyond that).
-> 2. **Trade-off of `?token=` in URLs**: for compatibility with SmsForwarder and similar clients, `/api/receive` and `/api/push` accept auth via the `?token=` query parameter — the token may appear in platform access logs and browser history. If that concerns you, switch to POST with the `Authorization: Bearer <RECEIVE_TOKEN>` header (both are supported).
+> 2. **Token in URLs — recommended: header, query for compatibility only**: `/api/receive` and `/api/push` accept the token via (in priority order) the `X-Receive-Token` header → `?token=` query → `Authorization: Bearer` → `token` in the JSON body. **The `X-Receive-Token` header is the recommended way** (never lands in access logs, browser history or referrers); the `?token=` query exists only for compatibility with SmsForwarder-style clients. You can create named tokens in the admin page (Settings → 接入令牌 / Access tokens), where they are stored hashed (SHA-256) and can be revoked or rotated per device instantly; the deploy-time `RECEIVE_TOKEN` env var keeps working as a fallback until you set `DISABLE_RECEIVE_TOKEN="true"`.
 
 ## FAQ (general)
 

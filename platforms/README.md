@@ -68,7 +68,7 @@ turso db shell sms-gateway < schema.sql   # 建表
 
 > **安全强烈建议**
 > 1. **开启管理页登录**（`ENABLE_AUTH="true"` + `ADMIN_PASSWORD`）：管理页承载短信验证码等敏感内容，默认免登录意味着知道域名的人都能查看全部消息并删除数据。登录接口已内置限速（同 IP 连续失败 5 次锁定 10 分钟）；`/api/receive`、`/api/push` 另有每 IP 每分钟 120 次的写入限速（超限返回 429）。
-> 2. **推送 token 走 URL query 的取舍**：为兼容 SmsForwarder 等客户端，`/api/receive`、`/api/push` 支持 `?token=` 查询参数传鉴权——token 会出现在 URL 中，可能进入平台访问日志、浏览器历史。介意的话请改用 POST + 请求头 `Authorization: Bearer <RECEIVE_TOKEN>` 传递（两种方式都支持）。
+> 2. **令牌携带方式：推荐用请求头，query 仅兼容**：`/api/receive`、`/api/push` 按优先级支持四种携带方式——`X-Receive-Token` 请求头 → `?token=` query → `Authorization: Bearer` → JSON body 的 `token` 字段。**推荐客户端用 `X-Receive-Token` 请求头**（不会进入访问日志、浏览器历史与 Referer，隐私合规最优）；`?token=` 仅为兼容 SmsForwarder 类客户端保留。可在管理页「设置 → 接入令牌」创建命名令牌（库内只存 SHA-256 哈希，支持单设备吊销/轮换，秒级止血）；部署时环境变量 `RECEIVE_TOKEN` 作为兜底继续有效，全部令牌入库后可设 `DISABLE_RECEIVE_TOKEN="true"` 停用兜底。
 
 ## 目录结构
 

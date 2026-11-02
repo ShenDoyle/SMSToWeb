@@ -1,10 +1,10 @@
 # SMSToWeb — SMS & Notification Cloud Gateway
 
-**English** | [简体中文](../../zh-CN/README.md) | [繁體中文](../../zh-TW/README.md) | [日本語](../../ja/README.md) | [한국어](../../ko/README.md) | [Español](../../es/README.md) | [Français](../../fr/README.md) | [Deutsch](../../de/README.md) | [Português (BR)](../../pt-BR/README.md)
+**English** | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
 > Synced from the English primary where applicable
 
-> English is the primary maintained version of this document. Translations live under [`docs/i18n/<lang>/`](../../docs/i18n/README.md) and may lag behind; when in doubt, refer to this file.
+> English is the primary maintained version of this document. Translations live under [`docs/i18n/<lang>/`](../README.md) and may lag behind; when in doubt, refer to this file.
 
 Push SMS and notifications from an Android phone (and any other device) to the cloud in real time, and read them from a web page anywhere. Free to deploy, no server required, about 10 minutes end to end.
 
@@ -36,15 +36,15 @@ The button creates the database and tables, binds resources and sets up CI autom
 
 | Platform | Deployment | Scheduled cleanup | Guide |
 |---|---|---|---|
-| **Cloudflare** (recommended) | Worker + D1 | platform cron | [platforms/cloudflare/README.md](../../platforms/cloudflare/README.md) |
-| Vercel | Edge Function + Turso | platform cron | [platforms/vercel/README.md](../../platforms/vercel/README.md) |
-| Deno Deploy | Deno native + Turso | Deno.cron | [platforms/deno/README.md](../../platforms/deno/README.md) |
-| Netlify | Functions v2 + Turso | Scheduled Function | [platforms/netlify/README.md](../../platforms/netlify/README.md) |
-| Tencent EdgeOne Makers | Functions + Turso | external cron | [platforms/edgeone/README.md](../../platforms/edgeone/README.md) |
-| Fly.io / Railway / VPS | Docker (Node 22) + Turso / local SQLite | in-process | [platforms/node/README.md](../../platforms/node/README.md) |
+| **Cloudflare** (recommended) | Worker + D1 | platform cron | [platforms/cloudflare/README.md](../../../platforms/cloudflare/README.md) |
+| Vercel | Edge Function + Turso | platform cron | [platforms/vercel/README.md](../../../platforms/vercel/README.md) |
+| Deno Deploy | Deno native + Turso | Deno.cron | [platforms/deno/README.md](../../../platforms/deno/README.md) |
+| Netlify | Functions v2 + Turso | Scheduled Function | [platforms/netlify/README.md](../../../platforms/netlify/README.md) |
+| Tencent EdgeOne Makers | Functions + Turso | external cron | [platforms/edgeone/README.md](../../../platforms/edgeone/README.md) |
+| Fly.io / Railway / VPS | Docker (Node 22) + Turso / local SQLite | in-process | [platforms/node/README.md](../../../platforms/node/README.md) |
 
 > Every platform directory is **fully self-contained** (code + schema + standalone docs, zero npm dependencies, no build step). Click a guide above and follow the steps. Features and the data schema are identical across platforms; you can migrate between them at any time.
-> For platform comparison and common preparation (Turso database), see [platforms/README.md](../../platforms/README.md).
+> For platform comparison and common preparation (Turso database), see [platforms/README.md](../../../platforms/README.md).
 
 ### Runtime differences (read before deploying)
 
@@ -95,7 +95,7 @@ A `{"success":true,...}` response means it is stored; pushing the exact same pay
 | `NOTIFY_LINK` | no | admin page home URL; when set, every notification channel gets an "Open admin" entry (button/link/click); omitted automatically when unset |
 | `SESSION_SECRET` | required when login is on | session signing secret: **high-entropy random value (≥32 random characters recommended), fully independent from the admin password**; Cloudflare and EdgeOne (and every other platform) must each have their own value; never commit it to Git or reuse the password. If missing, login and auth **fail closed** (login returns 500, admin APIs return 401, no password-derived fallback). Rotating the value invalidates all existing sessions immediately. Sessions last 30 minutes; logout only clears the browser cookie — a copied session token remains valid within its TTL (up to 30 minutes) |
 
-Cloudflare additionally needs the `DB` (D1 binding); other platforms need `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` (Turso database, see each platform guide); Node self-hosting also supports `SQLITE_PATH` local SQLite mode (see [platforms/node/README.md](../../platforms/node/README.md)).
+Cloudflare additionally needs the `DB` (D1 binding); other platforms need `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` (Turso database, see each platform guide); Node self-hosting also supports `SQLITE_PATH` local SQLite mode (see [platforms/node/README.md](../../../platforms/node/README.md)).
 
 > **Security recommendations**
 > 1. **Turn on admin login** (`ENABLE_AUTH="true"` + `ADMIN_PASSWORD`): the admin page holds sensitive content such as SMS OTP codes; without login, anyone who knows the domain can read every message and delete data. The login endpoint is rate-limited (5 consecutive failures per IP locks it for 10 minutes); `/api/receive` and `/api/push` are rate-limited to 120 writes per IP per minute (429 beyond that).
@@ -115,10 +115,10 @@ Cloudflare additionally needs the `DB` (D1 binding); other platforms need `TURSO
 - `src/worker.js`: core source (Cloudflare Worker shape)
 - `platforms/gen_app.py`: generates the platform-neutral `app.js` from `src/worker.js` into the five ported platforms and syncs the Cloudflare copy `worker.js` (keeping business code byte-identical across six platforms); also syncs the 31-variable environment whitelist (ENV_KEYS, including auth entries) into the six platform entries to prevent drift (node's db.js is a Turso + local SQLite dual adapter, maintained separately and not synced)
 - `platforms/*/`: self-contained deployment directories (entry + app.js + db.js adapter + schema.sql + platform guide)
-- `docs/i18n/en/`: English documentation set (deployment/API/architecture/database); other languages under `docs/i18n/<lang>/` — see [docs/i18n/README.md](../../docs/i18n/README.md)
+- `docs/i18n/en/`: English documentation set (deployment/API/architecture/database); other languages under `docs/i18n/<lang>/` — see [docs/i18n/README.md](../README.md)
 - `tests/run.mjs`: zero-dependency test suite (needs Node 22.13+): `node tests/run.mjs`
 - After changing core code: run `python platforms/gen_app.py` to re-sync all platforms, then `node tests/run.mjs`; CI verifies zero sync drift + syntax + tests
 
 ## License
 
-[MIT](../../LICENSE) © 2026 [左立方 (ZuoLifang)](https://cbm.im/)
+[MIT](../../../LICENSE) © 2026 [左立方 (ZuoLifang)](https://cbm.im/)

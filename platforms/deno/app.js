@@ -23,7 +23,8 @@
  *     第三方 API（短信网关等）均由此接入
  *   SITE_NAME        — 网站名（可选）：管理页标题/页头，默认「短信网关」
  *   SITE_ICON        — 网站图标 URL（可选）：默认 jsdelivr favicon；设置了但加载失败自动回退默认
- *   （Secret）RECEIVE_TOKEN   — 推送鉴权（/api/receive 与 /api/push 共用）
+ *   （Secret）RECEIVE_TOKEN   — 推送鉴权兜底（/api/receive 与 /api/push 共用；库内令牌优先，
+ *       迁移期环境变量继续有效；DISABLE_RECEIVE_TOKEN="true" 停用兜底、只认库内令牌）
  *   （Secret）ADMIN_PASSWORD  — 登录密码（仅 ENABLE_AUTH="true" 时需要；登录连续失败 5 次锁 10 分钟）
  *   （Secret）SESSION_SECRET  — 登录会话签名密钥（高熵随机值，与密码独立；ENABLE_AUTH="true" 时
  *       必须配置，缺失则登录与鉴权安全失败；轮换即全部会话失效重新登录）
@@ -833,9 +834,9 @@ async function handleReceive(request, env, url, ctx) {
   const data = await parseIncoming(request, url);
   if (!data) return json({ success: false, error: "invalid body" }, 400);
 
-  // 鉴权：token 可在 query 或 body，与 Secret 比对
-  const provided = url.searchParams.get("token") || data.token;
-  if (!env.RECEIVE_TOKEN || !provided || !safeEqual(provided, env.RECEIVE_TOKEN)) {
+  // 鉴权：库内令牌优先 + 环境变量兜底（token 可在 header/query/body，统一走单一校验函数）；
+  // 失败状态码维持旧行为 403（旧代码对缺 token/错 token 不区分，均为 403；401 仅用于管理 API 未登录）
+  if (!(await verifyInboundToken(request, env, url, data.token))) {
     return json({ success: false, error: "unauthorized" }, 403);
   }
   if (!data.content) return json({ success: false, error: "empty content" }, 400);
@@ -890,8 +891,7 @@ async function handlePush(request, env, url, ctx) {
   try { body = await request.json(); } catch { return json({ success: false, error: "invalid json" }, 400); }
   if (!body || typeof body !== "object") return json({ success: false, error: "invalid body" }, 400);
 
-  const provided = url.searchParams.get("token") || body.token;
-  if (!env.RECEIVE_TOKEN || !provided || !safeEqual(provided, env.RECEIVE_TOKEN)) {
+  if (!(await verifyInboundToken(request, env, url, body.token))) {
     return json({ success: false, error: "unauthorized" }, 403);
   }
   let content = String(body.content || body.text || body.message || body.msg || "").trim();
@@ -1156,6 +1156,8 @@ async function handleStats(env) {
     starred: (tot && tot.starred) || 0,
     sources: sources.results || [],
     days: (days.results || []).map(function (r) { return { d: r.d, n: r.n }; }),
+    /* 第 4 步升级可观测：最近一次 schema 自愈结果（正常/失败 + 时间 + 错误摘要） */
+    schema: schemaStatus.get(env.DB) || { state: "unknown", at: "", error: "" },
   });
 }
 /* PWA：manifest 与 service worker（公开路由，不受登录影响） */
@@ -1599,6 +1601,22 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
                bottom: calc(48px + env(safe-area-inset-bottom, 0px)); }
   .selbar { bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
   .newpill { bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
+  /* 接入令牌面板（设置菜单入口 → 复用 .modal/.sheet 弹层，移动端自动底部抽屉） */
+  .tokrow { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid rgba(127,127,127,.18); flex-wrap: wrap; }
+  .tokmain { flex: 1 1 160px; min-width: 0; }
+  .tokname { font-weight: 600; font-size: 14px; word-break: break-all; }
+  .tokmeta { font-size: 12px; opacity: .65; margin-top: 2px; }
+  .tokrow.revoked .tokname, .tokrow.revoked .tokmeta { opacity: .45; }
+  .tokbadge { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: rgba(127,127,127,.15); white-space: nowrap; }
+  .tokrow.revoked .tokbadge { opacity: .6; }
+  .tokacts { display: flex; gap: 6px; }
+  .toknote { font-size: 12px; line-height: 1.6; padding: 8px 10px; border-radius: 8px;
+             background: rgba(255,180,0,.14); margin: 0 0 10px; }
+  .toknewrow { display: flex; gap: 8px; margin: 12px 0 4px; }
+  .toknewrow input { flex: 1; min-width: 0; }
+  .toksecret { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; word-break: break-all;
+               padding: 10px; border-radius: 8px; background: rgba(127,127,127,.12); user-select: all; }
+  .tokwarn { color: #c0392b; font-size: 13px; font-weight: 600; margin: 10px 0; }
   @media (min-width: 561px) {
     input[type=search], input[type=number], select { font-size: 14px; }
   }
@@ -1667,6 +1685,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
             <button class="tbtn" id="exportcsv" data-i18n-title="exportCsvTip" data-i18n="exportCsv" title="按当前筛选导出 CSV">导出 CSV</button>
             <button class="tbtn" id="exportjson" data-i18n-title="exportJsonTip" data-i18n="exportJson" title="按当前筛选导出 JSON">导出 JSON</button>
           </div>
+          <div class="grp">接入令牌</div>
+          <button class="tbtn" id="mtokens" role="menuitem" title="创建 / 查看 / 吊销 / 轮换接入令牌">接入令牌</button>
         </div>
       </span>
       <button class="tbtn" id="themebtn" data-i18n-title="themeTip">自动</button>
@@ -2998,8 +3018,9 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     loadQHist();
   }
   /* 通用弹层 */
+  var tokenSecret = null; /* 接入令牌一次性明文：仅存内存变量，closeModal 时置 null 清引用；不落 localStorage/URL/console */
   function openModal(html) { $("modalbody").innerHTML = html; $("modal").hidden = false; }
-  function closeModal() { $("modal").hidden = true; $("modalbody").innerHTML = ""; }
+  function closeModal() { $("modal").hidden = true; $("modalbody").innerHTML = ""; tokenSecret = null; }
   function drow(label, val) {
     return '<div class="drow"><span>' + esc(label) + '</span><span>' + esc(val == null ? "" : val) + '</span></div>';
   }
@@ -3105,8 +3126,116 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       (d.days || []).forEach(function (x) {
         html += '<div class="barrow"><span class="bl">' + esc(String(x.d || "").slice(5)) + '</span><span class="bt"><span class="bf" style="width:' + Math.round(x.n / maxD * 100) + '%"></span></span><span class="bn">' + x.n + '</span></div>';
       });
+      /* 第 4 步升级可观测：统计弹窗显示最近一次 schema 自愈结果（文案中文先行，i18n 后续补） */
+      var sc = d.schema || {};
+      html += '<div class="tokmeta" style="margin-top:10px">库结构自愈：' +
+        (sc.state === "ok" ? "正常" : sc.state === "failed" ? "失败：" + esc(sc.error || "") : "未触发") +
+        (sc.at ? "（" + esc(fmtTokTime(sc.at)) + "）" : "") + '</div>';
       $("statbody").innerHTML = html;
     }).catch(function () { var b = $("statbody"); if (b) b.textContent = T("statFail"); });
+  }
+  /* ---------- 接入令牌面板（第 3 步）：设置菜单入口，复用 .modal/.sheet 弹层 ----------
+     文案中文先行（i18n 后续补）；一次性明文仅存 tokenSecret，closeModal 清引用；
+     不写 localStorage、不写 URL、不写 console。 */
+  var tokListCache = [];
+  function fmtTokTime(s) { return s ? String(s).replace("T", " ").slice(0, 16) : "—"; }
+  function tokApi(method, path, body) {
+    return fetch(path, { method: method, headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined })
+      .then(function (r) { return r.json().then(function (d) { return { s: r.status, d: d }; }); });
+  }
+  function openTokens() {
+    openModal(
+      '<h3>接入令牌</h3>' +
+      '<div class="toknote" id="toknote" hidden>当前仍可用部署时环境变量令牌接入；建议创建命名令牌后停用引导令牌（设置 DISABLE_RECEIVE_TOKEN=true）。</div>' +
+      '<div id="toklist"><div class="tokmeta">加载中…</div></div>' +
+      '<div class="toknewrow"><input type="text" id="tokname" maxlength="64" placeholder="令牌名称（字母/数字/_/-）" autocomplete="off" aria-label="令牌名称"><button class="tbtn" id="tokcreate">＋ 新建令牌</button></div>'
+    );
+    $("tokcreate").onclick = createTokenUi;
+    $("tokname").onkeydown = function (ev) { if (ev.key === "Enter") createTokenUi(); };
+    loadTokens();
+  }
+  function loadTokens() {
+    return fetch("/api/tokens").then(function (r) {
+      if (r.status === 401) { location.reload(); return null; }
+      return r.json();
+    }).then(function (d) {
+      var box = $("toklist");
+      if (!box || !d) return;
+      if (!d.success) { box.innerHTML = '<div class="tokmeta">加载失败</div>'; return; }
+      var list = d.list || [];
+      tokListCache = list;
+      var note = $("toknote"); if (note) note.hidden = list.length > 0; /* 空态引导：库内无令牌时提示迁移路径 */
+      if (!list.length) { box.innerHTML = '<div class="tokmeta">还没有库内令牌。</div>'; return; }
+      var html = "";
+      list.forEach(function (t) {
+        var rev = t.revoked_at !== null && t.revoked_at !== undefined;
+        html += '<div class="tokrow' + (rev ? ' revoked' : '') + '">' +
+          '<div class="tokmain"><div class="tokname">' + esc(t.name) + '</div>' +
+          '<div class="tokmeta">' + esc(t.token_prefix || "") + '… · 创建 ' + esc(fmtTokTime(t.created_at)) +
+          ' · 最近使用 ' + esc(fmtTokTime(t.last_used_at)) + '</div></div>' +
+          '<span class="tokbadge">' + (rev ? "已吊销" : "活跃") + '</span>' +
+          (rev ? "" : '<span class="tokacts">' +
+            '<button class="tbtn" data-tokrot="' + esc(t.id) + '">轮换</button>' +
+            '<button class="tbtn" data-tokrev="' + esc(t.id) + '">吊销</button></span>') +
+          '</div>';
+      });
+      box.innerHTML = html;
+      box.onclick = function (ev) {
+        var revB = ev.target.closest ? ev.target.closest("[data-tokrev]") : null;
+        if (revB) { revokeTokenUi(revB.getAttribute("data-tokrev")); return; }
+        var rotB = ev.target.closest ? ev.target.closest("[data-tokrot]") : null;
+        if (rotB) { rotateTokenUi(rotB.getAttribute("data-tokrot")); return; }
+      };
+    }).catch(function () { var b = $("toklist"); if (b) b.innerHTML = '<div class="tokmeta">加载失败</div>'; });
+  }
+  function showTokenSecret(title, name, plain) {
+    tokenSecret = plain;
+    openModal(
+      '<h3>' + esc(title) + '</h3>' +
+      '<div class="tokmeta">名称：' + esc(name) + '</div>' +
+      '<div class="toksecret">' + esc(plain) + '</div>' +
+      '<div class="tokwarn">关闭后无法再次查看，请立即复制保存。</div>' +
+      '<div class="btnrow"><button class="tbtn" id="tokcopy">复制</button><button class="tbtn" id="tokdone">我已保存，关闭</button></div>'
+    );
+    $("tokcopy").onclick = function () { doCopy(tokenSecret || "", $("tokcopy")); };
+    $("tokdone").onclick = closeModal;
+  }
+  function createTokenUi() {
+    var inp = $("tokname");
+    var name = inp ? inp.value.trim() : "";
+    if (!name) { toast("请输入令牌名称"); if (inp) inp.focus(); return; }
+    tokApi("POST", "/api/tokens", { name: name }).then(function (res) {
+      if (res.s === 401) { location.reload(); return; }
+      if (!res.d || !res.d.success) {
+        toast(res.d && res.d.error === "NAME_TAKEN" ? "该名称已被使用（活跃令牌名唯一）"
+          : res.d && res.d.error === "INVALID_NAME" ? "名称非法：仅限字母/数字/_/-，最长 64"
+          : "创建失败");
+        return;
+      }
+      showTokenSecret("令牌已创建", name, res.d.token);
+    }).catch(function () { toast("创建失败"); });
+  }
+  function tokNameOf(id) {
+    var t = tokListCache.filter(function (x) { return x.id === id; })[0];
+    return t ? t.name : id;
+  }
+  function revokeTokenUi(id) {
+    if (!confirm("确认吊销令牌「" + tokNameOf(id) + "」？使用该令牌的接入将立即失效（403）。")) return;
+    tokApi("POST", "/api/tokens/revoke", { id: id }).then(function (res) {
+      if (res.s === 401) { location.reload(); return; }
+      if (res.d && res.d.success) { toast(res.d.revoked ? "已吊销" : "该令牌已是吊销状态"); loadTokens(); }
+      else if (res.d && res.d.error === "NOT_FOUND") { toast("令牌不存在"); loadTokens(); }
+      else toast("吊销失败");
+    }).catch(function () { toast("吊销失败"); });
+  }
+  function rotateTokenUi(id) {
+    if (!confirm("确认轮换令牌「" + tokNameOf(id) + "」？旧令牌立即吊销失效，并生成同名新令牌。")) return;
+    tokApi("POST", "/api/tokens/rotate", { id: id }).then(function (res) {
+      if (res.s === 401) { location.reload(); return; }
+      if (res.d && res.d.success) { showTokenSecret("令牌已轮换", tokNameOf(id), res.d.token); }
+      else if (res.d && res.d.error === "NOT_FOUND") { toast("令牌不存在"); loadTokens(); }
+      else toast("轮换失败");
+    }).catch(function () { toast("轮换失败"); });
   }
   function registerSW() {
     try { if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(function () {}); } catch (e) {}
@@ -3315,6 +3444,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   });
   /* 统计：先关菜单，再开统计弹层 */
   $("mstats").onclick = function () { setSetOpen(false); openStats(); };
+  $("mtokens").onclick = function () { setSetOpen(false); openTokens(); };
   /* 免打扰：回填开关与时段；保存只写 dnd（提示音由 soundon 即时生效，不在此保存） */
   var dnd = getDND();
   $("stdnd").checked = !!dnd.on;
@@ -3659,6 +3789,8 @@ const LOGIN_HTML = String.raw`<!DOCTYPE html>
 /* ---------------- 定时清理：保留天数由变量 RETENTION_DAYS 控制（默认 30） ---------------- */
 
 async function handleCron(env) {
+  /* 定时清理路径同样自愈（覆盖 scheduled 触发时不经 fetch 入口的平台） */
+  await ensureSchema(env);
   const days = Math.max(1, parseInt(env.RETENTION_DAYS, 10) || DEFAULT_RETENTION_DAYS);
   const res = await env.DB.prepare(
     `DELETE FROM messages WHERE received_at < datetime('now', ?1)`
@@ -3667,6 +3799,330 @@ async function handleCron(env) {
     `DELETE FROM messages WHERE deleted_at IS NOT NULL AND deleted_at < datetime('now', '-7 days')`
   ).run();
   console.log(`[cron] cleaned ${res.meta ? res.meta.changes : 0} old, purged ${purged.meta ? purged.meta.changes : 0} deleted`);
+}
+
+/* ---------------- schema 幂等自愈 ---------------- */
+
+/* ==== SCHEMA_SQL BEGIN（由 platforms/gen_app.py 从根 schema.sql 同步，勿手工修改）==== */
+const SCHEMA_SQL = `
+-- SMS Gateway D1 schema
+-- 设备表：device 列存 App 模板 name 字段（自定义设备名），device+sim 唯一；alias 为可选别名
+CREATE TABLE IF NOT EXISTS devices (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  device     TEXT    NOT NULL DEFAULT 'unknown',
+  sim        TEXT    NOT NULL DEFAULT '',
+  alias      TEXT    NOT NULL DEFAULT '',
+  created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_key ON devices(device, sim);
+
+-- 消息表：30 天保留，超期由 cron 清理；source 区分来源（sms=短信 / notify=通用推送，可自定义）
+CREATE TABLE IF NOT EXISTS messages (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  device_id   INTEGER NOT NULL REFERENCES devices(id),
+  sender      TEXT    NOT NULL DEFAULT '',
+  content     TEXT    NOT NULL DEFAULT '',
+  received_at TEXT    NOT NULL,
+  source      TEXT    NOT NULL DEFAULT 'sms',
+  created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+  deleted_at  TEXT,
+  starred     INTEGER NOT NULL DEFAULT 0,
+  read_at     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_messages_device_time ON messages(device_id, received_at DESC);
+CREATE INDEX IF NOT EXISTS idx_messages_time ON messages(received_at);
+-- 去重：同设备+发件人+内容+秒级时间 不重复入库
+CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_dedup
+  ON messages(device_id, sender, content, received_at);
+-- 来源筛选索引
+CREATE INDEX IF NOT EXISTS idx_messages_source ON messages(source, received_at DESC);
+
+-- 已有库升级：为旧 messages 表补 source 列（新库执行上面的建表已包含，此句幂等报错可忽略）
+-- ALTER TABLE messages ADD COLUMN source TEXT NOT NULL DEFAULT 'sms';
+-- 已有库升级（软删除）：为旧 messages 表补 deleted_at 列（新库建表已包含；D1/Turso 旧库需手动执行一次）
+-- ALTER TABLE messages ADD COLUMN deleted_at TEXT;
+-- ALTER TABLE messages ADD COLUMN starred INTEGER NOT NULL DEFAULT 0;
+-- ALTER TABLE messages ADD COLUMN read_at TEXT;
+
+-- 接入令牌表：多命名令牌 + 单设备可吊销 + 哈希存储（明文只在创建/轮换时返回一次，库内只存 SHA-256）
+CREATE TABLE IF NOT EXISTS tokens (
+  id            TEXT    PRIMARY KEY,
+  name          TEXT    NOT NULL,
+  token_hash    TEXT    NOT NULL,
+  token_prefix  TEXT    NOT NULL DEFAULT '',
+  created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
+  last_used_at  TEXT,
+  revoked_at    TEXT
+);
+-- 活跃令牌命名唯一（部分索引：吊销行保留原名作审计痕迹，不占用命名）
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tokens_name_active ON tokens(name) WHERE revoked_at IS NULL;
+-- 鉴权主路径：按哈希精确查找（SHA-256 定长，唯一索引即防碰撞重复）
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tokens_hash ON tokens(token_hash);
+-- 吊销过滤辅助索引（第 2 步鉴权与第 3 步后台列表按 revoked_at 过滤）
+CREATE INDEX IF NOT EXISTS idx_tokens_revoked ON tokens(revoked_at);
+`;
+/* ==== SCHEMA_SQL END ==== */
+
+/* 自愈完成的 DB 实例集合（WeakSet 按 env.DB 键控：每个库实例只自愈一次，多库/测试互不干扰） */
+const schemaHealed = new WeakSet();
+/* 第 4 步升级可观测：记录每个 DB 实例最近一次 schema 自愈结果（成功/失败 + 时间 + 错误摘要），
+   经 GET /api/stats（管理接口，isAuthed）透出，供存量用户升级后自检；不落库、不引依赖。 */
+const schemaStatus = new WeakMap();
+
+/* 把内嵌 SCHEMA_SQL 拆成可独立执行的幂等语句（去注释行、按分号切分）。
+   kind: "table"=CREATE TABLE / "index"=CREATE INDEX（含 UNIQUE INDEX）/ "other"=其余 */
+function schemaStatements(kind) {
+  const out = [];
+  for (const raw of SCHEMA_SQL.split(";")) {
+    const sql = raw.split("\n").filter(l => !l.trim().startsWith("--")).join("\n").trim();
+    if (!sql) continue;
+    const head = sql.slice(0, sql.indexOf("(") === -1 ? sql.length : sql.indexOf("(")).toUpperCase();
+    const isIndex = head.includes("CREATE INDEX") || head.includes("CREATE UNIQUE INDEX");
+    const isTable = head.includes("CREATE TABLE");
+    if (kind === "table" && isTable) out.push(sql);
+    else if (kind === "index" && isIndex) out.push(sql);
+    else if (!kind && !isTable && !isIndex) out.push(sql);
+  }
+  return out;
+}
+
+/* 从内嵌 SCHEMA_SQL 解析「表 → 列名 → 列定义」映射，用于缺列检测与自动补列。
+   约束：ALTER TABLE ADD COLUMN 无法添加 PRIMARY KEY/UNIQUE 列；新增列须带默认值或可空（schema.sql 现有约定如此）。 */
+function schemaColumnMap() {
+  const map = {};
+  for (const m of SCHEMA_SQL.matchAll(/CREATE TABLE IF NOT EXISTS (\w+)\s*\(([\s\S]*?)\)\s*;/g)) {
+    const cols = {};
+    for (const line of m[2].split("\n")) {
+      const t = line.replace(/--.*$/, "").trim().replace(/,+$/, "").trim();
+      if (!t) continue;
+      const cm = t.match(/^(\w+)\s+(.+)$/);
+      if (!cm) continue;
+      if (["PRIMARY", "UNIQUE", "FOREIGN", "CHECK", "CONSTRAINT"].includes(cm[1].toUpperCase())) continue;
+      cols[cm[1]] = cm[2].trim();
+    }
+    map[m[1]] = cols;
+  }
+  return map;
+}
+
+/* 幂等自愈：缺表建表（CREATE IF NOT EXISTS）+ 缺列检测补列（PRAGMA table_info 查列再 ALTER）。
+   任何失败仅告警不阻断主流程（静默降级），且不标记完成——下次请求自动重试。
+   覆盖六平台：D1 / Turso / 本地 SQLite 三类适配层均支持 prepare→all/run 与 PRAGMA。 */
+async function ensureSchema(env) {
+  if (!env || !env.DB || schemaHealed.has(env.DB)) return;
+  try {
+    /* 顺序有讲究：建表 → 补列 → 建索引。索引可能引用新列，
+       若先建索引，旧库缺列会导致索引创建失败并中断自愈，补列永远执行不到 */
+    for (const sql of schemaStatements("table")) await env.DB.prepare(sql).run();
+    const colMap = schemaColumnMap();
+    for (const table of Object.keys(colMap)) {
+      const info = await env.DB.prepare(`PRAGMA table_info(${table})`).all();
+      const have = new Set((info.results || []).map(r => String(r.name || "")));
+      for (const [col, def] of Object.entries(colMap[table])) {
+        if (have.has(col)) continue;
+        try {
+          await env.DB.prepare(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`).run();
+        } catch (e) {
+          /* 并发首请求可能同时补同一列：重复列错误视为成功 */
+          if (!/duplicate column/i.test(String(e && e.message || e))) throw e;
+        }
+      }
+    }
+    for (const sql of schemaStatements("index")) await env.DB.prepare(sql).run();
+    schemaHealed.add(env.DB);
+    schemaStatus.set(env.DB, { state: "ok", at: nowUTC(), error: "" });
+  } catch (e) {
+    /* 失败同样记录：管理页统计弹窗可见「最近自愈失败 + 原因」，未标记完成 → 下次请求自动重试 */
+    schemaStatus.set(env.DB, { state: "failed", at: nowUTC(), error: String((e && e.message) || e).slice(0, 200) });
+    console.warn("[schema] 幂等自愈失败（不阻断主流程，下次请求重试）:", e && e.message);
+  }
+}
+
+/* ---------------- 接入令牌数据层（多命名令牌 + 单设备可吊销 + 哈希存储） ----------------
+ * 数据层供接入鉴权 verifyInboundToken（第 2 步已接 /api/receive、/api/push）与
+ * 第 3 步管理 API/后台 UI 复用；/api/cron 不纳入库内令牌（只认环境变量）。
+ * 安全原则：明文只在 createToken/rotateToken 返回一次（调用方负责只展示一次）；
+ * 库内只存 SHA-256 哈希（token_hash 唯一索引精确命中即鉴权主路径，SHA-256 定长无长度泄漏）；
+ * listTokens 永不返回明文或哈希；吊销写 revoked_at 保留审计痕迹，不物理删除。 */
+
+const TOKEN_NAME_MAX = 64;
+const TOKEN_NAME_RE = /^[A-Za-z0-9_-]+$/;
+/* last_used_at 节流阈值（秒）：距上次更新超过该值才写库。
+   避免每条消息一次写放大（D1 免费额度写入次数有限）；阈值 60s 兼顾统计精度与写入成本 */
+const TOKEN_TOUCH_INTERVAL = 60;
+
+async function sha256Hex(text) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(text)));
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+function randHex(bytes) {
+  const a = new Uint8Array(bytes);
+  crypto.getRandomValues(a);
+  return [...a].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+
+/* 创建命名令牌：返回 { ok, id, token（明文，仅此一次） }；重名/非法名返回 { ok:false, error } */
+async function createToken(env, name) {
+  const n = String(name || "").trim();
+  if (!n || n.length > TOKEN_NAME_MAX || !TOKEN_NAME_RE.test(n)) {
+    return { ok: false, error: "INVALID_NAME" };
+  }
+  const plain = "smsw_" + randHex(32);
+  const id = randHex(16);
+  try {
+    await env.DB.prepare(
+      "INSERT INTO tokens (id, name, token_hash, token_prefix, created_at) VALUES (?, ?, ?, ?, ?)"
+    ).bind(id, n, await sha256Hex(plain), plain.slice(0, 12), nowUTC()).run();
+  } catch (e) {
+    /* 活跃命名唯一（部分唯一索引 idx_tokens_name_active）：重名创建拒绝 */
+    if (/unique/i.test(String(e && e.message || e))) return { ok: false, error: "NAME_TAKEN" };
+    throw e;
+  }
+  return { ok: true, id, token: plain };
+}
+
+/* 后台列表（第 3 步用）：永不返回明文与哈希；活跃在前，其余按创建时间倒序 */
+async function listTokens(env) {
+  const rows = await env.DB.prepare(
+    "SELECT id, name, token_prefix, created_at, last_used_at, revoked_at FROM tokens ORDER BY (revoked_at IS NULL) DESC, created_at DESC, id"
+  ).all();
+  return rows.results || [];
+}
+
+/* 鉴权查找（第 2 步用）：按哈希精确命中，返回行（含 revoked_at，由鉴权层判断有效性）或 null */
+async function findTokenByHash(env, hash) {
+  const row = await env.DB.prepare(
+    "SELECT id, name, token_hash, token_prefix, created_at, last_used_at, revoked_at FROM tokens WHERE token_hash = ?"
+  ).bind(String(hash || "")).first();
+  return row || null;
+}
+
+/* 吊销：写 revoked_at（幂等）。revoked=false 表示令牌不存在或本就未激活 */
+async function revokeToken(env, id) {
+  const r = await env.DB.prepare(
+    "UPDATE tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL"
+  ).bind(nowUTC(), String(id || "")).run();
+  return { ok: true, revoked: ((r.meta && r.meta.changes) || 0) > 0 };
+}
+
+/* 轮换 = 吊销旧 + 建新同名（旧行吊销后让出活跃命名，部分唯一索引保证不冲突）。
+   返回 { ok, id, token（新明文，仅此一次） }；极小概率窗口（吊销后建新失败）时透传错误 */
+async function rotateToken(env, id) {
+  const old = await env.DB.prepare("SELECT name FROM tokens WHERE id = ? AND revoked_at IS NULL")
+    .bind(String(id || "")).first();
+  if (!old) return { ok: false, error: "NOT_FOUND" };
+  const rv = await revokeToken(env, id);
+  if (!rv.revoked) return { ok: false, error: "NOT_FOUND" };
+  const created = await createToken(env, old.name);
+  if (!created.ok) return created;
+  return created;
+}
+
+/* 记录最后使用时间（第 2 步鉴权命中后调用）。
+   节流：单语句条件更新——last_used_at 为空或早于 cutoff 才写，省一次读往返 */
+async function touchLastUsed(env, id) {
+  const cutoff = new Date(Date.now() - TOKEN_TOUCH_INTERVAL * 1000).toISOString().replace("T", " ").slice(0, 19);
+  await env.DB.prepare(
+    "UPDATE tokens SET last_used_at = ? WHERE id = ? AND (last_used_at IS NULL OR last_used_at < ?)"
+  ).bind(nowUTC(), String(id || ""), cutoff).run();
+}
+
+/* ---------------- 接入鉴权（第 2 步）：单一校验函数，/api/receive 与 /api/push 共用 ----------------
+ * 平滑迁移：库内令牌优先——SHA-256 哈希精确命中且未吊销（revoked_at IS NULL），命中即 touchLastUsed；
+ * 环境变量 RECEIVE_TOKEN 兜底——迁移期存量接入继续有效，全部令牌入库后可设
+ * DISABLE_RECEIVE_TOKEN="true" 停用兜底（默认未设 = 兜底启用），只认库内令牌。
+ * fail-closed：兜底停用或 RECEIVE_TOKEN 未配置且库内无命中 → 一律拒绝；DB 异常向上抛 → 500，同样拒绝。
+ * token 来源（沿用原 handler 解析优先级「query 优先于 body」，新增两种请求头携带为超集扩展）：
+ *   X-Receive-Token 头 → ?token= query → Authorization: Bearer → body.token（由调用方传入） */
+async function verifyInboundToken(request, env, url, bodyToken) {
+  const header = String(request.headers.get("X-Receive-Token") || "").trim();
+  const query = url.searchParams.get("token") || "";
+  const bearer = String(request.headers.get("Authorization") || "").replace(/^Bearer\s+/i, "").trim();
+  const provided = header || query || bearer || String(bodyToken || "");
+  if (!provided) return false;
+
+  /* 1) 库内令牌优先：哈希精确命中且未吊销才放行（吊销行命中后落入环境变量兜底判定，天然 fail-closed） */
+  const row = await findTokenByHash(env, await sha256Hex(provided));
+  if (row && row.revoked_at === null) {
+    await touchLastUsed(env, row.id);
+    return true;
+  }
+
+  /* 2) 环境变量兜底：仅字符串 "true"（忽略大小写/空白）视为停用，与 ENABLE_AUTH 开关语义一致 */
+  if (String(env.DISABLE_RECEIVE_TOKEN || "").trim().toLowerCase() !== "true" &&
+      env.RECEIVE_TOKEN && safeEqual(provided, env.RECEIVE_TOKEN)) {
+    return true;
+  }
+  return false;
+}
+
+/* ---------------- 接入令牌管理 API（第 3 步）：创建 / 列表 / 吊销 / 轮换 ----------------
+ * 鉴权：四个路径均不在 isPublicApi 白名单 → 路由层统一 isAuthed 会话鉴权，未登录一律 401。
+ * CSRF 防护选型：强制 Content-Type: application/json（简单请求不可伪造该头，跨站带 JSON
+ * 内容类型必触发 CORS 预检；本服务 ACAO:* 无凭据 + 会话 Cookie SameSite=Lax，跨站写请求
+ * 既过不了预检也带不上会话）。不选 Origin/Referer 同源校验：反代/网关场景 Origin 可能
+ * 缺失或被剥离，误杀风险高。写操作另复用 allowWrite 限速（每 IP 120 次/分）。
+ * 错误码约定：NAME_TAKEN / INVALID_NAME → 400；NOT_FOUND → 404；其余 500（全局 catch，
+ * 不透内部错误原文）。明文仅创建/轮换成功时返回一次；列表永不返回明文与哈希。
+ * 吊销语义：不存在 id → 404（与轮换一致，防粘错 id 误判成功）；重复吊销已吊销 id → 幂等成功。 */
+
+/* CSRF 闸门：写接口仅接受 application/json（容忍 ; charset 等参数） */
+function tokenApiJsonOnly(request) {
+  const ct = String(request.headers.get("Content-Type") || "").trim().toLowerCase();
+  return ct === "application/json" || ct.startsWith("application/json;");
+}
+
+async function readTokenApiBody(request) {
+  try { return await request.json(); } catch { return null; }
+}
+
+async function handleListTokens(env) {
+  const rows = await listTokens(env);
+  return json({ success: true, list: rows });
+}
+
+async function handleCreateToken(request, env) {
+  if (!tokenApiJsonOnly(request)) return json({ success: false, error: "invalid content type" }, 400);
+  if (!allowWrite(request)) return json({ success: false, error: "too many requests" }, 429);
+  const body = await readTokenApiBody(request);
+  if (!body) return json({ success: false, error: "invalid json" }, 400);
+  const r = await createToken(env, body.name);
+  if (!r.ok) {
+    if (r.error === "INVALID_NAME" || r.error === "NAME_TAKEN") return json({ success: false, error: r.error }, 400);
+    return json({ success: false, error: "internal error" }, 500);
+  }
+  return json({ success: true, id: r.id, name: String(body.name === undefined || body.name === null ? "" : body.name).trim(), token_prefix: r.token.slice(0, 12), token: r.token });
+}
+
+async function handleRevokeToken(request, env) {
+  if (!tokenApiJsonOnly(request)) return json({ success: false, error: "invalid content type" }, 400);
+  if (!allowWrite(request)) return json({ success: false, error: "too many requests" }, 429);
+  const body = await readTokenApiBody(request);
+  if (!body) return json({ success: false, error: "invalid json" }, 400);
+  const id = String(body.id === undefined || body.id === null ? "" : body.id).trim();
+  /* 先查存在性：区分「不存在 → 404」与「已吊销 → 幂等成功」（数据层 revokeToken 两者同为 revoked:false） */
+  const row = await env.DB.prepare("SELECT id, revoked_at FROM tokens WHERE id = ?").bind(id).first();
+  if (!row) return json({ success: false, error: "NOT_FOUND" }, 404);
+  if (row.revoked_at !== null) return json({ success: true, revoked: false, already_revoked: true });
+  const rv = await revokeToken(env, id);
+  if (!rv.ok) return json({ success: false, error: "internal error" }, 500);
+  return json({ success: true, revoked: true });
+}
+
+async function handleRotateToken(request, env) {
+  if (!tokenApiJsonOnly(request)) return json({ success: false, error: "invalid content type" }, 400);
+  if (!allowWrite(request)) return json({ success: false, error: "too many requests" }, 429);
+  const body = await readTokenApiBody(request);
+  if (!body) return json({ success: false, error: "invalid json" }, 400);
+  const id = String(body.id === undefined || body.id === null ? "" : body.id).trim();
+  const r = await rotateToken(env, id);
+  if (!r.ok) {
+    if (r.error === "NOT_FOUND") return json({ success: false, error: "NOT_FOUND" }, 404);
+    if (r.error === "INVALID_NAME" || r.error === "NAME_TAKEN") return json({ success: false, error: r.error }, 400);
+    return json({ success: false, error: "internal error" }, 500);
+  }
+  return json({ success: true, id: r.id, token_prefix: r.token.slice(0, 12), token: r.token });
 }
 
 /* ---------------- 路由 ---------------- */
@@ -3688,6 +4144,9 @@ export async function fetchApp(request, env, ctx) {
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: { ...SECURITY_HEADERS, ...CORS } });
 
     try {
+      /* schema 幂等自愈：每个 DB 实例仅首次请求执行（缺表建表/缺列补列，失败不阻断） */
+      await ensureSchema(env);
+
       /* 登录开关：开启后，除推送接口与登录/登出外，页面与管理 API 均需登录 */
       const isPage = path === "/" || path === "/index.html";
       const isPublicApi = path === "/api/receive" || path === "/api/push" || path === "/api/login" || path === "/api/logout" ||
@@ -3712,6 +4171,19 @@ export async function fetchApp(request, env, ctx) {
       }
       if (path === "/api/logout" && request.method === "POST") {
         return handleLogout(request, env);
+      }
+      /* 接入令牌管理（第 3 步）：不在 isPublicApi 白名单 → 未登录一律 401 */
+      if (path === "/api/tokens" && request.method === "GET") {
+        return await handleListTokens(env);
+      }
+      if (path === "/api/tokens" && request.method === "POST") {
+        return await handleCreateToken(request, env);
+      }
+      if (path === "/api/tokens/revoke" && request.method === "POST") {
+        return await handleRevokeToken(request, env);
+      }
+      if (path === "/api/tokens/rotate" && request.method === "POST") {
+        return await handleRotateToken(request, env);
       }
       /* 定时清理 HTTP 触发（与移植平台入口级 /api/cron 行为一致）：
          Cloudflare 平台 cron 之外，也允许外部调度器调 GET /api/cron?token=<RECEIVE_TOKEN> 触发 */
@@ -3812,4 +4284,15 @@ export async function handleCronRequest(request, env) {
   }
   await runCron(env);
   return json({ success: true });
+}
+
+/* ---------------- 接入令牌数据层导出（供测试与第 3 步管理 API 复用） ---------------- */
+
+export {
+  createToken,
+  listTokens,
+  findTokenByHash,
+  revokeToken,
+  rotateToken,
+  touchLastUsed,
 }

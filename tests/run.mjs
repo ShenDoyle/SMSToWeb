@@ -5,11 +5,12 @@
  *       登录鉴权、http cookie 降级、防锁死、写入限速、管理页开关 UI。
  * 运行：node tests/run.mjs   （退出码 0=全过，1=有失败，2=异常）
  */
-import { fetchApp, runCron, handleCronRequest } from "../platforms/node/app.js";
+import { fetchApp, runCron, handleCronRequest, createToken, listTokens, findTokenByHash, revokeToken, rotateToken, touchLastUsed } from "../platforms/node/app.js";
 import { LocalDatabase } from "../platforms/node/db.js";
 import { rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 const DB = join(tmpdir(), "smstoweb_test_" + process.pid + ".db");
 let pass = 0, fail = 0;
@@ -21,6 +22,25 @@ function check(cond, name) {
 function group(t) { console.log("\n# " + t); }
 function cleanup() {
   for (const suf of ["", "-wal", "-shm", "-journal"]) { try { rmSync(DB + suf, { force: true }); } catch (_) {} }
+}
+function cleanupPath(p) {
+  for (const suf of ["", "-wal", "-shm", "-journal"]) { try { rmSync(p + suf, { force: true }); } catch (_) {} }
+}
+/* 最小 D1 风格包装：包住裸 node:sqlite 库（绕过 LocalDatabase 构造期的自动建表），验证运行时自愈与数据层本身 */
+function makeD1(raw) {
+  return {
+    prepare(sql) {
+      const stmt = raw.prepare(sql);
+      let args = [];
+      const st = {
+        bind: (...a) => { args = a; return st; },
+        all: async () => ({ results: stmt.all(...args) }),
+        first: async () => { const rows = stmt.all(...args); return rows.length ? rows[0] : null; },
+        run: async () => { const r = stmt.run(...args); return { meta: { changes: Number(r.changes) || 0, last_row_id: Number(r.lastInsertRowid) || 0 } }; },
+      };
+      return st;
+    },
+  };
 }
 
 const db = new LocalDatabase(DB);
@@ -48,9 +68,360 @@ async function call(method, path, e, opts) {
 async function main() {
   const e0 = env();
 
+  group("schema 幂等自愈（旧库缺列 → 运行时自动补列，不再 500）");
+  {
+    const legacyPath = join(tmpdir(), "smstoweb_legacy_" + process.pid + ".db");
+    cleanupPath(legacyPath);
+    /* 复刻 2026-10-22 故障现场：messages 表无 deleted_at/starred/read_at（软删除功能上线前的旧库） */
+    const raw = new DatabaseSync(legacyPath);
+    raw.exec(`CREATE TABLE devices (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      device TEXT NOT NULL DEFAULT 'unknown',
+      sim TEXT NOT NULL DEFAULT '',
+      alias TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+    raw.exec("CREATE UNIQUE INDEX idx_devices_key ON devices(device, sim)");
+    raw.exec(`CREATE TABLE messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      device_id INTEGER NOT NULL REFERENCES devices(id),
+      sender TEXT NOT NULL DEFAULT '',
+      content TEXT NOT NULL DEFAULT '',
+      received_at TEXT NOT NULL,
+      source TEXT NOT NULL DEFAULT 'sms',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+    raw.exec("INSERT INTO devices(device, sim) VALUES ('旧手机','13800000000')");
+    raw.exec("INSERT INTO messages(device_id, sender, content, received_at, source) VALUES (1,'10086','旧库验证码 654321','2026-11-01 10:00:00','sms')");
+    const colsBefore = raw.prepare("PRAGMA table_info(messages)").all().map(c => String(c.name));
+    /* 最小 D1 风格包装：直接包住裸库（绕过 LocalDatabase 构造期的自动建表），验证 worker.js 的 ensureSchema 本身 */
+    const legacyDb = {
+      prepare(sql) {
+        const stmt = raw.prepare(sql);
+        let args = [];
+        const st = {
+          bind: (...a) => { args = a; return st; },
+          all: async () => ({ results: stmt.all(...args) }),
+          first: async () => { const rows = stmt.all(...args); return rows.length ? rows[0] : null; },
+          run: async () => { const r = stmt.run(...args); return { meta: { changes: Number(r.changes) || 0, last_row_id: Number(r.lastInsertRowid) || 0 } }; },
+        };
+        return st;
+      },
+    };
+    const envL = { DB: legacyDb, RECEIVE_TOKEN: "tok", ENABLE_AUTH: "", ADMIN_PASSWORD: "", SESSION_SECRET: "test-session-secret-0123456789abcdef", RETENTION_DAYS: "30" };
+    check(!colsBefore.includes("starred") && !colsBefore.includes("deleted_at") && !colsBefore.includes("read_at"), "自愈前旧库确无 starred/deleted_at/read_at 列（故障现场成立）");
+    const r1 = await call("GET", "/api/messages", envL);
+    check(r1.status === 200 && r1.data && Array.isArray(r1.data.list), "缺列旧库列表接口 → 200（自愈生效，不再 500）");
+    const colsAfter = raw.prepare("PRAGMA table_info(messages)").all().map(c => String(c.name));
+    check(colsAfter.includes("deleted_at") && colsAfter.includes("starred") && colsAfter.includes("read_at"), "缺失列已被自动补齐（PRAGMA table_info 前后对比）");
+    const r2 = await call("GET", "/api/messages", envL);
+    check(r2.status === 200 && r2.data && r2.data.list.length >= 1 && r2.data.list.some(m => m.content === "旧库验证码 654321"), "自愈后二次请求幂等 → 200 且旧数据可读");
+    try { raw.close(); } catch (_) {}
+    cleanupPath(legacyPath);
+  }
+
+  group("旧库 + 新代码端到端（第 4 步：legacy 无 tokens 表 → 首请求自愈 → 令牌全链路可用）");
+  {
+    const upPath = join(tmpdir(), "smstoweb_upgrade_" + process.pid + ".db");
+    cleanupPath(upPath);
+    /* 复刻存量用户现场：老版本建的库（devices + messages，无 tokens 表，含一条历史数据） */
+    const raw = new DatabaseSync(upPath);
+    raw.exec(`CREATE TABLE devices (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      device TEXT NOT NULL DEFAULT 'unknown',
+      sim TEXT NOT NULL DEFAULT '',
+      alias TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+    raw.exec("CREATE UNIQUE INDEX idx_devices_key ON devices(device, sim)");
+    raw.exec(`CREATE TABLE messages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      device_id INTEGER NOT NULL REFERENCES devices(id),
+      sender TEXT NOT NULL DEFAULT '',
+      content TEXT NOT NULL DEFAULT '',
+      received_at TEXT NOT NULL,
+      source TEXT NOT NULL DEFAULT 'sms',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+    raw.exec("INSERT INTO devices(device, sim) VALUES ('老手机','13900000000')");
+    raw.exec("INSERT INTO messages(device_id, sender, content, received_at, source) VALUES (1,'10086','升级前历史短信','2026-11-01 09:00:00','sms')");
+    check(raw.prepare("PRAGMA table_info(tokens)").all().length === 0, "升级前现场成立：旧库无 tokens 表");
+    /* 独立 XFF 桶：本组含 receive 写调用，避开与其他组共用的默认 IP 限速桶 */
+    const XFFU = { "X-Forwarded-For": "203.0.113.88, 10.0.0.8" };
+    const legacyDb = {
+      prepare(sql) {
+        const stmt = raw.prepare(sql);
+        let args = [];
+        const st = {
+          bind: (...a) => { args = a; return st; },
+          all: async () => ({ results: stmt.all(...args) }),
+          first: async () => { const rows = stmt.all(...args); return rows.length ? rows[0] : null; },
+          run: async () => { const r = stmt.run(...args); return { meta: { changes: Number(r.changes) || 0, last_row_id: Number(r.lastInsertRowid) || 0 } }; },
+        };
+        return st;
+      },
+    };
+    const envU = { DB: legacyDb, RECEIVE_TOKEN: "legacy-env-tok", ENABLE_AUTH: "true", ADMIN_PASSWORD: "secret", SESSION_SECRET: "test-session-secret-0123456789abcdef", RETENTION_DAYS: "30" };
+    const HU = (extra) => Object.assign({}, XFFU, extra || {});
+
+    /* 1) 升级动作 = 仅换代码：首个请求触发 ensureSchema 自动建表/建索引 */
+    let r = await call("POST", "/api/login", envU, { headers: HU(), body: { password: "secret" } });
+    check(r.status === 200 && /sms_auth=/.test(r.setCookie), "旧库登录 → 200（入口 ensureSchema 自愈已随首请求完成）");
+    const ckU = "sms_auth=" + ((r.setCookie.match(/sms_auth=([^;]*)/) || [])[1] || "");
+    const tokCols = raw.prepare("PRAGMA table_info(tokens)").all().map(c => String(c.name));
+    check(tokCols.join(",") === "id,name,token_hash,token_prefix,created_at,last_used_at,revoked_at", "首请求后 tokens 表自动建齐（7 列，无明文列）");
+    const idxU = raw.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='tokens'").all().map(i => String(i.name));
+    check(idxU.includes("idx_tokens_hash") && idxU.includes("idx_tokens_name_active") && idxU.includes("idx_tokens_revoked"), "tokens 三索引自动建齐");
+
+    /* 2) 管理与接入链路「能用」（不只不 500）：建令牌 → 收发 → 吊销 → 403 */
+    r = await call("POST", "/api/tokens", envU, { headers: HU(), body: { name: "legacy-phone" }, cookie: ckU });
+    check(r.status === 200 && r.data.success && typeof r.data.token === "string", "旧库上创建命名令牌 → 200 返回一次性明文");
+    const upTok = r.data.token, upId = r.data.id;
+    r = await call("POST", "/api/receive", envU, { headers: HU({ "X-Receive-Token": upTok }), body: { name: "老手机", sim: "13900000000", from: "10086", content: "升级后第一条短信", time: "2026-11-02 12:00:00" } });
+    check(r.status === 200, "库内令牌 /api/receive → 200（升级后接入链路可用）");
+    r = await call("POST", "/api/receive", envU, { headers: HU({ "X-Receive-Token": "legacy-env-tok" }), body: { name: "老手机", sim: "13900000000", from: "10086", content: "环境变量兜底短信", time: "2026-11-02 12:01:00" } });
+    check(r.status === 200, "环境变量兜底令牌 → 200（升级不破坏存量接入）");
+    r = await call("POST", "/api/tokens/revoke", envU, { headers: HU(), body: { id: upId }, cookie: ckU });
+    check(r.status === 200 && r.data.revoked === true, "吊销 → 200（泄露止血能力在旧库上可用）");
+    r = await call("POST", "/api/receive", envU, { headers: HU({ "X-Receive-Token": upTok }), body: { name: "老手机", sim: "13900000000", from: "10086", content: "吊销后", time: "2026-11-02 12:02:00" } });
+    check(r.status === 403, "吊销后同令牌 → 403（状态码分布同旧版）");
+    r = await call("GET", "/api/messages", envU, { headers: HU(), cookie: ckU });
+    check(r.status === 200 && r.data.list.some(m => m.content === "升级后第一条短信") && r.data.list.some(m => m.content === "升级前历史短信"), "升级后新旧消息共存可读");
+
+    /* 3) 升级可观测：stats 响应含最近一次 schema 自愈结果 */
+    r = await call("GET", "/api/stats", envU, { headers: HU(), cookie: ckU });
+    check(r.status === 200 && r.data.schema && r.data.schema.state === "ok" && typeof r.data.schema.at === "string" && r.data.schema.at.length >= 16, "stats 响应含 schema 自愈结果（state=ok + 时间，升级自检落点）");
+
+    try { raw.close(); } catch (_) {}
+    cleanupPath(upPath);
+  }
+
+  group("令牌数据层（tokens 表 + 哈希存储 + 吊销/轮换/节流，零鉴权行为变更）");
+  {
+    const tokPath = join(tmpdir(), "smstoweb_tokens_" + process.pid + ".db");
+    cleanupPath(tokPath);
+    const rawT = new DatabaseSync(tokPath);   // 裸空库：连 devices/messages 都没有，靠 ensureSchema 自愈建全
+    const tokDb = makeD1(rawT);
+    const envT = { DB: tokDb, RECEIVE_TOKEN: "tok", ENABLE_AUTH: "", ADMIN_PASSWORD: "", SESSION_SECRET: "test-session-secret-0123456789abcdef", RETENTION_DAYS: "30" };
+    const toHex = async (s) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)))].map(b => b.toString(16).padStart(2, "0")).join("");
+
+    /* 空库幂等（补第 0 步判据 2 遗留）：ensureSchema 建出 tokens 表与全部索引 */
+    let rr = await call("GET", "/api/messages", envT);
+    check(rr.status === 200, "空库首请求 → 200（ensureSchema 建全三表）");
+    const tcols = rawT.prepare("PRAGMA table_info(tokens)").all().map(c => String(c.name));
+    check(tcols.join(",") === "id,name,token_hash,token_prefix,created_at,last_used_at,revoked_at", "tokens 表 7 列齐全且无明文列（PRAGMA table_info）");
+    const idxs = rawT.prepare("SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name='tokens'").all();
+    const idxMap = Object.fromEntries(idxs.map(i => [String(i.name), String(i.sql || "").toUpperCase()]));
+    check(!!idxMap["idx_tokens_hash"] && idxMap["idx_tokens_hash"].includes("UNIQUE"), "idx_tokens_hash 为唯一索引（鉴权主路径）");
+    check(!!idxMap["idx_tokens_name_active"] && idxMap["idx_tokens_name_active"].includes("UNIQUE") && idxMap["idx_tokens_name_active"].includes("WHERE"), "idx_tokens_name_active 为部分唯一索引（活跃命名唯一）");
+    check(!!idxMap["idx_tokens_revoked"], "idx_tokens_revoked 普通索引存在");
+    rr = await call("GET", "/api/messages", envT);
+    check(rr.status === 200, "空库二次请求幂等 → 200");
+
+    /* 创建 + 哈希正确性 */
+    const c1 = await createToken(envT, "phone-main");
+    check(c1.ok === true && typeof c1.token === "string" && c1.token.startsWith("smsw_") && c1.id, "createToken 返回一次性明文（smsw_ 前缀）与 id");
+    const wantHash = await toHex(c1.token);
+    const found = await findTokenByHash(envT, wantHash);
+    check(!!found && found.token_hash === wantHash && found.name === "phone-main" && found.id === c1.id && found.revoked_at === null, "SHA-256(明文) 精确命中库内 token_hash（哈希正确性，行含 revoked_at）");
+
+    /* 列表：永不返回明文与哈希 */
+    const lt = await listTokens(envT);
+    const ltStr = JSON.stringify(lt);
+    check(lt.length === 1 && ltStr.indexOf(c1.token) === -1 && ltStr.indexOf(wantHash) === -1 && !("token_hash" in lt[0]), "listTokens 无明文、无哈希、无 token_hash 字段");
+    check(lt[0].token_prefix === c1.token.slice(0, 12), "token_prefix 为明文前 12 位（后台辨识用，不含完整明文）");
+
+    /* 命名边界与重名拒绝 */
+    check((await createToken(envT, "phone-main")).error === "NAME_TAKEN", "活跃重名创建 → NAME_TAKEN");
+    check((await createToken(envT, "")).error === "INVALID_NAME", "空名 → INVALID_NAME");
+    check((await createToken(envT, "bad name!")).error === "INVALID_NAME", "非法字符名 → INVALID_NAME（白名单 A-Za-z0-9_-）");
+    check((await createToken(envT, "x".repeat(65))).error === "INVALID_NAME", "超长名(>64) → INVALID_NAME");
+
+    /* last_used_at 节流（写放大控制，阈值 60s） */
+    await touchLastUsed(envT, c1.id);
+    const t1 = rawT.prepare("SELECT last_used_at FROM tokens WHERE id = ?").all(c1.id)[0].last_used_at;
+    await touchLastUsed(envT, c1.id);
+    const t2 = rawT.prepare("SELECT last_used_at FROM tokens WHERE id = ?").all(c1.id)[0].last_used_at;
+    check(!!t1 && t1 === t2, "touchLastUsed 节流生效（60 秒内重复调用不产生第二次写）");
+
+    /* 吊销 */
+    const rv = await revokeToken(envT, c1.id);
+    check(rv.ok === true && rv.revoked === true, "revokeToken → revoked:true");
+    const foundR = await findTokenByHash(envT, wantHash);
+    check(!!foundR && foundR.revoked_at !== null, "吊销后 findTokenByHash 返回行带 revoked_at（第 2 步鉴权据此拒绝）");
+    check((await revokeToken(envT, c1.id)).revoked === false, "重复吊销幂等 → revoked:false");
+
+    /* 吊销让出命名：同名可重建（审计行保留） */
+    const c2 = await createToken(envT, "phone-main");
+    check(c2.ok === true && c2.id && c2.id !== c1.id, "吊销后同名可重建（部分唯一索引只约束活跃行）");
+
+    /* 轮换 = 吊销旧 + 建新同名 */
+    const c3 = await createToken(envT, "nas-script");
+    const rot = await rotateToken(envT, c3.id);
+    check(rot.ok === true && typeof rot.token === "string" && rot.id && rot.id !== c3.id, "rotateToken 返回新明文与新 id");
+    const oldRow = await findTokenByHash(envT, await toHex(c3.token));
+    check(!!oldRow && oldRow.revoked_at !== null, "轮换后旧明文的哈希行已带 revoked_at");
+    const newRow = await findTokenByHash(envT, await toHex(rot.token));
+    check(!!newRow && newRow.revoked_at === null && newRow.id === rot.id && newRow.name === "nas-script", "轮换后新明文命中活跃行且保留原命名");
+    check((await rotateToken(envT, "nonexistent")).ok === false, "轮换不存在的 id → 失败（NOT_FOUND）");
+    const c4 = await createToken(envT, "nas-script");
+    check(c4.ok === false && c4.error === "NAME_TAKEN", "轮换后原命名仍被新令牌占用 → NAME_TAKEN");
+
+    /* 别名场景运行时用例（补第 0 步偏差 2 技术债） */
+    const aliasRow = await tokDb.prepare("SELECT t.token_hash FROM tokens t WHERE t.token_hash = ?").bind(await toHex(rot.token)).first();
+    check(!!aliasRow && aliasRow.token_hash === await toHex(rot.token), "别名查询（SELECT t.token_hash FROM tokens t WHERE t.token_hash=?）运行时可跑");
+
+    rawT.close();
+    cleanupPath(tokPath);
+  }
+
+  group("接入鉴权（库内令牌优先 + 环境变量兜底 + DISABLE_RECEIVE_TOKEN + fail-closed）");
+  {
+    const auPath = join(tmpdir(), "smstoweb_auth_" + process.pid + ".db");
+    cleanupPath(auPath);
+    const rawA = new DatabaseSync(auPath);   // 裸空库：靠 ensureSchema 自愈建全
+    const auDb = makeD1(rawA);
+    const baseEnv = { DB: auDb, RECEIVE_TOKEN: "tok", ENABLE_AUTH: "", ADMIN_PASSWORD: "", SESSION_SECRET: "test-session-secret-0123456789abcdef", RETENTION_DAYS: "30" };
+
+    /* fail-closed：空库 + 无任何有效令牌，任意携带方式一律拒绝 */
+    let ra = await call("POST", "/api/push?token=anything", baseEnv, { body: { content: "x" } });
+    check(ra.status === 403, "空库无令牌 → push 403（fail-closed，状态码同旧版）");
+    ra = await call("GET", "/api/receive?name=d&content=c&token=anything", baseEnv);
+    check(ra.status === 403, "空库无令牌 → receive 403（fail-closed，状态码同旧版）");
+    ra = await call("POST", "/api/push", baseEnv, { body: { content: "x", token: "anything" } });
+    check(ra.status === 403, "仅 body.token 且不匹配 → push 403");
+
+    /* 环境变量兜底（迁移期）：RECEIVE_TOKEN 匹配即放行，四种携带方式 */
+    ra = await call("POST", "/api/push?token=tok", baseEnv, { body: { content: "via query", time: "2026-11-02 10:00:00" } });
+    check(ra.status === 200 && ra.data && ra.data.success === true, "兜底：query ?token=tok → 200");
+    ra = await call("POST", "/api/push", baseEnv, { headers: { "X-Receive-Token": "tok" }, body: { content: "via header", time: "2026-11-02 10:01:00" } });
+    check(ra.status === 200, "兜底：X-Receive-Token 头 → 200");
+    ra = await call("POST", "/api/push", baseEnv, { headers: { "Authorization": "Bearer tok" }, body: { content: "via bearer", time: "2026-11-02 10:02:00" } });
+    check(ra.status === 200, "兜底：Authorization Bearer → 200");
+    ra = await call("POST", "/api/push", baseEnv, { body: { content: "via body", token: "tok", time: "2026-11-02 10:03:00" } });
+    check(ra.status === 200, "兜底：body.token → 200");
+
+    /* 库内令牌：哈希精确命中放行 + last_used_at 记录 + 错字符拒绝 */
+    const ca = await createToken(baseEnv, "auth-dev");
+    check(ca.ok === true && ca.token, "createToken（鉴权组库内令牌）");
+    ra = await call("POST", "/api/push", baseEnv, { headers: { "X-Receive-Token": ca.token }, body: { content: "db token", time: "2026-11-02 10:04:00" } });
+    check(ra.status === 200, "库内令牌：X-Receive-Token 头 → 200");
+    ra = await call("POST", "/api/receive?token=" + encodeURIComponent(ca.token), baseEnv, { body: { name: "db手机", sim: "13900000000", from: "10086", content: "db短信", time: "2026-11-02 10:05:00" } });
+    check(ra.status === 200 && ra.data && ra.data.success === true, "库内令牌：receive query → 200");
+    const lrow = await listTokens(baseEnv);
+    check(lrow.length === 1 && lrow[0].last_used_at !== null, "库内令牌命中后 last_used_at 已记录");
+    const wrong = ca.token.slice(0, -1) + (ca.token.endsWith("0") ? "1" : "0");
+    ra = await call("POST", "/api/push", baseEnv, { body: { content: "wrong", token: wrong } });
+    check(ra.status === 403, "库内令牌错一个字符 → 403（哈希精确匹配，状态码同旧版）");
+
+    /* 吊销即拒绝 */
+    await revokeToken(baseEnv, ca.id);
+    ra = await call("POST", "/api/push", baseEnv, { headers: { "X-Receive-Token": ca.token }, body: { content: "revoked", time: "2026-11-02 10:06:00" } });
+    check(ra.status === 403, "库内令牌吊销后 → 403（fail-closed，状态码同旧版）");
+
+    /* DISABLE_RECEIVE_TOKEN="true"：停用环境变量兜底，只认库内令牌（拍板点 2：默认未设 = 兜底启用） */
+    const disEnv = Object.assign({}, baseEnv, { DISABLE_RECEIVE_TOKEN: "true" });
+    ra = await call("POST", "/api/push?token=tok", disEnv, { body: { content: "no fallback", time: "2026-11-02 10:07:00" } });
+    check(ra.status === 403, "开关开启：环境变量兜底停用 → 403（fail-closed，状态码同旧版）");
+    const cb = await createToken(baseEnv, "only-db");
+    ra = await call("POST", "/api/push", disEnv, { headers: { "Authorization": "Bearer " + cb.token }, body: { content: "db only", time: "2026-11-02 10:08:00" } });
+    check(ra.status === 200, "开关开启：库内令牌仍放行 → 200");
+    ra = await call("POST", "/api/push?token=tok", baseEnv, { body: { content: "fallback again", time: "2026-11-02 10:09:00" } });
+    check(ra.status === 200, "开关未设（默认）：兜底启用 → 200");
+    ra = await call("POST", "/api/push?token=tok", Object.assign({}, baseEnv, { DISABLE_RECEIVE_TOKEN: "TRUE " }), { body: { content: "case", time: "2026-11-02 10:10:00" } });
+    check(ra.status === 403, "开关取值容忍大小写/空白：\"TRUE \" 亦视为停用 → 403");
+
+    /* /api/cron 不纳入库内令牌（拍板点 1）：库内令牌无效，环境变量行为不变 */
+    ra = await handleCronRequest(R("GET", "/api/cron?token=" + encodeURIComponent(cb.token), {}), baseEnv);
+    check(ra.status === 403, "/api/cron 库内令牌 → 403（不纳入库内令牌）");
+    ra = await handleCronRequest(R("GET", "/api/cron?token=tok", {}), baseEnv);
+    check(ra.status === 200, "/api/cron 环境变量 → 200（行为不变）");
+
+    rawA.close();
+    cleanupPath(auPath);
+  }
+
+  group("令牌管理 API + CSRF + 收发联动（第 3 步）");
+  {
+    const mtPath = join(tmpdir(), "smstoweb_mtok_" + process.pid + ".db");
+    cleanupPath(mtPath);
+    const rawM = new DatabaseSync(mtPath);
+    const mDb = makeD1(rawM);
+    const eM = { DB: mDb, RECEIVE_TOKEN: "tok", ENABLE_AUTH: "true", ADMIN_PASSWORD: "secret", SESSION_SECRET: "test-session-secret-0123456789abcdef", RETENTION_DAYS: "30" };
+    /* 独立 XFF 桶（clientIp 取最右段）：本组写调用较多，避开与其他组共用的默认 IP 限速桶 */
+    const XFF = { "X-Forwarded-For": "203.0.113.77, 10.0.0.7" };
+    const H = (extra) => Object.assign({}, XFF, extra || {});
+
+    /* 1) 未登录访问四个令牌管理接口 → 401 逐个验（不在 isPublicApi 白名单 → 路由层统一鉴权） */
+    let rm = await call("GET", "/api/tokens", eM, { headers: H() });
+    check(rm.status === 401, "未登录 GET /api/tokens → 401");
+    rm = await call("POST", "/api/tokens", eM, { headers: H(), body: { name: "x" } });
+    check(rm.status === 401, "未登录 POST /api/tokens → 401");
+    rm = await call("POST", "/api/tokens/revoke", eM, { headers: H(), body: { id: "x" } });
+    check(rm.status === 401, "未登录 POST /api/tokens/revoke → 401");
+    rm = await call("POST", "/api/tokens/rotate", eM, { headers: H(), body: { id: "x" } });
+    check(rm.status === 401, "未登录 POST /api/tokens/rotate → 401");
+
+    /* 登录拿会话 */
+    rm = await call("POST", "/api/login", eM, { headers: H(), body: { password: "secret" } });
+    check(rm.status === 200 && /sms_auth=/.test(rm.setCookie), "登录 → 200 且下发会话 cookie");
+    const ckM = "sms_auth=" + ((rm.setCookie.match(/sms_auth=([^;]*)/) || [])[1] || "");
+
+    /* 2) CSRF 防护（选型：强制 Content-Type: application/json，简单请求不可伪造） */
+    rm = await call("POST", "/api/tokens", eM, { headers: H({ "Content-Type": "text/plain" }), body: '{"name":"csrf"}', cookie: ckM });
+    check(rm.status === 400, "CSRF：Content-Type: text/plain 写请求 → 400（简单请求被拒）");
+    rm = await call("POST", "/api/tokens/revoke", eM, { headers: H({ "Content-Type": "application/x-www-form-urlencoded" }), body: "id=x", cookie: ckM });
+    check(rm.status === 400, "CSRF：表单 Content-Type 写请求 → 400");
+
+    /* 3) 登录后 CRUD：创建（明文一次）+ 列表（无明文无哈希） */
+    rm = await call("POST", "/api/tokens", eM, { headers: H(), body: { name: "ui-phone" }, cookie: ckM });
+    check(rm.status === 200 && rm.data.success && typeof rm.data.token === "string" && rm.data.token.startsWith("smsw_"), "创建令牌 → 200 返回一次性明文（smsw_ 前缀）");
+    check(rm.data.token_prefix === rm.data.token.slice(0, 12) && rm.data.name === "ui-phone", "创建响应含 token_prefix（前 12 位）与 name");
+    const mtok1 = rm.data.token, mid1 = rm.data.id;
+    rm = await call("GET", "/api/tokens", eM, { headers: H(), cookie: ckM });
+    const listStr = JSON.stringify(rm.data);
+    check(rm.status === 200 && rm.data.success && rm.data.list.length === 1, "登录后 GET /api/tokens → 200 且 1 条");
+    check(listStr.indexOf(mtok1) === -1 && listStr.indexOf("token_hash") === -1 && !("token" in rm.data.list[0]), "GET 响应体无明文、无 token_hash 字段（前端从源头就没有）");
+    check(rm.data.list[0].revoked_at === null && rm.data.list[0].name === "ui-phone", "列表行含 revoked_at（活跃行 null）与 name");
+
+    /* 4) 错误码：NAME_TAKEN / INVALID_NAME → 400；吊销/轮换不存在 → 404 */
+    rm = await call("POST", "/api/tokens", eM, { headers: H(), body: { name: "ui-phone" }, cookie: ckM });
+    check(rm.status === 400 && rm.data.error === "NAME_TAKEN", "创建重名 → 400 NAME_TAKEN");
+    rm = await call("POST", "/api/tokens", eM, { headers: H(), body: { name: "bad name!" }, cookie: ckM });
+    check(rm.status === 400 && rm.data.error === "INVALID_NAME", "创建非法名 → 400 INVALID_NAME");
+    rm = await call("POST", "/api/tokens/revoke", eM, { headers: H(), body: { id: "nonexistent" }, cookie: ckM });
+    check(rm.status === 404 && rm.data.error === "NOT_FOUND", "吊销不存在 id → 404 NOT_FOUND");
+    rm = await call("POST", "/api/tokens/rotate", eM, { headers: H(), body: { id: "nonexistent" }, cookie: ckM });
+    check(rm.status === 404 && rm.data.error === "NOT_FOUND", "轮换不存在 id → 404 NOT_FOUND");
+    rm = await call("POST", "/api/tokens", eM, { headers: H(), body: "not json", cookie: ckM });
+    check(rm.status === 400, "创建坏 JSON → 400 invalid json");
+
+    /* 5) 轮换联动：旧明文 403、新明文 200（/api/push 走第 2 步鉴权） */
+    rm = await call("POST", "/api/push", eM, { headers: H({ "X-Receive-Token": mtok1 }), body: { content: "before rotate", time: "2026-11-02 11:00:00" } });
+    check(rm.status === 200, "轮换前：库内令牌推送 → 200");
+    rm = await call("POST", "/api/tokens/rotate", eM, { headers: H(), body: { id: mid1 }, cookie: ckM });
+    check(rm.status === 200 && rm.data.success && typeof rm.data.token === "string" && rm.data.id && rm.data.id !== mid1, "轮换 → 200 返回新明文与新 id（各一次）");
+    const mtok2 = rm.data.token, mid2 = rm.data.id;
+    rm = await call("POST", "/api/push", eM, { headers: H({ "X-Receive-Token": mtok1 }), body: { content: "after rotate", time: "2026-11-02 11:01:00" } });
+    check(rm.status === 403, "轮换后：旧明文推送 → 403");
+    rm = await call("POST", "/api/push", eM, { headers: H({ "X-Receive-Token": mtok2 }), body: { content: "new token", time: "2026-11-02 11:02:00" } });
+    check(rm.status === 200, "轮换后：新明文推送 → 200");
+
+    /* 6) 吊销联动 + 幂等 + 审计痕迹（/api/receive 联动第 2 步） */
+    rm = await call("POST", "/api/tokens/revoke", eM, { headers: H(), body: { id: mid2 }, cookie: ckM });
+    check(rm.status === 200 && rm.data.revoked === true, "吊销 → 200 revoked:true");
+    rm = await call("POST", "/api/receive", eM, { headers: H({ "X-Receive-Token": mtok2 }), body: { name: "手机", sim: "13900000000", from: "10086", content: "revoked", time: "2026-11-02 11:03:00" } });
+    check(rm.status === 403, "吊销后：/api/receive 用该令牌 → 403（联动第 2 步）");
+    rm = await call("POST", "/api/tokens/revoke", eM, { headers: H(), body: { id: mid2 }, cookie: ckM });
+    check(rm.status === 200 && rm.data.revoked === false && rm.data.already_revoked === true, "重复吊销已吊销 id → 幂等成功（revoked:false）");
+    rm = await call("GET", "/api/tokens", eM, { headers: H(), cookie: ckM });
+    check(rm.data.list.length === 2 && rm.data.list.every(t => t.revoked_at !== null), "列表 2 条且均已吊销（审计行保留，活跃在前排序反转）");
+    const listStr2 = JSON.stringify(rm.data);
+    check(listStr2.indexOf(mtok1) === -1 && listStr2.indexOf(mtok2) === -1 && listStr2.indexOf("token_hash") === -1, "吊销后列表仍无明文无哈希");
+
+    rawM.close();
+    cleanupPath(mtPath);
+  }
+
   group("收发 / 去重 / 列表 / 筛选 / 长轮询 / 删除 / 截断（免登录）");
   let r = await call("POST", "/api/push", e0, { body: { content: "no token here" } });
-  check(r.status === 403, "push 无 token → 403");
+  check(r.status === 403, "push 无 token → 403（未命中库内与环境变量，fail-closed，状态码同旧版）");
 
   const body1 = { source: "notify", sender: "web-01", content: "hello 1", time: "2026-10-17 12:00:00" };
   r = await call("POST", "/api/push?token=tok", e0, { body: body1 });
