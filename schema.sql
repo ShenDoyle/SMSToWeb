@@ -38,6 +38,8 @@ CREATE INDEX IF NOT EXISTS idx_messages_source ON messages(source, received_at D
 -- ALTER TABLE messages ADD COLUMN read_at TEXT;
 
 -- 接入令牌表：多命名令牌 + 单设备可吊销 + 哈希存储（明文只在创建/轮换时返回一次，库内只存 SHA-256）
+-- expires_at：到期时间（UTC "YYYY-MM-DD HH:MM:SS"，NULL=永久；过期鉴权拒绝但不写 revoked_at，保留审计）
+-- note：备注（便于区分令牌用途，默认空串）
 CREATE TABLE IF NOT EXISTS tokens (
   id            TEXT    PRIMARY KEY,
   name          TEXT    NOT NULL,
@@ -45,7 +47,9 @@ CREATE TABLE IF NOT EXISTS tokens (
   token_prefix  TEXT    NOT NULL DEFAULT '',
   created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
   last_used_at  TEXT,
-  revoked_at    TEXT
+  revoked_at    TEXT,
+  expires_at    TEXT,
+  note          TEXT    NOT NULL DEFAULT ''
 );
 -- 活跃令牌命名唯一（部分索引：吊销行保留原名作审计痕迹，不占用命名）
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tokens_name_active ON tokens(name) WHERE revoked_at IS NULL;
@@ -53,3 +57,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_tokens_name_active ON tokens(name) WHERE r
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tokens_hash ON tokens(token_hash);
 -- 吊销过滤辅助索引（第 2 步鉴权与第 3 步后台列表按 revoked_at 过滤）
 CREATE INDEX IF NOT EXISTS idx_tokens_revoked ON tokens(revoked_at);
+-- 已有库升级（有效期/备注）：ensureSchema 按上方建表语句自动补列（PRAGMA + ALTER，幂等），无需手动执行
+-- ALTER TABLE tokens ADD COLUMN expires_at TEXT;
+-- ALTER TABLE tokens ADD COLUMN note TEXT NOT NULL DEFAULT '';

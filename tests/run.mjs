@@ -3,7 +3,8 @@
  * 直接测生成的平台无关核心 platforms/node/app.js 的 fetchApp / runCron / handleCronRequest，
  * 覆盖：收发、去重、列表、来源筛选、长轮询、删除、正文截断、定时清理、cron 鉴权、
  *       登录鉴权、http cookie 降级、防锁死、写入限速、管理页开关 UI、
-*       令牌边界（并发重名/轮换审计/前缀不泄漏/节流端到端/开关边界值）、令牌管理与登录限速。
+*       令牌边界（并发重名/轮换审计/前缀不泄漏/节流端到端/开关边界值）、令牌管理与登录限速、
+*       令牌有效期与备注（过期 403/格式校验/轮换透传/旧库补列自愈）、页脚版本号。
  * 运行：node tests/run.mjs   （退出码 0=全过，1=有失败，2=异常）
  */
 import { fetchApp, runCron, handleCronRequest, createToken, listTokens, findTokenByHash, revokeToken, rotateToken, touchLastUsed } from "../platforms/node/app.js";
@@ -168,7 +169,7 @@ async function main() {
     check(r.status === 200 && /sms_auth=/.test(r.setCookie), "旧库登录 → 200（入口 ensureSchema 自愈已随首请求完成）");
     const ckU = "sms_auth=" + ((r.setCookie.match(/sms_auth=([^;]*)/) || [])[1] || "");
     const tokCols = raw.prepare("PRAGMA table_info(tokens)").all().map(c => String(c.name));
-    check(tokCols.join(",") === "id,name,token_hash,token_prefix,created_at,last_used_at,revoked_at", "首请求后 tokens 表自动建齐（7 列，无明文列）");
+    check(tokCols.join(",") === "id,name,token_hash,token_prefix,created_at,last_used_at,revoked_at,expires_at,note", "首请求后 tokens 表自动建齐（9 列，含 expires_at/note，无明文列）");
     const idxU = raw.prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='tokens'").all().map(i => String(i.name));
     check(idxU.includes("idx_tokens_hash") && idxU.includes("idx_tokens_name_active") && idxU.includes("idx_tokens_revoked"), "tokens 三索引自动建齐");
 
@@ -209,7 +210,7 @@ async function main() {
     let rr = await call("GET", "/api/messages", envT);
     check(rr.status === 200, "空库首请求 → 200（ensureSchema 建全三表）");
     const tcols = rawT.prepare("PRAGMA table_info(tokens)").all().map(c => String(c.name));
-    check(tcols.join(",") === "id,name,token_hash,token_prefix,created_at,last_used_at,revoked_at", "tokens 表 7 列齐全且无明文列（PRAGMA table_info）");
+    check(tcols.join(",") === "id,name,token_hash,token_prefix,created_at,last_used_at,revoked_at,expires_at,note", "tokens 表 9 列齐全（含 expires_at/note）且无明文列（PRAGMA table_info）");
     const idxs = rawT.prepare("SELECT name, sql FROM sqlite_master WHERE type='index' AND tbl_name='tokens'").all();
     const idxMap = Object.fromEntries(idxs.map(i => [String(i.name), String(i.sql || "").toUpperCase()]));
     check(!!idxMap["idx_tokens_hash"] && idxMap["idx_tokens_hash"].includes("UNIQUE"), "idx_tokens_hash 为唯一索引（鉴权主路径）");
@@ -555,6 +556,102 @@ async function main() {
     check(r6.status === 429, "登录限速：5 次失败后第 6 次即使密码正确 → 429（锁 10 分钟）");
     rawL5.close();
     cleanupPath(l5Path);
+  }
+
+  /* ===== 插队组：令牌有效期与备注 + 页脚版本号 ===== */
+  group("插队组 · 令牌有效期与备注（创建回显/格式校验/过期 403/软失效审计/轮换透传/旧库补列自愈）+ 页脚版本号");
+  {
+    const exPath = join(tmpdir(), "smstoweb_exp_" + process.pid + ".db");
+    cleanupPath(exPath);
+    const rawE = new DatabaseSync(exPath);
+    const eE = { DB: makeD1(rawE), RECEIVE_TOKEN: "tok", ENABLE_AUTH: "true", ADMIN_PASSWORD: "secret", SESSION_SECRET: "test-session-secret-0123456789abcdef", RETENTION_DAYS: "30" };
+    const XE = { "X-Forwarded-For": "203.0.113.71, 10.0.0.71" };
+    const HE = (extra) => Object.assign({}, XE, extra || {});
+
+    let re = await call("POST", "/api/login", eE, { headers: HE(), body: { password: "secret" } });
+    check(re.status === 200, "有效期组：登录 → 200");
+    const ckE = "sms_auth=" + ((re.setCookie.match(/sms_auth=([^;]*)/) || [])[1] || "");
+
+    /* 1) 带备注 + 天数有效期创建：创建响应含规范化 expires_at；列表回显 note/expires_at 与服务端 now */
+    re = await call("POST", "/api/tokens", eE, { headers: HE(), body: { name: "note-dev", note: "主力机接入", expires_in_days: 7 }, cookie: ckE });
+    check(re.status === 200 && re.data.success && typeof re.data.expires_at === "string" && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(re.data.expires_at), "创建带备注+7天有效期 → 200 且响应含 UTC expires_at");
+    const noteDevTok = re.data.token;
+    re = await call("GET", "/api/tokens", eE, { headers: HE(), cookie: ckE });
+    const noteDevRow = (re.data.list || []).filter(t => t.name === "note-dev")[0];
+    check(re.data.success && typeof re.data.now === "string" && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(re.data.now), "列表响应含服务端 UTC now（前端过期判定依据，客户端时钟不可信）");
+    check(!!noteDevRow && noteDevRow.note === "主力机接入" && typeof noteDevRow.expires_at === "string" && noteDevRow.expires_at > re.data.now, "列表行回显备注与未来有效期（7 天）");
+    const listStrE = JSON.stringify(re.data);
+    check(listStrE.indexOf(noteDevTok) === -1 && listStrE.indexOf("token_hash") === -1, "含备注的列表响应仍无明文无哈希");
+
+    /* 2) 自定义到期日：YYYY-MM-DD 规范化为当日 UTC 23:59:59（当日全天有效） */
+    re = await call("POST", "/api/tokens", eE, { headers: HE(), body: { name: "date-dev", expires_at: "2026-11-10" }, cookie: ckE });
+    check(re.status === 200 && re.data.expires_at === "2026-11-10 23:59:59", "自定义到期日 2026-11-10 → 规范化为 2026-11-10 23:59:59（UTC 当日末）");
+
+    /* 3) 过期令牌接入：软失效 403（不写 revoked_at，保留审计）；未过期令牌 200 */
+    re = await call("POST", "/api/tokens", eE, { headers: HE(), body: { name: "exp-dev", expires_at: "2000-01-01 00:00:00" }, cookie: ckE });
+    check(re.status === 200 && re.data.success, "创建过去时间的令牌 → 200（格式合法即入库，由鉴权判失效）");
+    const expTok = re.data.token, expId = re.data.id;
+    re = await call("POST", "/api/push", eE, { headers: HE({ "X-Receive-Token": expTok }), body: { content: "expired try", time: "2026-11-02 13:00:00" } });
+    check(re.status === 403, "过期令牌 /api/push → 403（视同无效，状态码同吊销）");
+    const expRow = rawE.prepare("SELECT revoked_at, expires_at FROM tokens WHERE id = ?").get(expId);
+    check(!!expRow && expRow.revoked_at === null && expRow.expires_at === "2000-01-01 00:00:00", "过期拒绝后 revoked_at 仍为 null（软失效不吊销，保留审计痕迹）");
+    re = await call("POST", "/api/push", eE, { headers: HE({ "X-Receive-Token": noteDevTok }), body: { content: "fresh token", time: "2026-11-02 13:01:00" } });
+    check(re.status === 200, "未过期令牌（7 天）→ 200（有效期不影响有效令牌接入）");
+
+    /* 4) 参数校验：INVALID_EXPIRY / INVALID_NOTE → 400（含不存在日期 2026-02-30 的 ISO 严格解析拒绝） */
+    re = await call("POST", "/api/tokens", eE, { headers: HE(), body: { name: "bad-1", expires_in_days: 0 }, cookie: ckE });
+    check(re.status === 400 && re.data.error === "INVALID_EXPIRY", "expires_in_days=0 → 400 INVALID_EXPIRY");
+    re = await call("POST", "/api/tokens", eE, { headers: HE(), body: { name: "bad-2", expires_in_days: 1.5 }, cookie: ckE });
+    check(re.status === 400 && re.data.error === "INVALID_EXPIRY", "expires_in_days=1.5（非整数）→ 400 INVALID_EXPIRY");
+    re = await call("POST", "/api/tokens", eE, { headers: HE(), body: { name: "bad-3", expires_at: "2026-02-30" }, cookie: ckE });
+    check(re.status === 400 && re.data.error === "INVALID_EXPIRY", "expires_at=2026-02-30（不存在日期）→ 400 INVALID_EXPIRY");
+    re = await call("POST", "/api/tokens", eE, { headers: HE(), body: { name: "bad-4", expires_at: "next week" }, cookie: ckE });
+    check(re.status === 400 && re.data.error === "INVALID_EXPIRY", "expires_at 非法格式 → 400 INVALID_EXPIRY");
+    re = await call("POST", "/api/tokens", eE, { headers: HE(), body: { name: "bad-5", note: "x".repeat(201) }, cookie: ckE });
+    check(re.status === 400 && re.data.error === "INVALID_NOTE", "备注 201 字 → 400 INVALID_NOTE");
+
+    /* 5) 轮换透传：新令牌沿用原备注与有效期，旧行吊销（轮换不偷偷续期） */
+    re = await call("POST", "/api/tokens", eE, { headers: HE(), body: { name: "rot-exp", note: "轮换透传验证", expires_in_days: 30 }, cookie: ckE });
+    const rotId = re.data.id, rotExp = re.data.expires_at;
+    re = await call("POST", "/api/tokens/rotate", eE, { headers: HE(), body: { id: rotId }, cookie: ckE });
+    check(re.status === 200 && typeof re.data.expires_at === "string", "轮换 → 200 且响应含沿用后的 expires_at");
+    re = await call("GET", "/api/tokens", eE, { headers: HE(), cookie: ckE });
+    const rotRows = re.data.list.filter(t => t.name === "rot-exp");
+    const rotOld = rotRows.find(t => t.id === rotId), rotNew = rotRows.find(t => t.id !== rotId);
+    check(!!rotOld && !!rotNew && rotOld.revoked_at !== null && rotNew.revoked_at === null, "轮换后旧行吊销、新行活跃");
+    check(!!rotNew && rotNew.note === "轮换透传验证" && rotNew.expires_at === rotExp, "新行沿用原备注与有效期（不偷偷续期）");
+
+    /* 6) 旧库补列自愈：旧版 7 列 tokens 表 → 首请求自动补 expires_at/note → 带有效期创建可用 */
+    const lgPath = join(tmpdir(), "smstoweb_exp_legacy_" + process.pid + ".db");
+    cleanupPath(lgPath);
+    const rawL = new DatabaseSync(lgPath);
+    rawL.exec("CREATE TABLE tokens (id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT NOT NULL, token_prefix TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT (datetime('now')), last_used_at TEXT, revoked_at TEXT)");
+    rawL.exec("CREATE UNIQUE INDEX idx_tokens_name_active ON tokens(name) WHERE revoked_at IS NULL");
+    rawL.exec("CREATE UNIQUE INDEX idx_tokens_hash ON tokens(token_hash)");
+    rawL.exec("CREATE INDEX idx_tokens_revoked ON tokens(revoked_at)");
+    const eL = { DB: makeD1(rawL), RECEIVE_TOKEN: "tok", ENABLE_AUTH: "true", ADMIN_PASSWORD: "secret", SESSION_SECRET: "test-session-secret-0123456789abcdef", RETENTION_DAYS: "30" };
+    const XLG = { "X-Forwarded-For": "203.0.113.72, 10.0.0.72" };
+    const colsBefore2 = rawL.prepare("PRAGMA table_info(tokens)").all().map(c => String(c.name));
+    check(!colsBefore2.includes("expires_at") && !colsBefore2.includes("note"), "补列自愈：旧 tokens 表确无 expires_at/note 列（现场成立）");
+    let rl = await call("POST", "/api/login", eL, { headers: XLG, body: { password: "secret" } });
+    check(rl.status === 200, "旧 7 列 tokens 表登录 → 200（首请求触发补列自愈，不 500）");
+    const colsAfter2 = rawL.prepare("PRAGMA table_info(tokens)").all().map(c => String(c.name));
+    check(colsAfter2.includes("expires_at") && colsAfter2.includes("note"), "旧表自动补齐 expires_at/note 列（PRAGMA 前后对比）");
+    rl = await call("POST", "/api/tokens", eL, { headers: XLG, body: { name: "up-exp", note: "旧库带备注", expires_in_days: 30 }, cookie: "sms_auth=" + ((rl.setCookie.match(/sms_auth=([^;]*)/) || [])[1] || "") });
+    check(rl.status === 200 && rl.data.success && typeof rl.data.expires_at === "string", "旧库补列后创建带备注+有效期令牌 → 200");
+
+    /* 7) 页脚版本号：管理页与登录页底部均展示 v1.0.1 */
+    const pg = await fetchApp(R("GET", "/", { cookie: ckE }), eE);
+    const pgHtml = await pg.text();
+    check(pg.status === 200 && pgHtml.includes('<span class="ver">v1.0.1</span>'), "管理页页脚含版本号 v1.0.1");
+    const lg = await fetchApp(R("GET", "/", {}), eE);
+    const lgHtml = await lg.text();
+    check(lg.status === 200 && lgHtml.includes('<span class="ver">v1.0.1</span>'), "登录页页脚含版本号 v1.0.1");
+
+    rawE.close();
+    cleanupPath(exPath);
+    try { rawL.close(); } catch (_) {}
+    cleanupPath(lgPath);
   }
 
   /* ===== 基线组（第 0 步前既有）：收发核心 ===== */

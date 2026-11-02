@@ -69,13 +69,17 @@ function escAttr(s) {
 function jsStr(s) {
   return JSON.stringify(s).replace(/</g, "\\u003c");
 }
+/* 应用版本号：正式版发布固定版号，非正式版一般以小版本号递增升级；管理页/登录页底部页脚展示 */
+const APP_VERSION = "v1.0.1";
+
 /* 把页面模板中的占位标记替换为实际配置值（用函数替换器，避免值里含 $& 等特殊序列被误解释） */
 function renderHtml(html, env) {
   return html
     .replace(/__SITE_NAME__/g, function () { return escAttr(siteName(env)); })
     .replace(/__SITE_NAME_JSON__/g, function () { return jsStr(siteName(env)); })
     .replace(/__SITE_ICON__/g, function () { return escAttr(siteIcon(env)); })
-    .replace(/__DEFAULT_ICON_JSON__/g, function () { return jsStr(DEFAULT_SITE_ICON); });
+    .replace(/__DEFAULT_ICON_JSON__/g, function () { return jsStr(DEFAULT_SITE_ICON); })
+    .replace(/__APP_VERSION__/g, function () { return escAttr(APP_VERSION); });
 }
 
 /* 设备标签（网页标签展示值）由 App 消息模板的 name 字段提供，自定义命名；
@@ -1612,8 +1616,10 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .tokacts { display: flex; gap: 6px; }
   .toknote { font-size: 12px; line-height: 1.6; padding: 8px 10px; border-radius: 8px;
              background: rgba(255,180,0,.14); margin: 0 0 10px; }
-  .toknewrow { display: flex; gap: 8px; margin: 12px 0 4px; }
+  .toknewrow { display: flex; gap: 8px; margin: 12px 0 4px; flex-wrap: wrap; }
   .toknewrow input { flex: 1; min-width: 0; }
+  .toknewrow select, .toknewrow input[type="date"] { flex: 1; min-width: 0; }
+  .foot .ver { opacity: .6; }
   .toksecret { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; word-break: break-all;
                padding: 10px; border-radius: 8px; background: rgba(127,127,127,.12); user-select: all; }
   .tokwarn { color: #c0392b; font-size: 13px; font-weight: 600; margin: 10px 0; }
@@ -1736,7 +1742,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     <div id="modalbody"></div>
   </div>
 </div>
-<footer class="foot">© 2026 <a href="https://cbm.im/" target="_blank" rel="noopener noreferrer">左立方</a> · <a href="https://github.com/ShenDoyle/SMSToWeb" target="_blank" rel="noopener noreferrer">SMSToWeb</a></footer>
+<footer class="foot">© 2026 <a href="https://cbm.im/" target="_blank" rel="noopener noreferrer">左立方</a> · <a href="https://github.com/ShenDoyle/SMSToWeb" target="_blank" rel="noopener noreferrer">SMSToWeb</a> <span class="ver">__APP_VERSION__</span></footer>
 <script>
 (function () {
   var SITE_NAME = __SITE_NAME_JSON__;
@@ -3148,10 +3154,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       '<h3>接入令牌</h3>' +
       '<div class="toknote" id="toknote" hidden>当前仍可用部署时环境变量令牌接入；建议创建命名令牌后停用引导令牌（设置 DISABLE_RECEIVE_TOKEN=true）。</div>' +
       '<div id="toklist"><div class="tokmeta">加载中…</div></div>' +
-      '<div class="toknewrow"><input type="text" id="tokname" maxlength="64" placeholder="令牌名称（字母/数字/_/-）" autocomplete="off" aria-label="令牌名称"><button class="tbtn" id="tokcreate">＋ 新建令牌</button></div>'
+      '<div class="toknewrow"><input type="text" id="tokname" maxlength="64" placeholder="令牌名称（字母/数字/_/-）" autocomplete="off" aria-label="令牌名称"><button class="tbtn" id="tokcreate">＋ 新建令牌</button></div>' +
+      '<div class="toknewrow"><select id="tokexp" aria-label="有效期"><option value="0">永久有效</option><option value="7">7 天后到期</option><option value="30">30 天后到期</option><option value="90">90 天后到期</option><option value="365">365 天后到期</option><option value="custom">自定义到期日…</option></select><input type="date" id="tokexpdate" hidden aria-label="到期日期"><input type="text" id="toknotenew" maxlength="200" placeholder="备注（可选，便于区分用途）" autocomplete="off" aria-label="备注"></div>'
     );
     $("tokcreate").onclick = createTokenUi;
     $("tokname").onkeydown = function (ev) { if (ev.key === "Enter") createTokenUi(); };
+    var expSel = $("tokexp");
+    expSel.onchange = function () { $("tokexpdate").hidden = expSel.value !== "custom"; };
     loadTokens();
   }
   function loadTokens() {
@@ -3163,20 +3172,27 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       if (!box || !d) return;
       if (!d.success) { box.innerHTML = '<div class="tokmeta">加载失败</div>'; return; }
       var list = d.list || [];
+      var nowStr = String(d.now || ""); /* 服务端 UTC 时间：客户端时钟不可信，过期判定用它 */
       tokListCache = list;
       var note = $("toknote"); if (note) note.hidden = list.length > 0; /* 空态引导：库内无令牌时提示迁移路径 */
       if (!list.length) { box.innerHTML = '<div class="tokmeta">还没有库内令牌。</div>'; return; }
       var html = "";
       list.forEach(function (t) {
         var rev = t.revoked_at !== null && t.revoked_at !== undefined;
-        html += '<div class="tokrow' + (rev ? ' revoked' : '') + '">' +
+        var exp = t.expires_at ? String(t.expires_at) : "";
+        var expired = !rev && !!exp && !!nowStr && exp < nowStr;
+        html += '<div class="tokrow' + ((rev || expired) ? ' revoked' : '') + '">' +
           '<div class="tokmain"><div class="tokname">' + esc(t.name) + '</div>' +
           '<div class="tokmeta">' + esc(t.token_prefix || "") + '… · 创建 ' + esc(fmtTokTime(t.created_at)) +
-          ' · 最近使用 ' + esc(fmtTokTime(t.last_used_at)) + '</div></div>' +
-          '<span class="tokbadge">' + (rev ? "已吊销" : "活跃") + '</span>' +
-          (rev ? "" : '<span class="tokacts">' +
-            '<button class="tbtn" data-tokrot="' + esc(t.id) + '">轮换</button>' +
-            '<button class="tbtn" data-tokrev="' + esc(t.id) + '">吊销</button></span>') +
+          ' · 最近使用 ' + esc(fmtTokTime(t.last_used_at)) +
+          (exp ? ' · 到期 ' + esc(fmtTokTime(exp)) : ' · 永久') +
+          (t.note ? ' · ' + esc(String(t.note)) : '') + '</div></div>' +
+          '<span class="tokbadge">' + (rev ? "已吊销" : (expired ? "已过期" : "活跃")) + '</span>' +
+          (rev ? "" : (expired
+            ? '<span class="tokacts"><button class="tbtn" data-tokrev="' + esc(t.id) + '">吊销</button></span>'
+            : '<span class="tokacts">' +
+              '<button class="tbtn" data-tokrot="' + esc(t.id) + '">轮换</button>' +
+              '<button class="tbtn" data-tokrev="' + esc(t.id) + '">吊销</button></span>')) +
           '</div>';
       });
       box.innerHTML = html;
@@ -3204,11 +3220,23 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var inp = $("tokname");
     var name = inp ? inp.value.trim() : "";
     if (!name) { toast("请输入令牌名称"); if (inp) inp.focus(); return; }
-    tokApi("POST", "/api/tokens", { name: name }).then(function (res) {
+    var payload = { name: name };
+    var ninp = $("toknotenew");
+    if (ninp && ninp.value.trim()) payload.note = ninp.value.trim();
+    var sel = $("tokexp"), dinp = $("tokexpdate");
+    if (sel && sel.value === "custom") {
+      if (!dinp || !dinp.value) { toast("请选择到期日期"); if (dinp) dinp.focus(); return; }
+      payload.expires_at = dinp.value;
+    } else if (sel && sel.value !== "0") {
+      payload.expires_in_days = parseInt(sel.value, 10) || 0;
+    }
+    tokApi("POST", "/api/tokens", payload).then(function (res) {
       if (res.s === 401) { location.reload(); return; }
       if (!res.d || !res.d.success) {
         toast(res.d && res.d.error === "NAME_TAKEN" ? "该名称已被使用（活跃令牌名唯一）"
           : res.d && res.d.error === "INVALID_NAME" ? "名称非法：仅限字母/数字/_/-，最长 64"
+          : res.d && res.d.error === "INVALID_NOTE" ? "备注过长：最长 200 字"
+          : res.d && res.d.error === "INVALID_EXPIRY" ? "有效期无效：请选择预设天数或有效日期"
           : "创建失败");
         return;
       }
@@ -3639,7 +3667,7 @@ const LOGIN_HTML = String.raw`<!DOCTYPE html>
   <input type="password" id="pw" data-i18n-ph="loginPw" placeholder="管理密码" autofocus autocomplete="current-password">
   <button id="go" data-i18n="loginBtn">登 录</button>
   <div class="err" id="err"></div>
-  <div class="foot">© 2026 <a href="https://cbm.im/" target="_blank" rel="noopener noreferrer">左立方</a> · <a href="https://github.com/ShenDoyle/SMSToWeb" target="_blank" rel="noopener noreferrer">SMSToWeb</a></div>
+  <div class="foot">© 2026 <a href="https://cbm.im/" target="_blank" rel="noopener noreferrer">左立方</a> · <a href="https://github.com/ShenDoyle/SMSToWeb" target="_blank" rel="noopener noreferrer">SMSToWeb</a> <span class="ver">__APP_VERSION__</span></div>
 </div>
 <script>
 (function () {
@@ -3845,6 +3873,8 @@ CREATE INDEX IF NOT EXISTS idx_messages_source ON messages(source, received_at D
 -- ALTER TABLE messages ADD COLUMN read_at TEXT;
 
 -- 接入令牌表：多命名令牌 + 单设备可吊销 + 哈希存储（明文只在创建/轮换时返回一次，库内只存 SHA-256）
+-- expires_at：到期时间（UTC "YYYY-MM-DD HH:MM:SS"，NULL=永久；过期鉴权拒绝但不写 revoked_at，保留审计）
+-- note：备注（便于区分令牌用途，默认空串）
 CREATE TABLE IF NOT EXISTS tokens (
   id            TEXT    PRIMARY KEY,
   name          TEXT    NOT NULL,
@@ -3852,7 +3882,9 @@ CREATE TABLE IF NOT EXISTS tokens (
   token_prefix  TEXT    NOT NULL DEFAULT '',
   created_at    TEXT    NOT NULL DEFAULT (datetime('now')),
   last_used_at  TEXT,
-  revoked_at    TEXT
+  revoked_at    TEXT,
+  expires_at    TEXT,
+  note          TEXT    NOT NULL DEFAULT ''
 );
 -- 活跃令牌命名唯一（部分索引：吊销行保留原名作审计痕迹，不占用命名）
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tokens_name_active ON tokens(name) WHERE revoked_at IS NULL;
@@ -3860,6 +3892,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_tokens_name_active ON tokens(name) WHERE r
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tokens_hash ON tokens(token_hash);
 -- 吊销过滤辅助索引（第 2 步鉴权与第 3 步后台列表按 revoked_at 过滤）
 CREATE INDEX IF NOT EXISTS idx_tokens_revoked ON tokens(revoked_at);
+-- 已有库升级（有效期/备注）：ensureSchema 按上方建表语句自动补列（PRAGMA + ALTER，幂等），无需手动执行
+-- ALTER TABLE tokens ADD COLUMN expires_at TEXT;
+-- ALTER TABLE tokens ADD COLUMN note TEXT NOT NULL DEFAULT '';
 `;
 /* ==== SCHEMA_SQL END ==== */
 
@@ -3947,6 +3982,8 @@ async function ensureSchema(env) {
 
 const TOKEN_NAME_MAX = 64;
 const TOKEN_NAME_RE = /^[A-Za-z0-9_-]+$/;
+/* 备注最大长度：便于区分令牌用途（创建传入、列表展示、轮换透传），超长在 API 层拒绝（INVALID_NOTE → 400） */
+const TOKEN_NOTE_MAX = 200;
 /* last_used_at 节流阈值（秒）：距上次更新超过该值才写库。
    避免每条消息一次写放大（D1 免费额度写入次数有限）；阈值 60s 兼顾统计精度与写入成本 */
 const TOKEN_TOUCH_INTERVAL = 60;
@@ -3962,38 +3999,43 @@ function randHex(bytes) {
   return [...a].map(b => b.toString(16).padStart(2, "0")).join("");
 }
 
-/* 创建命名令牌：返回 { ok, id, token（明文，仅此一次） }；重名/非法名返回 { ok:false, error } */
-async function createToken(env, name) {
+/* 创建命名令牌：opts 可带 note（备注，超长静默截断到 TOKEN_NOTE_MAX，API 层负责拒绝）与
+   expires_at（UTC "YYYY-MM-DD HH:MM:SS"，NULL/未传 = 永久；格式由 API 层 parseTokenExpiry 校验）。
+   返回 { ok, id, token（明文，仅此一次）, expires_at }；重名/非法名返回 { ok:false, error } */
+async function createToken(env, name, opts) {
   const n = String(name || "").trim();
   if (!n || n.length > TOKEN_NAME_MAX || !TOKEN_NAME_RE.test(n)) {
     return { ok: false, error: "INVALID_NAME" };
   }
+  const o = opts && typeof opts === "object" ? opts : {};
+  const note = String(o.note === undefined || o.note === null ? "" : o.note).trim().slice(0, TOKEN_NOTE_MAX);
+  const expiresAt = o.expires_at ? String(o.expires_at) : null;
   const plain = "smsw_" + randHex(32);
   const id = randHex(16);
   try {
     await env.DB.prepare(
-      "INSERT INTO tokens (id, name, token_hash, token_prefix, created_at) VALUES (?, ?, ?, ?, ?)"
-    ).bind(id, n, await sha256Hex(plain), plain.slice(0, 12), nowUTC()).run();
+      "INSERT INTO tokens (id, name, token_hash, token_prefix, created_at, expires_at, note) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    ).bind(id, n, await sha256Hex(plain), plain.slice(0, 12), nowUTC(), expiresAt, note).run();
   } catch (e) {
     /* 活跃命名唯一（部分唯一索引 idx_tokens_name_active）：重名创建拒绝 */
     if (/unique/i.test(String(e && e.message || e))) return { ok: false, error: "NAME_TAKEN" };
     throw e;
   }
-  return { ok: true, id, token: plain };
+  return { ok: true, id, token: plain, expires_at: expiresAt };
 }
 
-/* 后台列表（第 3 步用）：永不返回明文与哈希；活跃在前，其余按创建时间倒序 */
+/* 后台列表（第 3 步用）：永不返回明文与哈希；活跃在前，其余按创建时间倒序；含有效期与备注 */
 async function listTokens(env) {
   const rows = await env.DB.prepare(
-    "SELECT id, name, token_prefix, created_at, last_used_at, revoked_at FROM tokens ORDER BY (revoked_at IS NULL) DESC, created_at DESC, id"
+    "SELECT id, name, token_prefix, created_at, last_used_at, revoked_at, expires_at, note FROM tokens ORDER BY (revoked_at IS NULL) DESC, created_at DESC, id"
   ).all();
   return rows.results || [];
 }
 
-/* 鉴权查找（第 2 步用）：按哈希精确命中，返回行（含 revoked_at，由鉴权层判断有效性）或 null */
+/* 鉴权查找（第 2 步用）：按哈希精确命中，返回行（含 revoked_at/expires_at，由鉴权层判断有效性）或 null */
 async function findTokenByHash(env, hash) {
   const row = await env.DB.prepare(
-    "SELECT id, name, token_hash, token_prefix, created_at, last_used_at, revoked_at FROM tokens WHERE token_hash = ?"
+    "SELECT id, name, token_hash, token_prefix, created_at, last_used_at, revoked_at, expires_at FROM tokens WHERE token_hash = ?"
   ).bind(String(hash || "")).first();
   return row || null;
 }
@@ -4007,14 +4049,16 @@ async function revokeToken(env, id) {
 }
 
 /* 轮换 = 吊销旧 + 建新同名（旧行吊销后让出活跃命名，部分唯一索引保证不冲突）。
-   返回 { ok, id, token（新明文，仅此一次） }；极小概率窗口（吊销后建新失败）时透传错误 */
+   新令牌沿用原备注与有效期（可预期、可审计：轮换不偷偷续期；已过期的令牌轮换后依然不可用，
+   需要续期请吊销后重建）。返回 { ok, id, token（新明文，仅此一次）, expires_at }；
+   极小概率窗口（吊销后建新失败）时透传错误 */
 async function rotateToken(env, id) {
-  const old = await env.DB.prepare("SELECT name FROM tokens WHERE id = ? AND revoked_at IS NULL")
+  const old = await env.DB.prepare("SELECT name, note, expires_at FROM tokens WHERE id = ? AND revoked_at IS NULL")
     .bind(String(id || "")).first();
   if (!old) return { ok: false, error: "NOT_FOUND" };
   const rv = await revokeToken(env, id);
   if (!rv.revoked) return { ok: false, error: "NOT_FOUND" };
-  const created = await createToken(env, old.name);
+  const created = await createToken(env, old.name, { note: old.note, expires_at: old.expires_at });
   if (!created.ok) return created;
   return created;
 }
@@ -4028,8 +4072,15 @@ async function touchLastUsed(env, id) {
   ).bind(nowUTC(), String(id || ""), cutoff).run();
 }
 
+/* 有效期判定：expires_at 为空 = 永久；非空值与 nowUTC() 同构（UTC "YYYY-MM-DD HH:MM:SS"，
+   字符串比较即时间比较）。过期令牌软失效：鉴权视同无效，但不写 revoked_at，保留审计痕迹 */
+function isTokenExpired(expiresAt) {
+  const e = String(expiresAt === undefined || expiresAt === null ? "" : expiresAt).trim();
+  return !!e && e < nowUTC();
+}
+
 /* ---------------- 接入鉴权（第 2 步）：单一校验函数，/api/receive 与 /api/push 共用 ----------------
- * 平滑迁移：库内令牌优先——SHA-256 哈希精确命中且未吊销（revoked_at IS NULL），命中即 touchLastUsed；
+ * 平滑迁移：库内令牌优先——SHA-256 哈希精确命中且未吊销（revoked_at IS NULL）、未过期（expires_at），命中即 touchLastUsed；
  * 环境变量 RECEIVE_TOKEN 兜底——迁移期存量接入继续有效，全部令牌入库后可设
  * DISABLE_RECEIVE_TOKEN="true" 停用兜底（默认未设 = 兜底启用），只认库内令牌。
  * fail-closed：兜底停用或 RECEIVE_TOKEN 未配置且库内无命中 → 一律拒绝；DB 异常向上抛 → 500，同样拒绝。
@@ -4042,9 +4093,10 @@ async function verifyInboundToken(request, env, url, bodyToken) {
   const provided = header || query || bearer || String(bodyToken || "");
   if (!provided) return false;
 
-  /* 1) 库内令牌优先：哈希精确命中且未吊销才放行（吊销行命中后落入环境变量兜底判定，天然 fail-closed） */
+  /* 1) 库内令牌优先：哈希精确命中且未吊销、未过期才放行
+     （吊销行/过期行命中后落入环境变量兜底判定，天然 fail-closed） */
   const row = await findTokenByHash(env, await sha256Hex(provided));
-  if (row && row.revoked_at === null) {
+  if (row && row.revoked_at === null && !isTokenExpired(row.expires_at)) {
     await touchLastUsed(env, row.id);
     return true;
   }
@@ -4063,7 +4115,7 @@ async function verifyInboundToken(request, env, url, bodyToken) {
  * 内容类型必触发 CORS 预检；本服务 ACAO:* 无凭据 + 会话 Cookie SameSite=Lax，跨站写请求
  * 既过不了预检也带不上会话）。不选 Origin/Referer 同源校验：反代/网关场景 Origin 可能
  * 缺失或被剥离，误杀风险高。写操作另复用 allowWrite 限速（每 IP 120 次/分）。
- * 错误码约定：NAME_TAKEN / INVALID_NAME → 400；NOT_FOUND → 404；其余 500（全局 catch，
+ * 错误码约定：NAME_TAKEN / INVALID_NAME / INVALID_NOTE / INVALID_EXPIRY → 400；NOT_FOUND → 404；其余 500（全局 catch，
  * 不透内部错误原文）。明文仅创建/轮换成功时返回一次；列表永不返回明文与哈希。
  * 吊销语义：不存在 id → 404（与轮换一致，防粘错 id 误判成功）；重复吊销已吊销 id → 幂等成功。 */
 
@@ -4077,9 +4129,40 @@ async function readTokenApiBody(request) {
   try { return await request.json(); } catch { return null; }
 }
 
+/* 有效期参数解析（创建令牌用）：
+   - expires_in_days：正整数天数，自当前 UTC 起算（1 ~ 36500 天，0/空/未传 = 永久）；
+   - expires_at："YYYY-MM-DD"（视为当日 UTC 23:59:59 到期）或 "YYYY-MM-DD HH:MM:SS"（原样语义）；
+   - 两者都传时 expires_in_days 优先；均未传 = 永久（expires_at 存 NULL）。
+   返回 { ok:true, expires_at } 或 { ok:false }（调用方回 INVALID_EXPIRY → 400）。
+   存储值与 nowUTC() 同构（UTC "YYYY-MM-DD HH:MM:SS"），isTokenExpired 字符串比较即时间比较；
+   ISO 严格解析顺带拒绝 2026-02-30 这类不存在的日期。 */
+function parseTokenExpiry(body) {
+  const days = body.expires_in_days;
+  if (days !== undefined && days !== null && days !== "") {
+    const d = Number(days);
+    if (!Number.isInteger(d) || d < 1 || d > 36500) return { ok: false };
+    return { ok: true, expires_at: new Date(Date.now() + d * 86400000).toISOString().replace("T", " ").slice(0, 19) };
+  }
+  const raw = String(body.expires_at === undefined || body.expires_at === null ? "" : body.expires_at).trim();
+  if (!raw) return { ok: true, expires_at: null };
+  let stamp = "";
+  let expected = "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) { stamp = raw + "T23:59:59Z"; expected = raw + " 23:59:59"; }
+  else if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(raw)) { stamp = raw.replace(" ", "T") + "Z"; expected = raw; }
+  else return { ok: false };
+  const t = Date.parse(stamp);
+  if (Number.isNaN(t)) return { ok: false };
+  /* 回读校验：V8 对越界 ISO 日期（如 2026-02-30）会走宽松解析回退并顺延到实存日期，
+     必须确认解析结果与预期逐字一致，否则按非法处理 */
+  const back = new Date(t).toISOString().replace("T", " ").slice(0, 19);
+  if (back !== expected) return { ok: false };
+  return { ok: true, expires_at: back };
+}
+
 async function handleListTokens(env) {
   const rows = await listTokens(env);
-  return json({ success: true, list: rows });
+  /* now 供前端判定「已过期」：客户端时钟不可信，统一用服务端 UTC 时间比较 */
+  return json({ success: true, list: rows, now: nowUTC() });
 }
 
 async function handleCreateToken(request, env) {
@@ -4087,12 +4170,16 @@ async function handleCreateToken(request, env) {
   if (!allowWrite(request)) return json({ success: false, error: "too many requests" }, 429);
   const body = await readTokenApiBody(request);
   if (!body) return json({ success: false, error: "invalid json" }, 400);
-  const r = await createToken(env, body.name);
+  const note = String(body.note === undefined || body.note === null ? "" : body.note).trim();
+  if (note.length > TOKEN_NOTE_MAX) return json({ success: false, error: "INVALID_NOTE" }, 400);
+  const ex = parseTokenExpiry(body);
+  if (!ex.ok) return json({ success: false, error: "INVALID_EXPIRY" }, 400);
+  const r = await createToken(env, body.name, { note: note, expires_at: ex.expires_at });
   if (!r.ok) {
     if (r.error === "INVALID_NAME" || r.error === "NAME_TAKEN") return json({ success: false, error: r.error }, 400);
     return json({ success: false, error: "internal error" }, 500);
   }
-  return json({ success: true, id: r.id, name: String(body.name === undefined || body.name === null ? "" : body.name).trim(), token_prefix: r.token.slice(0, 12), token: r.token });
+  return json({ success: true, id: r.id, name: String(body.name === undefined || body.name === null ? "" : body.name).trim(), token_prefix: r.token.slice(0, 12), expires_at: r.expires_at, token: r.token });
 }
 
 async function handleRevokeToken(request, env) {
@@ -4122,7 +4209,7 @@ async function handleRotateToken(request, env) {
     if (r.error === "INVALID_NAME" || r.error === "NAME_TAKEN") return json({ success: false, error: r.error }, 400);
     return json({ success: false, error: "internal error" }, 500);
   }
-  return json({ success: true, id: r.id, token_prefix: r.token.slice(0, 12), token: r.token });
+  return json({ success: true, id: r.id, token_prefix: r.token.slice(0, 12), expires_at: r.expires_at, token: r.token });
 }
 
 /* ---------------- 路由 ---------------- */
