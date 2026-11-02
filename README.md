@@ -6,7 +6,7 @@
 
 Push SMS and notifications from an Android phone (and any other device) to the cloud in real time, and read them from a web page anywhere. Free to deploy, no server required, about 10 minutes end to end.
 
-**Current version: `v1.0.1`** — official releases carry a fixed version number (shown in the page footer); interim builds bump the patch version.
+**Current version: `v1.0.2`** — official releases carry a fixed version number (shown in the page footer); interim builds bump the patch version.
 
 - **Multi-platform deployment**: Cloudflare (primary) / Vercel / Deno Deploy / Netlify / Tencent EdgeOne Makers / Docker self-hosted — pick one of six, features fully identical
 - **Real-time receiving**: webhook push lands in the database in seconds; the web page refreshes itself, no manual work

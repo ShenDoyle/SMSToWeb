@@ -4,7 +4,8 @@
  * 覆盖：收发、去重、列表、来源筛选、长轮询、删除、正文截断、定时清理、cron 鉴权、
  *       登录鉴权、http cookie 降级、防锁死、写入限速、管理页开关 UI、
 *       令牌边界（并发重名/轮换审计/前缀不泄漏/节流端到端/开关边界值）、令牌管理与登录限速、
-*       令牌有效期与备注（过期 403/格式校验/轮换透传/旧库补列自愈）、页脚版本号。
+*       令牌有效期与备注（过期 403/格式校验/轮换透传/旧库补列自愈）、页脚版本号、
+*       会话时长可配置（settings 表 / GET·PUT /api/settings / 默认回退 / 登录 Max-Age 同步）。
  * 运行：node tests/run.mjs   （退出码 0=全过，1=有失败，2=异常）
  */
 import { fetchApp, runCron, handleCronRequest, createToken, listTokens, findTokenByHash, revokeToken, rotateToken, touchLastUsed } from "../platforms/node/app.js";
@@ -640,18 +641,100 @@ async function main() {
     rl = await call("POST", "/api/tokens", eL, { headers: XLG, body: { name: "up-exp", note: "旧库带备注", expires_in_days: 30 }, cookie: "sms_auth=" + ((rl.setCookie.match(/sms_auth=([^;]*)/) || [])[1] || "") });
     check(rl.status === 200 && rl.data.success && typeof rl.data.expires_at === "string", "旧库补列后创建带备注+有效期令牌 → 200");
 
-    /* 7) 页脚版本号：管理页与登录页底部均展示 v1.0.1 */
+    /* 7) 页脚版本号：管理页与登录页底部均展示 v1.0.2 */
     const pg = await fetchApp(R("GET", "/", { cookie: ckE }), eE);
     const pgHtml = await pg.text();
-    check(pg.status === 200 && pgHtml.includes('<span class="ver">v1.0.1</span>'), "管理页页脚含版本号 v1.0.1");
+    check(pg.status === 200 && pgHtml.includes('<span class="ver">v1.0.2</span>'), "管理页页脚含版本号 v1.0.2");
     const lg = await fetchApp(R("GET", "/", {}), eE);
     const lgHtml = await lg.text();
-    check(lg.status === 200 && lgHtml.includes('<span class="ver">v1.0.1</span>'), "登录页页脚含版本号 v1.0.1");
+    check(lg.status === 200 && lgHtml.includes('<span class="ver">v1.0.2</span>'), "登录页页脚含版本号 v1.0.2");
+    check(pgHtml.includes('id="msesttl"') && pgHtml.includes("会话时长"), "设置菜单含会话时长入口");
 
     rawE.close();
     cleanupPath(exPath);
     try { rawL.close(); } catch (_) {}
     cleanupPath(lgPath);
+  }
+
+  /* ===== 组：会话时长可配置（settings 表 + /api/settings + 登录 TTL 同步） ===== */
+  group("会话时长可配置（GET·PUT /api/settings / 默认 30 分钟 / 校验拒绝 / 登录 Max-Age 同步 / 旧库自愈建表）");
+  {
+    const stPath = join(tmpdir(), "smstoweb_sessttl_" + process.pid + ".db");
+    cleanupPath(stPath);
+    const rawS = new DatabaseSync(stPath);
+    const eS2 = { DB: makeD1(rawS), RECEIVE_TOKEN: "tok", ENABLE_AUTH: "true", ADMIN_PASSWORD: "secret", SESSION_SECRET: "test-session-secret-0123456789abcdef", RETENTION_DAYS: "30" };
+    const XS = { "X-Forwarded-For": "203.0.113.80, 10.0.0.80" };
+    const HS = (extra) => Object.assign({}, XS, extra || {});
+
+    /* 0) 未登录拒绝：GET / PUT 均不在公开白名单 → 401 */
+    let rs = await call("GET", "/api/settings", eS2, { headers: HS() });
+    check(rs.status === 401, "会话时长：未登录 GET /api/settings → 401");
+    rs = await call("PUT", "/api/settings", eS2, { headers: HS(), body: { session_ttl_minutes: 60 } });
+    check(rs.status === 401, "会话时长：未登录 PUT /api/settings → 401");
+
+    /* 1) 默认值：登录 Max-Age=1800；GET 回读 30 */
+    rs = await call("POST", "/api/login", eS2, { headers: HS(), body: { password: "secret" } });
+    check(rs.status === 200, "会话时长组：登录 → 200");
+    check((rs.setCookie.match(/Max-Age=(\d+)/) || [])[1] === "1800", "未设置时登录 Cookie Max-Age=1800（默认 30 分钟）");
+    const ckS = "sms_auth=" + ((rs.setCookie.match(/sms_auth=([^;]*)/) || [])[1] || "");
+    rs = await call("GET", "/api/settings", eS2, { headers: HS(), cookie: ckS });
+    check(rs.status === 200 && rs.data.success && rs.data.session_ttl_minutes === 30, "GET /api/settings → 默认 30 分钟");
+
+    /* 2) 修改为 480（8 小时）→ 200；重新登录 Max-Age=28800 且 token exp 同步 */
+    rs = await call("PUT", "/api/settings", eS2, { headers: HS(), cookie: ckS, body: { session_ttl_minutes: 480 } });
+    check(rs.status === 200 && rs.data.success && rs.data.session_ttl_minutes === 480, "PUT 480 → 200 且响应回显 480");
+    rs = await call("POST", "/api/login", eS2, { headers: HS(), body: { password: "secret" } });
+    check((rs.setCookie.match(/Max-Age=(\d+)/) || [])[1] === "28800", "设置 480 后登录 Cookie Max-Age=28800（8 小时）");
+    const tokS = rs.setCookie.split("sms_auth=")[1].split(";")[0];
+    const expS = Number(tokS.split(".")[1]);
+    check(Math.abs(expS - Date.now() - 480 * 60000) < 5000, "会话 token 内嵌 exp 与 480 分钟一致（±5s）");
+    const ckS2 = "sms_auth=" + tokS;
+
+    /* 3) 持久化：GET 回读 480；再登录仍 28800（每次登录现查，改动即时生效） */
+    rs = await call("GET", "/api/settings", eS2, { headers: HS(), cookie: ckS2 });
+    check(rs.status === 200 && rs.data.session_ttl_minutes === 480, "设置持久化：GET 回读 480");
+    rs = await call("POST", "/api/login", eS2, { headers: HS(), body: { password: "secret" } });
+    check((rs.setCookie.match(/Max-Age=(\d+)/) || [])[1] === "28800", "重新登录仍按 480 分钟签发");
+
+    /* 4) 参数校验：非整数 / 越界 / 非法类型 / 非 JSON 内容类型 → 拒绝 */
+    rs = await call("PUT", "/api/settings", eS2, { headers: HS(), cookie: ckS2, body: { session_ttl_minutes: 4 } });
+    check(rs.status === 400 && rs.data.error === "INVALID_TTL", "PUT 4（低于下限）→ 400 INVALID_TTL");
+    rs = await call("PUT", "/api/settings", eS2, { headers: HS(), cookie: ckS2, body: { session_ttl_minutes: 43201 } });
+    check(rs.status === 400 && rs.data.error === "INVALID_TTL", "PUT 43201（高于上限）→ 400 INVALID_TTL");
+    rs = await call("PUT", "/api/settings", eS2, { headers: HS(), cookie: ckS2, body: { session_ttl_minutes: 1.5 } });
+    check(rs.status === 400 && rs.data.error === "INVALID_TTL", "PUT 1.5（非整数）→ 400 INVALID_TTL");
+    rs = await call("PUT", "/api/settings", eS2, { headers: HS(), cookie: ckS2, body: { session_ttl_minutes: "abc" } });
+    check(rs.status === 400 && rs.data.error === "INVALID_TTL", "PUT \"abc\" → 400 INVALID_TTL");
+    rs = await call("PUT", "/api/settings", eS2, { headers: Object.assign({}, XS, { "Content-Type": "text/plain" }), cookie: ckS2, body: JSON.stringify({ session_ttl_minutes: 60 }) });
+    check(rs.status === 400 && rs.data.error === "invalid content type", "PUT 非 application/json → 400（CSRF 闸门）");
+    /* 5) 边界值放行：5 与 43200 */
+    rs = await call("PUT", "/api/settings", eS2, { headers: HS(), cookie: ckS2, body: { session_ttl_minutes: 43200 } });
+    check(rs.status === 200, "PUT 43200（30 天上限）→ 200");
+    rs = await call("PUT", "/api/settings", eS2, { headers: HS(), cookie: ckS2, body: { session_ttl_minutes: 5 } });
+    check(rs.status === 200 && (await call("POST", "/api/login", eS2, { headers: HS(), body: { password: "secret" } })).setCookie.includes("Max-Age=300"), "PUT 5（下限）→ 200 且登录 Max-Age=300");
+
+    /* 6) 旧库无 settings 表：首请求自愈建表 → 读默认/写生效 */
+    const lgSPath = join(tmpdir(), "smstoweb_sessttl_legacy_" + process.pid + ".db");
+    cleanupPath(lgSPath);
+    const rawSL = new DatabaseSync(lgSPath);
+    rawSL.exec(`CREATE TABLE devices (id INTEGER PRIMARY KEY AUTOINCREMENT, device TEXT NOT NULL DEFAULT 'unknown', sim TEXT NOT NULL DEFAULT '', alias TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+    rawSL.exec(`CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, device_id INTEGER NOT NULL REFERENCES devices(id), sender TEXT NOT NULL DEFAULT '', content TEXT NOT NULL DEFAULT '', received_at TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')))`);
+    const eSL = { DB: makeD1(rawSL), RECEIVE_TOKEN: "tok", ENABLE_AUTH: "true", ADMIN_PASSWORD: "secret", SESSION_SECRET: "test-session-secret-0123456789abcdef", RETENTION_DAYS: "30" };
+    const XSL = { "X-Forwarded-For": "203.0.113.81, 10.0.0.81" };
+    check(!rawSL.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='settings'").get(), "旧库现场成立：无 settings 表");
+    let rl2 = await call("POST", "/api/login", eSL, { headers: XSL, body: { password: "secret" } });
+    check(rl2.status === 200, "旧库（无 settings 表）登录 → 200（首请求自愈建表，不 500）");
+    check(!!rawSL.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='settings'").get(), "settings 表已自动创建");
+    check((rl2.setCookie.match(/Max-Age=(\d+)/) || [])[1] === "1800", "旧库首登 Max-Age=1800（缺行回退默认）");
+    rl2 = await call("PUT", "/api/settings", eSL, { headers: XSL, cookie: "sms_auth=" + ((rl2.setCookie.match(/sms_auth=([^;]*)/) || [])[1] || ""), body: { session_ttl_minutes: 1440 } });
+    check(rl2.status === 200 && rl2.data.session_ttl_minutes === 1440, "旧库自愈后 PUT 1440 → 200");
+    rl2 = await call("POST", "/api/login", eSL, { headers: XSL, body: { password: "secret" } });
+    check((rl2.setCookie.match(/Max-Age=(\d+)/) || [])[1] === "86400", "旧库设置 1440 后登录 Max-Age=86400（24 小时）");
+
+    rawS.close();
+    cleanupPath(stPath);
+    try { rawSL.close(); } catch (_) {}
+    cleanupPath(lgSPath);
   }
 
   /* ===== 基线组（第 0 步前既有）：收发核心 ===== */

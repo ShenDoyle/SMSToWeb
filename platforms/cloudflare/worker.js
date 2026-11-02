@@ -70,7 +70,7 @@ function jsStr(s) {
   return JSON.stringify(s).replace(/</g, "\\u003c");
 }
 /* 应用版本号：正式版发布固定版号，非正式版一般以小版本号递增升级；管理页/登录页底部页脚展示 */
-const APP_VERSION = "v1.0.1";
+const APP_VERSION = "v1.0.2";
 
 /* 把页面模板中的占位标记替换为实际配置值（用函数替换器，避免值里含 $& 等特殊序列被误解释） */
 function renderHtml(html, env) {
@@ -140,8 +140,23 @@ function authEnabled(env) {
    - SESSION_SECRET 未配置时安全失败：拒绝签发与验证（登录返回 500、鉴权一律 401），
      绝不静默回退到 ADMIN_PASSWORD 派生——防止"密码即密钥"的离线爆破面；
    - 退出为无状态语义：/api/logout 仅清除浏览器 Cookie；已复制的有效 Token 在 TTL 内
-     （最长 30 分钟）仍可重放；更换 SESSION_SECRET 或 ADMIN_PASSWORD 前者使旧签名立即失效 */
+     （默认 30 分钟，可在管理页「设置 → 会话时长」调整，最长 30 天）仍可重放；
+     更换 SESSION_SECRET 或 ADMIN_PASSWORD 前者使旧签名立即失效 */
 const SESSION_TTL_MS = 30 * 60 * 1000;
+
+/* 会话时长（分钟）：默认 30，可在管理页「设置 → 会话时长」调整（存 settings 表，键 session_ttl_minutes）。
+   合法范围 5 ~ 43200（30 天）；缺表/缺行/库异常/非法值一律回退默认（登录低频，每次现查不加缓存）。 */
+const SESSION_TTL_DEFAULT_MIN = 30;
+const SESSION_TTL_MIN_MIN = 5;
+const SESSION_TTL_MAX_MIN = 43200;
+async function getSessionTtlMinutes(env) {
+  try {
+    const row = await env.DB.prepare("SELECT value FROM settings WHERE key = 'session_ttl_minutes'").first();
+    const n = Number(row && row.value);
+    if (Number.isInteger(n) && n >= SESSION_TTL_MIN_MIN && n <= SESSION_TTL_MAX_MIN) return n;
+  } catch (e) { /* 缺表或库异常 → 回退默认值 */ }
+  return SESSION_TTL_DEFAULT_MIN;
+}
 
 let sessionKeyCache = null, sessionKeyRaw = null;
 /* 派生 HMAC 密钥；SESSION_SECRET 缺失 → 返回 null（调用方安全失败）。缓存按密钥指纹键控，轮换即生效 */
@@ -175,14 +190,15 @@ async function sessionParse(env, token) {
   return { nonce: nonce, exp: Number(expStr) };
 }
 
-/* 登录成功签发：随机 nonce + 过期时间 + HMAC 签名（无任何服务端登记） */
-async function createSession(env) {
+/* 登录成功签发：随机 nonce + 过期时间 + HMAC 签名（无任何服务端登记）。
+   ttlMs：会话时长毫秒数，由登录入口按 settings 表现查传入；非法/缺省回退默认 30 分钟 */
+async function createSession(env, ttlMs) {
   const key = await sessionHmacKey(env);
   if (!key) return null; /* SESSION_SECRET 未配置 → 安全失败，拒绝签发 */
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   let nonce = "";
   for (const b of bytes) nonce += b.toString(16).padStart(2, "0");
-  const exp = Date.now() + SESSION_TTL_MS;
+  const exp = Date.now() + (typeof ttlMs === "number" && ttlMs > 0 ? ttlMs : SESSION_TTL_MS);
   return nonce + "." + exp + "." + (await sessionSign(env, nonce, String(exp)));
 }
 
@@ -279,12 +295,15 @@ async function handleLogin(request, env) {
     return json({ success: false, error: "wrong password" }, 403);
   }
   clearLoginFail(request);
-  const token = await createSession(env);
+  /* 会话时长每次登录现查 settings 表（低频操作可容忍；无缓存保证改动即时生效） */
+  const ttlMin = await getSessionTtlMinutes(env);
+  const ttlMs = ttlMin * 60 * 1000;
+  const token = await createSession(env, ttlMs);
   if (!token) return json({ success: false, error: "session secret not configured" }, 500);
   return new Response(JSON.stringify({ success: true }), {
     headers: {
       "Content-Type": "application/json; charset=utf-8",
-      "Set-Cookie": authCookieHeader(request, token, SESSION_TTL_MS / 1000),
+      "Set-Cookie": authCookieHeader(request, token, ttlMs / 1000),
       ...SECURITY_HEADERS, ...CORS,
     },
   });
@@ -308,7 +327,7 @@ function allowWrite(request) {
 }
 
 async function handleLogout(request, env) {
-  /* 无状态退出：仅清除浏览器 Cookie；已签发 Token 在 TTL（最长 30 分钟）内仍可重放，
+  /* 无状态退出：仅清除浏览器 Cookie；已签发 Token 在 TTL（默认 30 分钟，设置可调，最长 30 天）内仍可重放，
      更换 SESSION_SECRET / ADMIN_PASSWORD 可立即使旧 Token 验签失败 */
   return new Response(JSON.stringify({ success: true }), {
     headers: {
@@ -1693,6 +1712,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
           </div>
           <div class="grp">接入令牌</div>
           <button class="tbtn" id="mtokens" role="menuitem" title="创建 / 查看 / 吊销 / 轮换接入令牌">接入令牌</button>
+          <button class="tbtn" id="msesttl" role="menuitem" title="调整登录会话有效期（默认 30 分钟）">会话时长</button>
         </div>
       </span>
       <button class="tbtn" id="themebtn" data-i18n-title="themeTip">自动</button>
@@ -3445,6 +3465,41 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (state.sound) beep();
     toast(state.sound ? T("soundOnMsg") : T("soundOffMsg"));
   };
+  /* ---------- 会话时长面板：设置菜单入口，复用弹层；文案中文先行（i18n 后续补） ----------
+     GET /api/settings 回填当前值；PUT 保存。改动只影响之后新签发的会话（无状态 token，存量会话不变）。 */
+  var TTL_PRESETS = [["30", "30 分钟"], ["60", "1 小时"], ["480", "8 小时"], ["1440", "24 小时"], ["10080", "7 天"], ["43200", "30 天"]];
+  function ttlOutOfRangeMsg() { return "时长须为 5 ~ 43200 分钟（30 天）"; }
+  function openSessTtl() {
+    openModal(
+      '<h3>会话时长</h3>' +
+      '<div class="tokmeta">登录后保持有效的时长，范围 5 分钟 ~ 30 天。仅对之后的新登录生效（当前登录不受影响）。</div>' +
+      '<div class="toknewrow"><select id="sessttl" aria-label="预设时长">' +
+        TTL_PRESETS.map(function (p) { return '<option value="' + p[0] + '">' + esc(p[1]) + '</option>'; }).join("") +
+        '<option value="custom">自定义分钟数…</option></select>' +
+      '<input type="number" id="sessttlmin" min="5" max="43200" inputmode="numeric" hidden aria-label="自定义分钟数" placeholder="分钟数（5~43200）"></div>' +
+      '<div class="btnrow"><button class="tbtn" id="sessttlsave">保存</button></div>'
+    );
+    var sel = $("sessttl"), inp = $("sessttlmin");
+    fetch("/api/settings").then(function (r) { if (r.status === 401) { location.reload(); return null; } return r.json(); })
+      .then(function (d) {
+        if (!d || !d.success) return;
+        var m = String(d.session_ttl_minutes || 30);
+        var hit = TTL_PRESETS.some(function (p) { return p[0] === m; });
+        if (hit) sel.value = m; else { sel.value = "custom"; inp.hidden = false; inp.value = m; }
+      }).catch(function () {});
+    sel.onchange = function () { inp.hidden = sel.value !== "custom"; };
+    $("sessttlsave").onclick = function () {
+      var v = sel.value === "custom" ? parseInt(inp.value, 10) : parseInt(sel.value, 10);
+      if (!Number.isInteger(v) || v < 5 || v > 43200) { toast(ttlOutOfRangeMsg()); return; }
+      fetch("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session_ttl_minutes: v }) })
+        .then(function (r) { if (r.status === 401) { location.reload(); return null; } return r.json(); })
+        .then(function (d) {
+          if (d && d.success) { closeModal(); toast(T("saved")); }
+          else { toast(d && d.error === "INVALID_TTL" ? ttlOutOfRangeMsg() : "保存失败"); }
+        })
+        .catch(function () { toast("保存失败"); });
+    };
+  }
   /* ---------- 设置下拉菜单：统计 / 消息开关 / 免打扰 / 筛选 / 操作 ---------- */
   var setBtn = $("setbtn"), setMenu = $("setmenu");
   function setSetOpen(on) {
@@ -3473,6 +3528,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   /* 统计：先关菜单，再开统计弹层 */
   $("mstats").onclick = function () { setSetOpen(false); openStats(); };
   $("mtokens").onclick = function () { setSetOpen(false); openTokens(); };
+  $("msesttl").onclick = function () { setSetOpen(false); openSessTtl(); };
   /* 免打扰：回填开关与时段；保存只写 dnd（提示音由 soundon 即时生效，不在此保存） */
   var dnd = getDND();
   $("stdnd").checked = !!dnd.on;
@@ -3895,6 +3951,13 @@ CREATE INDEX IF NOT EXISTS idx_tokens_revoked ON tokens(revoked_at);
 -- 已有库升级（有效期/备注）：ensureSchema 按上方建表语句自动补列（PRAGMA + ALTER，幂等），无需手动执行
 -- ALTER TABLE tokens ADD COLUMN expires_at TEXT;
 -- ALTER TABLE tokens ADD COLUMN note TEXT NOT NULL DEFAULT '';
+
+-- 设置表：服务端键值设置（当前仅 session_ttl_minutes 会话时长，分钟）。
+-- ensureSchema 首请求自动建表（幂等）；读侧缺表/缺行/非法值一律回退默认，不阻断登录
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 `;
 /* ==== SCHEMA_SQL END ==== */
 
@@ -4212,6 +4275,28 @@ async function handleRotateToken(request, env) {
   return json({ success: true, id: r.id, token_prefix: r.token.slice(0, 12), expires_at: r.expires_at, token: r.token });
 }
 
+/* ---------------- 服务端设置（settings 键值表） ----------------
+ * 当前仅 session_ttl_minutes（会话时长，分钟）。GET 需登录；PUT 需登录 + application/json
+ * CSRF 闸门（与令牌管理同型）+ allowWrite 限速。校验：整数且 5~43200（30 天），
+ * 否则 INVALID_TTL → 400。缺表由 ensureSchema 首请求自愈；读侧另有缺表回退默认兜底。 */
+async function handleGetSettings(env) {
+  const m = await getSessionTtlMinutes(env);
+  return json({ success: true, session_ttl_minutes: m });
+}
+
+async function handlePutSettings(request, env) {
+  if (!tokenApiJsonOnly(request)) return json({ success: false, error: "invalid content type" }, 400);
+  if (!allowWrite(request)) return json({ success: false, error: "too many requests" }, 429);
+  const body = await readTokenApiBody(request);
+  if (!body) return json({ success: false, error: "invalid json" }, 400);
+  const n = Number(body.session_ttl_minutes);
+  if (!Number.isInteger(n) || n < SESSION_TTL_MIN_MIN || n > SESSION_TTL_MAX_MIN) {
+    return json({ success: false, error: "INVALID_TTL" }, 400);
+  }
+  await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('session_ttl_minutes', ?)").bind(String(n)).run();
+  return json({ success: true, session_ttl_minutes: n });
+}
+
 /* ---------------- 路由 ---------------- */
 
 export default {
@@ -4262,6 +4347,13 @@ export default {
       }
       if (path === "/api/tokens/rotate" && request.method === "POST") {
         return await handleRotateToken(request, env);
+      }
+      /* 服务端设置（GET 读 / PUT 写）：不在 isPublicApi 白名单 → 未登录一律 401 */
+      if (path === "/api/settings" && request.method === "GET") {
+        return await handleGetSettings(env);
+      }
+      if (path === "/api/settings" && request.method === "PUT") {
+        return await handlePutSettings(request, env);
       }
       /* 定时清理 HTTP 触发（与移植平台入口级 /api/cron 行为一致）：
          Cloudflare 平台 cron 之外，也允许外部调度器调 GET /api/cron?token=<RECEIVE_TOKEN> 触发 */

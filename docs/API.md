@@ -7,7 +7,7 @@
 | 接口类型 | 鉴权 |
 |---|---|
 | 入站推送（`/api/receive`、`/api/push`） | **库内命名令牌优先**（管理接口创建，SHA-256 哈希存储，未吊销且未过期才放行，命中自动记录最近使用时间）；环境变量 `RECEIVE_TOKEN` 兜底（迁移期存量接入继续有效；设 `DISABLE_RECEIVE_TOKEN=true` 后停用兜底、只认库内令牌）。携带方式优先级：`X-Receive-Token` 请求头 > `?token=` query > `Authorization: Bearer` > `body.token`（**推荐用请求头**，避免令牌进 URL/日志）。**不受登录开关影响**；校验失败一律 `403`（与旧版状态码一致，非 401） |
-| 管理接口 | Cookie 会话 `sms_auth`（`POST /api/login` 获取；`ENABLE_AUTH=true` 时启用）。会话为**无状态签名 Token**（`nonce.exp.HMAC-SHA256` 三段式，签名密钥 `SESSION_SECRET`），有效期 30 分钟；`SESSION_SECRET` 缺失时安全失败（登录 500、管理接口一律 401，不回退密码派生），配置缺失一律不放行。轮换 `SESSION_SECRET` 后所有旧会话立即失效 |
+| 管理接口 | Cookie 会话 `sms_auth`（`POST /api/login` 获取；`ENABLE_AUTH=true` 时启用）。会话为**无状态签名 Token**（`nonce.exp.HMAC-SHA256` 三段式，签名密钥 `SESSION_SECRET`），有效期**默认 30 分钟**（管理页「设置 → 会话时长」可调，5 分钟 ~ 30 天）；`SESSION_SECRET` 缺失时安全失败（登录 500、管理接口一律 401，不回退密码派生），配置缺失一律不放行。轮换 `SESSION_SECRET` 后所有旧会话立即失效 |
 | 定时清理（`GET /api/cron`） | **仅认环境变量 `RECEIVE_TOKEN`**（`?token=` query 或 `Authorization: Bearer`）——库内命名令牌对 `/api/cron` **无效**（隔离设计：定时清理凭据不随库内令牌的创建/吊销/轮换/过期变化） |
 
 ## 1. 入站推送（公开）
@@ -90,7 +90,7 @@ Query 参数：
 | POST | `/api/devices/merge` | 合并设备（body: `{ from, to }`，迁移全部消息后删除源设备；源→自身返回 400） |
 | DELETE | `/api/devices/{id}` | 删除设备（有消息时返回 `has messages` 拒绝） |
 
-## 4. 接入令牌管理（需登录态）
+## 4. 接入令牌管理与服务端设置（需登录态）
 
 多命名接入令牌的创建 / 列表 / 吊销 / 轮换（管理页「设置 → 接入令牌」即此组接口）。**全部需要登录会话**（Cookie `sms_auth`）；写接口均强制 `Content-Type: application/json`（CSRF 防护：简单请求不可伪造该头）并受写入限速（120 次/IP/分）。安全原则：库内只存 SHA-256 哈希；**明文仅创建/轮换成功时返回一次**，列表永不返回明文与哈希；吊销写 `revoked_at` 保留审计行、不物理删除；**过期令牌软失效**（接入 403 但不写 `revoked_at`，保留审计）。
 
@@ -135,8 +135,17 @@ body: `{ "id" }`。吊销旧令牌并生成**同名**新令牌，返回新明文
 | 400 | `INVALID_NOTE` | 备注超 200 字 |
 | 400 | `INVALID_EXPIRY` | 有效期非法（非正整数天数 / 格式错 / 不存在日期如 `2026-02-30`） |
 | 404 | `NOT_FOUND` | 吊销/轮换的 id 不存在 |
+| 400 | `INVALID_TTL` | 会话时长非法（非整数 / 不在 5~43200 分钟范围内） |
 | 401 | — | 未登录（会话缺失或过期） |
 | 429 | — | 触发写入限速 |
+
+### GET `/api/settings` — 读取设置
+
+响应：`{ "success": true, "session_ttl_minutes": 30 }`。当前仅 `session_ttl_minutes`（登录会话时长，分钟，默认 30）。
+
+### PUT `/api/settings` — 修改设置
+
+body: `{ "session_ttl_minutes": 480 }`。须为整数且在 5 ~ 43200（30 天）范围内，否则 400 `INVALID_TTL`；同样强制 `Content-Type: application/json` 并受写入限速。改动**仅影响之后新签发的会话**（无状态 Token，存量会话不变）；设置缺失或非法时登录回退默认 30 分钟。
 
 ## 5. 实时与辅助
 
@@ -144,7 +153,7 @@ body: `{ "id" }`。吊销旧令牌并生成**同名**新令牌，返回新明文
 |---|---|---|
 | GET | `/api/wait?last_id=N` | 长轮询：有比 N 更新的消息立即返回 `{ changed: true }`，否则挂起（默认 25s，`WAIT_MAX_SECONDS` 可调） |
 | GET | `/api/phone?number=` | 号码归属地查询（`PHONE_AREA_ENABLED=false` 关闭；上游限速代理，独立 120 次/分桶） |
-| POST | `/api/login` | 登录（body: `{ password }` → `Set-Cookie: sms_auth=<签名会话>`，无状态 HMAC-SHA256 三段式 Token、TTL 30 分钟、HttpOnly + SameSite=Lax；失败 5 次锁 10 分钟；密码错 403，`SESSION_SECRET` 缺失 500 配置错误） |
+| POST | `/api/login` | 登录（body: `{ password }` → `Set-Cookie: sms_auth=<签名会话>`，无状态 HMAC-SHA256 三段式 Token、TTL 默认 30 分钟（管理页「设置 → 会话时长」可调）、HttpOnly + SameSite=Lax；失败 5 次锁 10 分钟；密码错 403，`SESSION_SECRET` 缺失 500 配置错误） |
 | POST | `/api/logout` | 登出 |
 | GET | `/api/cron?token=` | 触发定时清理（删除超 `RETENTION_DAYS` 的旧消息） |
 | GET | `/` `/manifest.webmanifest` `/sw.js` | 管理页 / PWA 清单 / Service Worker |

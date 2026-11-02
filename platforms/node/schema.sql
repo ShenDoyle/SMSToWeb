@@ -60,3 +60,10 @@ CREATE INDEX IF NOT EXISTS idx_tokens_revoked ON tokens(revoked_at);
 -- 已有库升级（有效期/备注）：ensureSchema 按上方建表语句自动补列（PRAGMA + ALTER，幂等），无需手动执行
 -- ALTER TABLE tokens ADD COLUMN expires_at TEXT;
 -- ALTER TABLE tokens ADD COLUMN note TEXT NOT NULL DEFAULT '';
+
+-- 设置表：服务端键值设置（当前仅 session_ttl_minutes 会话时长，分钟）。
+-- ensureSchema 首请求自动建表（幂等）；读侧缺表/缺行/非法值一律回退默认，不阻断登录
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
