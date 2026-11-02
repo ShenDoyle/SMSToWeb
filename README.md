@@ -6,6 +6,8 @@
 
 Push SMS and notifications from an Android phone (and any other device) to the cloud in real time, and read them from a web page anywhere. Free to deploy, no server required, about 10 minutes end to end.
 
+**Current version: `v1.0.1`** — official releases carry a fixed version number (shown in the page footer); interim builds bump the patch version.
+
 - **Multi-platform deployment**: Cloudflare (primary) / Vercel / Deno Deploy / Netlify / Tencent EdgeOne Makers / Docker self-hosted — pick one of six, features fully identical
 - **Real-time receiving**: webhook push lands in the database in seconds; the web page refreshes itself, no manual work
 - **Universal push**: any device that can send an HTTP request (Linux / Windows / macOS / iOS / NAS / scripts) can push notifications into the same page
@@ -82,7 +84,8 @@ A `{"success":true,...}` response means it is stored; pushing the exact same pay
 
 | Variable | Required | Description |
 |---|---|---|
-| `RECEIVE_TOKEN` | yes | push auth secret; pick a long random string |
+| `RECEIVE_TOKEN` | yes | push auth secret; pick a long random string. Works as the **fallback** ingest credential: named tokens created in the admin page take priority |
+| `DISABLE_RECEIVE_TOKEN` | no | set `"true"` (case/whitespace-insensitive) to **disable the `RECEIVE_TOKEN` fallback** so only hashed named tokens can push; unset = fallback enabled (migration-friendly default). Does not affect `/api/cron`, which always uses the env var |
 | `ENABLE_AUTH` | no | `"true"` requires login for the admin page (**strongly recommended**, see security notes below); default is no login |
 | `ADMIN_PASSWORD` | no | login password (set when `ENABLE_AUTH="true"`; if missing, admin APIs refuse access and log an alert — missing config never opens the door) |
 | `RETENTION_DAYS` | no | data retention in days, default 30 |
@@ -97,12 +100,12 @@ Cloudflare additionally needs the `DB` (D1 binding); other platforms need `TURSO
 
 > **Security recommendations**
 > 1. **Turn on admin login** (`ENABLE_AUTH="true"` + `ADMIN_PASSWORD`): the admin page holds sensitive content such as SMS OTP codes; without login, anyone who knows the domain can read every message and delete data. The login endpoint is rate-limited (5 consecutive failures per IP locks it for 10 minutes); `/api/receive` and `/api/push` are rate-limited to 120 writes per IP per minute (429 beyond that).
-> 2. **Token in URLs — recommended: header, query for compatibility only**: `/api/receive` and `/api/push` accept the token via (in priority order) the `X-Receive-Token` header → `?token=` query → `Authorization: Bearer` → `token` in the JSON body. **The `X-Receive-Token` header is the recommended way** (never lands in access logs, browser history or referrers); the `?token=` query exists only for compatibility with SmsForwarder-style clients. You can create named tokens in the admin page (Settings → 接入令牌 / Access tokens), where they are stored hashed (SHA-256) and can be revoked or rotated per device instantly; the deploy-time `RECEIVE_TOKEN` env var keeps working as a fallback until you set `DISABLE_RECEIVE_TOKEN="true"`.
+> 2. **Token in URLs — recommended: header, query for compatibility only**: `/api/receive` and `/api/push` accept the token via (in priority order) the `X-Receive-Token` header → `?token=` query → `Authorization: Bearer` → `token` in the JSON body. **The `X-Receive-Token` header is the recommended way** (never lands in access logs, browser history or referrers); the `?token=` query exists only for compatibility with SmsForwarder-style clients. You can create named tokens in the admin page (Settings → 接入令牌 / Access tokens), where they are stored hashed (SHA-256) and can be revoked or rotated per device instantly; each token can carry a **note** (to tell devices apart) and an **expiry** (permanent / preset days / custom date — expired tokens are rejected with 403 automatically, without losing the audit row); the deploy-time `RECEIVE_TOKEN` env var keeps working as a fallback until you set `DISABLE_RECEIVE_TOKEN="true"`.
 
 ## FAQ (general)
 
 - **A label shows a literal `{{XXX}}`** → cannot happen: the gateway blanks labels containing a literal `{{` and falls back to `sim`; set your custom name directly in the template's `name` field
-- **API 401/403** → check that `token=` in the URL matches `RECEIVE_TOKEN`; `/api/receive` and `/api/push` are unaffected by the login toggle
+- **API 401/403** → check the token you present (a named token from the admin page, or the `RECEIVE_TOKEN` env var) is valid: not revoked, not expired, and not blocked by `DISABLE_RECEIVE_TOKEN`; `/api/receive` and `/api/push` are unaffected by the login toggle
 - **API 429** → write rate limit hit (120/IP/min); it recovers after a minute — if it happens in normal use, your token may have leaked or something is hammering the API
 - **Very long messages** → a single body is capped at 8000 characters, the excess is truncated
 - **Renaming a device label** → a label comes from the message template's `name` field; changing `name` creates a new label. Use "✎" next to a label on the web page to rename it, "⇄" to merge its messages into another device, and "×" to delete an empty label directly

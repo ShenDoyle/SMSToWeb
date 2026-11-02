@@ -2,6 +2,8 @@
 
 **English** is the primary maintained language of this repository's documentation. This directory holds the eight translated mirrors (`zh-CN`, `zh-TW`, `ja`, `ko`, `es`, `fr`, `de`, `pt-BR`).
 
+> **Sync status (v1.0.1)**: the Chinese primary docs (`docs/`) already cover named access tokens (incl. note & expiry), the token management API, and the new [PRIVACY.md](../PRIVACY.md) privacy statement. All translated mirrors are **pending sync** (待同步) for these changes; refer to the English/Chinese primaries until they are updated.
+
 ## Language index
 
 | Language | README | Full index |
