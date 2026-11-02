@@ -101,7 +101,7 @@ Query 参数：
 | `name` | 是 | 令牌名称：仅字母/数字/_/-，最长 64，活跃令牌名唯一 |
 | `note` | 否 | 备注，最长 200 字（便于区分令牌用途，如「主力机接入」） |
 | `expires_in_days` | 否 | 有效期天数（正整数 1~36500，自当前 UTC 起算）；与 `expires_at` 同传时本字段优先 |
-| `expires_at` | 否 | 到期时间：`YYYY-MM-DD`（视为当日 UTC 23:59:59 到期）或 `YYYY-MM-DD HH:MM:SS`；两者都不传 = 永久 |
+| `expires_at` | 否 | 到期时间：`YYYY-MM-DD`（视为**当日 UTC 23:59:59** 到期，即北京时间**次日 07:59:59**）或 `YYYY-MM-DD HH:MM:SS`（UTC 时刻）；两者都不传 = 永久 |
 
 ```bash
 curl -X POST "https://<your-site>/api/tokens" \
