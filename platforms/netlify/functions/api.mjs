@@ -73,6 +73,7 @@ function buildEnv() {
   /* Netlify Functions 默认 10s 执行上限：长轮询默认降到 8s，避免请求被平台强杀
      （显式配置 WAIT_MAX_SECONDS 时以配置为准） */
   if (!env.WAIT_MAX_SECONDS) env.WAIT_MAX_SECONDS = "8";
+  env.PLATFORM = "netlify"; /* 日志 platform 字段标识（非环境变量，不走白名单） */
   return env;
 }
 

@@ -71,6 +71,7 @@ function buildEnv(vars) {
   for (const k of ENV_KEYS) e[k] = g(k);
   /* 边缘函数执行时长比 Worker 紧：长轮询默认 20s，可用 WAIT_MAX_SECONDS 覆盖（3–25） */
   if (!e.WAIT_MAX_SECONDS) e.WAIT_MAX_SECONDS = "20";
+  e.PLATFORM = "edgeone"; /* 日志 platform 字段标识（非环境变量，不走白名单） */
   return e;
 }
 

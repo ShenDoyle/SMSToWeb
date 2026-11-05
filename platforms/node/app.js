@@ -117,6 +117,79 @@ function bgRun(ctx, p) {
 
 const AUTH_COOKIE = "sms_auth";
 
+/* ---------------- 结构化日志（阶段 1-2 MVP） ----------------
+   单行 JSON，固定字段：timestamp / level / event / requestId / platform / phase（阶段），
+   按需附 error{name,message,stack} 等附加字段。原则：
+   ① requestId 由服务端生成，绝不读取客户端同名请求头；
+   ② 堆栈只进服务端日志，绝不进错误响应；
+   ③ 手机号、令牌、Cookie、Authorization、短信内容在写日志前脱敏；
+   ④ 序列化或输出的任何失败都吞掉，绝不影响业务。 */
+function newRequestId() {
+  try {
+    if (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function") return globalThis.crypto.randomUUID();
+  } catch (_) { /* 退化到时间戳+随机数 */ }
+  return "rid-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10);
+}
+const LOG_PHONE_RE = /(^|\D)(1[3-9]\d)\d{4}(\d{4})(?!\d)/g;
+const LOG_TOKEN_TEXT_RE = /(authorization\s*[:=]\s*bearer\s+)[A-Za-z0-9._-]+|(bearer\s+)[A-Za-z0-9._-]+|\b(token|secret|password|authorization)\b(\s*[:=]\s*|\s+)[A-Za-z0-9._@/-]{4,}|(cookie\s*[:=]\s*)[^\s;,]+|((?:access_)?token=)[^&\s]+/gi;
+const LOG_SENSITIVE_KEY_RE = /(token|cookie|authorization|secret|password|api.?key)/i;
+const LOG_CONTENT_KEY_RE = /^(content|text|body|msg|message)$/i;
+function logMaskText(s) {
+  return String(s)
+    .replace(LOG_PHONE_RE, "$1$2****$3")
+    .replace(LOG_TOKEN_TEXT_RE, function (m, authBearer, bearer, kw, sep, cookie, qs) { return (authBearer || bearer || cookie || qs || (kw ? kw + sep : "")) + "***"; });
+}
+function logSafeValue(value, key, depth) {
+  if (value === null || value === undefined) return value;
+  if (typeof value === "number" || typeof value === "boolean") return value;
+  if (typeof value === "bigint") return String(value);
+  if (key && LOG_SENSITIVE_KEY_RE.test(String(key))) return "***";
+  if (typeof value === "object") {
+    if (depth > 3) return "[deep]";
+    const out = {}; let n = 0;
+    for (const k of Object.keys(value)) { if (++n > 32) break; out[k] = logSafeValue(value[k], k, (depth || 0) + 1); }
+    return out;
+  }
+  let s = logMaskText(String(value));
+  if (key && LOG_CONTENT_KEY_RE.test(String(key)) && s.length > 64) s = s.slice(0, 64) + "…";
+  return s;
+}
+function logErrorInfo(err) {
+  /* 只做结构提取与堆栈截断，不在此脱敏——logEvent 的 logSafeValue 会对每个字段统一脱敏一次，
+     重复脱敏会把 "Authorization: Bearer ***" 二次破坏成 "Authorization: *** ***" */
+  const info = {};
+  try { info.name = String((err && err.name) || "Error"); } catch (_) { info.name = "Error"; }
+  try { info.message = String((err && err.message !== undefined) ? err.message : err); } catch (_) { info.message = "(unreadable)"; }
+  try { if (err && err.stack) info.stack = String(err.stack).split("\n").slice(0, 8).join("\n"); } catch (_) { /* 堆栈读取失败忽略 */ }
+  return info;
+}
+function logEvent(level, event, phase, env, requestId, fields) {
+  try {
+    const rec = {
+      timestamp: new Date().toISOString(),
+      level: String(level || "info"),
+      event: String(event || "-"),
+      requestId: String(requestId || "-"),
+      platform: String((env && env.PLATFORM) || "cloudflare"),
+      phase: String(phase || "-"),
+    };
+    if (fields) { let n = 0; for (const k of Object.keys(fields)) { if (++n > 32) break; rec[k] = logSafeValue(fields[k], k, 0); } }
+    let line;
+    try { line = JSON.stringify(rec); }
+    catch (_) {
+      try { line = JSON.stringify({ timestamp: rec.timestamp, level: rec.level, event: rec.event, requestId: rec.requestId, platform: rec.platform, phase: rec.phase, logError: "serialize failed" }); }
+      catch (_) { return; }
+    }
+    try {
+      if (rec.level === "error") console.error(line);
+      else if (rec.level === "warn") console.warn(line);
+      else console.log(line);
+    } catch (_) { /* 输出失败不影响业务 */ }
+  } catch (_) {
+    try { console.error("log_event_failed:" + event); } catch (_) { /* 彻底放弃 */ }
+  }
+}
+
 /* 开关是否处于开启状态（仅字符串 "true" 视为开启）。
    安全策略：开关开启即视为鉴权生效——ADMIN_PASSWORD 缺失/为空时不免登录放行，
    受保护接口一律拒绝（isAuthed）、登录接口返回服务端配置错误（handleLogin），
@@ -127,7 +200,7 @@ function authEnabled(env) {
   if (!String(env.ADMIN_PASSWORD || "")) {
     if (!warnedAuthNoPw) {
       warnedAuthNoPw = true;
-      console.warn("ENABLE_AUTH=true 但未设置 ADMIN_PASSWORD：管理接口已全部拒绝访问，配置密码并配置 SESSION_SECRET 后恢复登录");
+      logEvent("warn", "auth_config_incomplete", "config", env, "-", { message: "ENABLE_AUTH=true 但未设置 ADMIN_PASSWORD：管理接口已全部拒绝访问，配置密码并配置 SESSION_SECRET 后恢复登录" });
     }
   }
   return true;
@@ -834,7 +907,7 @@ function dispatchNotify(env, msg) {
         const parsed = JSON.parse(hdrRaw);
         for (const k of Object.keys(parsed)) genericHeaders[k] = String(parsed[k]);
       } catch (e) {
-        console.error("GENERIC_WEBHOOK_HEADERS 需为 JSON 对象字符串，解析失败已忽略:", e && e.message);
+        logEvent("error", "webhook_headers_parse_failed", "notify", env, "-", { message: e && e.message });
       }
     }
     for (const u of genericUrls) {
@@ -845,7 +918,7 @@ function dispatchNotify(env, msg) {
   if (!jobs.length) return Promise.resolve();
   return Promise.allSettled(jobs.map(function (job) {
     return job().catch(function (e) {
-      console.error("notify forward failed:", e && e.message);
+      logEvent("error", "notify_forward_failed", "notify", env, "-", { message: e && e.message });
     });
   }));
 }
@@ -3895,8 +3968,9 @@ const LOGIN_HTML = String.raw`<!DOCTYPE html>
 /* ---------------- 定时清理：保留天数由变量 RETENTION_DAYS 控制（默认 30） ---------------- */
 
 async function handleCron(env) {
+  const cronRid = newRequestId();
   /* 定时清理路径同样自愈（覆盖 scheduled 触发时不经 fetch 入口的平台） */
-  await ensureSchema(env);
+  await ensureSchema(env, cronRid);
   const days = Math.max(1, parseInt(env.RETENTION_DAYS, 10) || DEFAULT_RETENTION_DAYS);
   const res = await env.DB.prepare(
     `DELETE FROM messages WHERE received_at < datetime('now', ?1)`
@@ -3904,7 +3978,11 @@ async function handleCron(env) {
   const purged = await env.DB.prepare(
     `DELETE FROM messages WHERE deleted_at IS NOT NULL AND deleted_at < datetime('now', '-7 days')`
   ).run();
-  console.log(`[cron] cleaned ${res.meta ? res.meta.changes : 0} old, purged ${purged.meta ? purged.meta.changes : 0} deleted`);
+  logEvent("info", "cron_cleanup", "cron", env, cronRid, {
+    retention_days: days,
+    cleaned_old: res.meta ? res.meta.changes : 0,
+    purged_deleted: purged.meta ? purged.meta.changes : 0,
+  });
 }
 
 /* ---------------- schema 幂等自愈 ---------------- */
@@ -4116,7 +4194,7 @@ function schemaColumnMap() {
 /* 幂等自愈：缺表建表（CREATE IF NOT EXISTS）+ 缺列检测补列（PRAGMA table_info 查列再 ALTER）。
    任何失败仅告警不阻断主流程（静默降级），且不标记完成——下次请求自动重试。
    覆盖六平台：D1 / Turso / 本地 SQLite 三类适配层均支持 prepare→all/run 与 PRAGMA。 */
-async function ensureSchema(env) {
+async function ensureSchema(env, requestId = "-") {
   if (!env || !env.DB || schemaHealed.has(env.DB)) return;
   try {
     /* 顺序有讲究：建表 → 补列 → 建索引。索引可能引用新列，
@@ -4142,7 +4220,7 @@ async function ensureSchema(env) {
   } catch (e) {
     /* 失败同样记录：管理页统计弹窗可见「最近自愈失败 + 原因」，未标记完成 → 下次请求自动重试 */
     schemaStatus.set(env.DB, { state: "failed", at: nowUTC(), error: String((e && e.message) || e).slice(0, 200) });
-    console.warn("[schema] 幂等自愈失败（不阻断主流程，下次请求重试）:", e && e.message);
+    logEvent("warn", "schema_heal_failed", "schema", env, requestId, { error: logErrorInfo(e) });
   }
 }
 
@@ -4420,6 +4498,8 @@ export async function fetchApp(request, env, ctx) {
   /* ctx 由调用方传入：Cloudflare 传真实 ctx（waitUntil 后台续跑）；其他平台不传（undefined），
      业务代码经 bgRun() 退化为内联 await，确保后台通知不被平台截断 */
 
+    /* requestId 服务端生成：只认这里产出的值，不读取任何客户端同名请求头（防伪造） */
+    const requestId = newRequestId();
     const url = new URL(request.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
 
@@ -4427,7 +4507,7 @@ export async function fetchApp(request, env, ctx) {
 
     try {
       /* schema 幂等自愈：每个 DB 实例仅首次请求执行（缺表建表/缺列补列，失败不阻断） */
-      await ensureSchema(env);
+      await ensureSchema(env, requestId);
 
       /* 登录开关：开启后，除推送接口与登录/登出外，页面与管理 API 均需登录 */
       const isPage = path === "/" || path === "/index.html";
@@ -4548,7 +4628,7 @@ export async function fetchApp(request, env, ctx) {
       }
       return json({ success: false, error: "not found" }, 404);
     } catch (err) {
-      console.error("worker error:", err && err.message);
+      logEvent("error", "request_error", "request", env, requestId, { error: logErrorInfo(err) });
       return json({ success: false, error: "internal error" }, 500);
     }
 }

@@ -67,6 +67,7 @@ function buildEnv() {
   }
   const env = { DB: cachedDb };
   for (const k of ENV_KEYS) env[k] = process.env[k] || "";
+  env.PLATFORM = "node"; /* 日志 platform 字段标识（非环境变量，不走白名单） */
   return env;
 }
 

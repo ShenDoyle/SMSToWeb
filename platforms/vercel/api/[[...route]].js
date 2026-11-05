@@ -72,6 +72,7 @@ function buildEnv() {
   /* Vercel Edge 单次请求约 25s 上限：长轮询默认 20s，留出响应头写出的余量
      （显式配置 WAIT_MAX_SECONDS 时以配置为准） */
   if (!env.WAIT_MAX_SECONDS) env.WAIT_MAX_SECONDS = "20";
+  env.PLATFORM = "vercel"; /* 日志 platform 字段标识（非环境变量，不走白名单） */
   return env;
 }
 

@@ -154,7 +154,7 @@ function makeFakeTurso(dbPath) {
 
 const db = new LocalDatabase(DB);
 function env(extra) {
-  return Object.assign({ DB: db, RECEIVE_TOKEN: "tok", ENABLE_AUTH: "", ADMIN_PASSWORD: "", SESSION_SECRET: "test-session-secret-0123456789abcdef", RETENTION_DAYS: "30" }, extra || {});
+  return Object.assign({ DB: db, RECEIVE_TOKEN: "tok", ENABLE_AUTH: "", ADMIN_PASSWORD: "", SESSION_SECRET: "test-session-secret-0123456789abcdef", RETENTION_DAYS: "30", PLATFORM: "test" }, extra || {});
 }
 function R(method, path, opts) {
   opts = opts || {};
@@ -2283,6 +2283,83 @@ async function main() {
   }
 
   /* ===== 阶段 5 组：结构化日志 ===== */
+  group("阶段 5 组：结构化日志（字段/服务端 requestId/脱敏/安全响应/降级）");
+  {
+    const realE = console.error, realW = console.warn, realL = console.log;
+    const lines = [];
+    const grab = function () { lines.push([].join.call(arguments, " ")); };
+    console.error = grab; console.warn = grab; console.log = grab;
+    let r1 = null, r2 = null;
+    try {
+      /* 1 全局异常入口：DB 连续抛错（message/stack 为 getter，内容含手机号与 bearer 令牌） */
+      const boom = {
+        get name() { return "BoomError"; },
+        get message() { return "upstream failed for 13812345678, bearer abcdef123456"; },
+        get stack() { return "BoomError: x\n    at handleList (worker.js:100:9)\n    at fetch (worker.js:200:1)"; },
+      };
+      const eBoom = env({ DB: { prepare: function () { throw boom; } } });
+      r1 = await call("GET", "/api/messages", eBoom, { headers: { "X-Request-Id": "client-forged-rid" } });
+      /* 2 name/stack getter 自身抛错的降级：日志失败不得破坏业务响应 */
+      const boom2 = {
+        get name() { throw new Error("name getter boom"); },
+        get message() { return "boom2"; },
+        get stack() { throw new Error("stack getter boom"); },
+      };
+      const eBoom2 = env({ DB: { prepare: function () { throw boom2; } } });
+      r2 = await call("GET", "/api/messages", eBoom2);
+      /* 3 脱敏补充场景（独立短消息，避开 message 内容键 64 字符截断） */
+      const boom3 = {
+        get name() { return "BoomError"; },
+        get message() { return "Authorization: Bearer zzz888777 failed"; },
+        get stack() { return "BoomError: x\n    at handleList (worker.js:100:9)"; },
+      };
+      await call("GET", "/api/messages", env({ DB: { prepare: function () { throw boom3; } } }));
+      const boom4 = {
+        get name() { return "BoomError"; },
+        get message() { return "Cookie: sms_auth=deadbeef1234 access_token=qqq555666"; },
+        get stack() { return "BoomError: x\n    at handleList (worker.js:100:9)"; },
+      };
+      await call("GET", "/api/messages", env({ DB: { prepare: function () { throw boom4; } } }));
+    } finally {
+      console.error = realE; console.warn = realW; console.log = realL;
+    }
+    check(r1 && r1.status === 500 && r1.data && r1.data.error === "internal error", "日志：DB 连续抛错 → 500 + 仅安全文案");
+    check(!JSON.stringify(r1 && r1.data).match(/BoomError|worker\.js|stack|handleList/), "日志：错误响应不含类名/堆栈（堆栈只留服务端）");
+    const recs = lines.map(function (l) { try { return JSON.parse(l); } catch (_) { return null; } }).filter(Boolean);
+    const rec = recs.find(function (x) { return x.event === "request_error"; });
+    check(!!rec, "日志：全局异常入口输出可解析单行 JSON（捕获 " + lines.length + " 行，可解析 " + recs.length + "）");
+    if (rec) {
+      check(/^\d{4}-\d{2}-\d{2}T/.test(rec.timestamp) && rec.level === "error" && rec.phase === "request", "日志：timestamp/level/phase 字段格式正确");
+      check(rec.platform === "test", "日志：platform 字段取自入口注入");
+      check(!!rec.requestId && rec.requestId !== "client-forged-rid" && rec.requestId !== "-", "日志：requestId 服务端生成，不采信客户端 X-Request-Id（防伪造）");
+      check(rec.requestId.indexOf("rid-") === 0 || /^[0-9a-f-]{36}$/.test(rec.requestId), "日志：requestId 为 UUID 或降级格式");
+      check(rec.error && rec.error.name === "BoomError" && rec.error.stack && rec.error.stack.indexOf("handleList") !== -1, "日志：error 对象含 name/message/stack 且服务端保留堆栈");
+      check(String(rec.error.message).indexOf("13812345678") === -1 && String(rec.error.message).indexOf("138****5678") !== -1, "日志：错误信息中的手机号已脱敏");
+      check(String(rec.error.message).indexOf("abcdef123456") === -1 && String(rec.error.message).indexOf("***") !== -1, "日志：错误信息中的 bearer 令牌已脱敏");
+      const rec3 = recs.find(function (x) { return x.event === "request_error" && String(x.error && x.error.message).indexOf("Authorization") !== -1; });
+      check(!!rec3 && String(rec3.error.message).indexOf("zzz888777") === -1 && String(rec3.error.message).indexOf("Authorization: Bearer ***") !== -1, "日志：Authorization: Bearer 整串脱敏（不残留真令牌）");
+      const rec4 = recs.find(function (x) { return x.event === "request_error" && String(x.error && x.error.message).indexOf("Cookie") !== -1; });
+      check(!!rec4 && String(rec4.error.message).indexOf("deadbeef1234") === -1 && String(rec4.error.message).indexOf("qqq555666") === -1 && String(rec4.error.message).indexOf("Cookie: ***") !== -1 && String(rec4.error.message).indexOf("access_token=***") !== -1, "日志：Cookie 值与裸 access_token= 已脱敏");
+    }
+    const sch = recs.find(function (x) { return x.event === "schema_heal_failed"; });
+    check(!!sch && sch.phase === "schema" && sch.requestId === (rec && rec.requestId), "日志：ensureSchema 失败走结构化告警且沿用同一 requestId");
+    check(r2 && r2.status === 500 && r2.data && r2.data.error === "internal error", "日志：name/stack getter 抛错时业务仍返回 500（日志降级不破坏响应）");
+
+    /* 3 cron 清理结构化日志 */
+    const lines2 = [];
+    console.log = function () { lines2.push([].join.call(arguments, " ")); };
+    try { await runCron(env()); } finally { console.log = realL; }
+    const crecs = lines2.map(function (l) { try { return JSON.parse(l); } catch (_) { return null; } }).filter(Boolean);
+    const crec = crecs.find(function (x) { return x.event === "cron_cleanup"; });
+    check(!!crec && crec.phase === "cron" && crec.level === "info" && typeof crec.cleaned_old === "number" && typeof crec.purged_deleted === "number",
+      "日志：cron 清理输出结构化 info 行（cleaned/purged 数值化）");
+    if (crec) check(crec.retention_days === 30 && !!crec.requestId, "日志：cron 字段 retention_days/requestId 齐备");
+  }
+
+  /* ===== 阶段 1-3 第二提交点组：设备删除 / 合并 → 原子事务 =====
+   * 证据等级：L2（本机真实 node:sqlite 本地库 + 真实 BEGIN/COMMIT/ROLLBACK）。
+   * 故障注入仅替换 _execDirect 制造"某条语句执行失败"或"ROLLBACK 失败"，事务本身仍是真实 SQLite 事务；
+   * 不模拟 D1 / Turso 的真实服务端行为（那属 L3，未在本轮执行）。 */
   group("阶段 1-3 第二提交点：设备删除/合并原子事务（守卫入事务 + 回滚 + fail-closed）");
   {
     const mkDev = async function (name, sim) {
