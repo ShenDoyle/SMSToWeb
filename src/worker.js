@@ -877,6 +877,8 @@ async function handleReceive(request, env, url, ctx) {
   if (!dev || dev.id === undefined) return json({ success: false, error: "device upsert failed" }, 500);
 
   // 去重：同设备+发件人+内容+秒级时间 视为重复（SmsForwarder 重试场景）；重复不重复转发
+  // 遗留风险 R-a（阶段 1-3 已记录、本阶段不修复）：上面的 upsert 与下面的 INSERT 是两条独立语句，
+  //   若设备在两者之间被并发删除，消息可能以过期 id 落库成为孤儿（列表 JOIN 不可见但计入总数）。
   const receivedAt = normalizeTime(data.time);
   const ins = await env.DB.prepare(
     "INSERT OR IGNORE INTO messages(device_id, sender, content, received_at, source) VALUES(?1, ?2, ?3, ?4, 'sms')"
@@ -932,6 +934,8 @@ async function handlePush(request, env, url, ctx) {
   if (!dev || dev.id === undefined) return json({ success: false, error: "device upsert failed" }, 500);
 
   const receivedAt = normalizeTime(body.time);
+  // 遗留风险 R-a（阶段 1-3 已记录、本阶段不修复）：upsert 与 INSERT 两条独立语句，
+  //   设备在两者之间被并发删除时，消息可能以过期 id 落库成为孤儿（与 /api/receive 同型）。
   const ins = await env.DB.prepare(
     "INSERT OR IGNORE INTO messages(device_id, sender, content, received_at, source) VALUES(?1, ?2, ?3, ?4, ?5)"
   ).bind(dev.id, sender, content, receivedAt, source).run();
@@ -3961,7 +3965,95 @@ CREATE TABLE IF NOT EXISTS settings (
 `;
 /* ==== SCHEMA_SQL END ==== */
 
+/* ---------------- 原子事务基础设施（阶段 1-3 · 第一提交点） ----------------
+ * 统一入口：atomicBatch(env.DB, [{ sql, args }]) → { results: [{ changes, last_row_id }] }
+ *
+ * 三个平台的落地方式：
+ *   D1（Cloudflare 原生 binding）——db.batch()，官方语义即 SQL 事务（任一语句失败整体回滚，
+ *     返回逐语句 meta.changes）；本函数负责把异常按「确定失败 / 状态未知」分类，绝不误报成功。
+ *   Turso——适配层 batchAtomic：3 个 RTT 显式事务（BEGIN / 写语句 / COMMIT）+ baton 流状态机。
+ *   本地 SQLite——适配层 batchAtomic：连接级 FIFO 队列 + 事务内专用直连通道（_execDirect）。
+ *
+ * 错误语义（两个平台共用）：
+ *   code="FAILED"  数据轴确定「本次事务未提交」（NOT_COMMITTED）→ 调用方可安全重试；
+ *   code="UNKNOWN" 数据轴无法证明（COMMIT 已发出但结果未确认）→ 不得重试、不得对外报成功，
+ *                  统一交给现有全局错误路径（500 + 结构化日志）。
+ * 本阶段不做任何内部自动重试（S1 保守变体）。 */
+class AtomicBatchError extends Error {
+  constructor(code, phase, detail, cause) {
+    super("atomic batch " + (code === "UNKNOWN" ? "状态未知" : "已失败") + "（" + String(phase || "-") + "）: " + String(detail || "-"));
+    this.name = "AtomicBatchError";
+    this.code = code === "UNKNOWN" ? "UNKNOWN" : "FAILED";
+    this.phase = String(phase || "-");
+    this.detail = String(detail || "");
+    this.retryable = this.code === "FAILED";
+    this.effectUnproven = this.code === "UNKNOWN";
+    if (cause !== undefined) { try { this.cause = cause; } catch (_) { /* 只读宿主忽略 */ } }
+  }
+}
+
+/* D1 异常分类：只有「语句级确定失败」才可判定整批已回滚（D1 batch 是 SQL 事务）；
+   其余（网络中断 / 内部错误 / 无响应）一律按状态未知处理——宁可保守误报未知，不可误报未提交。
+   证据等级：D1 batch 原子语义为官方文档确认；异常文本分类为设计推断，待 L3 真库验证。 */
+const D1_CONFIRMED_FAILURE_RE = /constraint|syntax error|no such (table|column)|NOT NULL|datatype mismatch|UNIQUE|FOREIGN KEY|too many SQL variables/i;
+
+function atomicErrText(e) {
+  try { return String((e && e.message) || e || "unknown"); } catch (_) { return "unknown"; }
+}
+
+async function atomicBatch(db, statements) {
+  if (!db || typeof db.prepare !== "function") throw new AtomicBatchError("FAILED", "prepare", "env.DB 不可用");
+  if (!Array.isArray(statements)) throw new AtomicBatchError("FAILED", "prepare", "statements 必须是数组");
+  if (!statements.length) return { results: [] }; /* 空批：不发任何请求，天然原子 */
+
+  /* 适配层（Turso / 本地 SQLite）已实现两轴状态机：结构化错误原样透传，绝不吞掉 UNKNOWN */
+  if (typeof db.batchAtomic === "function") {
+    try {
+      return await db.batchAtomic(statements);
+    } catch (e) {
+      if (e && (e.code === "UNKNOWN" || e.code === "FAILED")) throw e;
+      /* 适配层抛出非结构化异常 = 无法判定所处阶段 ⇒ 保守按状态未知处理（绝不误判为可重试） */
+      throw new AtomicBatchError("UNKNOWN", "adapter", atomicErrText(e), e);
+    }
+  }
+
+  /* D1：原生 batch */
+  if (typeof db.batch === "function") {
+    let prepared;
+    try {
+      prepared = statements.map(function (s) {
+        if (!s || typeof s.sql !== "string" || !s.sql) throw new Error("语句缺少 sql");
+        const args = s.args === undefined || s.args === null ? [] : s.args;
+        if (!Array.isArray(args)) throw new Error("语句 args 必须是数组");
+        return db.prepare(s.sql).bind(...args);
+      });
+    } catch (e) {
+      /* 准备阶段失败：没有任何语句发出（FAILED，可安全重试） */
+      throw new AtomicBatchError("FAILED", "prepare", atomicErrText(e), e);
+    }
+    let out;
+    try {
+      out = await db.batch(prepared);
+    } catch (e) {
+      const msg = atomicErrText(e);
+      if (D1_CONFIRMED_FAILURE_RE.test(msg)) throw new AtomicBatchError("FAILED", "execute", msg, e);
+      /* 无响应 / 内部错误：无法证明未提交（唯一 UNKNOWN 来源） */
+      throw new AtomicBatchError("UNKNOWN", "execute", msg, e);
+    }
+    if (!Array.isArray(out)) throw new AtomicBatchError("UNKNOWN", "execute", "D1 batch 返回结构异常");
+    return {
+      results: out.map(function (r) {
+        const m = (r && r.meta) || {};
+        return { changes: Number(m.changes) || 0, last_row_id: Number(m.last_row_id) || 0 };
+      }),
+    };
+  }
+
+  throw new AtomicBatchError("FAILED", "prepare", "env.DB 既不支持 batchAtomic 也不支持 batch");
+}
+
 /* 自愈完成的 DB 实例集合（WeakSet 按 env.DB 键控：每个库实例只自愈一次，多库/测试互不干扰） */
+
 const schemaHealed = new WeakSet();
 /* 第 4 步升级可观测：记录每个 DB 实例最近一次 schema 自愈结果（成功/失败 + 时间 + 错误摘要），
    经 GET /api/stats（管理接口，isAuthed）透出，供存量用户升级后自检；不落库、不引依赖。 */

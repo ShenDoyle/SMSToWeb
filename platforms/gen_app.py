@@ -141,6 +141,8 @@ export {
   revokeToken,
   rotateToken,
   touchLastUsed,
+  atomicBatch,
+  AtomicBatchError,
 }
 """
 

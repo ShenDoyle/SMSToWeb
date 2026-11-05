@@ -8,12 +8,12 @@
 *       会话时长可配置（settings 表 / GET·PUT /api/settings / 默认回退 / 登录 Max-Age 同步）。
  * 运行：node tests/run.mjs   （退出码 0=全过，1=有失败，2=异常）
  */
-import { fetchApp, runCron, handleCronRequest, createToken, listTokens, findTokenByHash, revokeToken, rotateToken, touchLastUsed } from "../platforms/node/app.js";
-import { LocalDatabase } from "../platforms/node/db.js";
+import { fetchApp, runCron, handleCronRequest, createToken, listTokens, findTokenByHash, revokeToken, rotateToken, touchLastUsed, atomicBatch, AtomicBatchError } from "../platforms/node/app.js";
+import { LocalDatabase, TursoDatabase, AtomicBatchError as DbAtomicBatchError } from "../platforms/node/db.js";
 import { rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, StatementSync } from "node:sqlite";
 
 const DB = join(tmpdir(), "smstoweb_test_" + process.pid + ".db");
 let pass = 0, fail = 0;
@@ -29,7 +29,8 @@ function cleanup() {
 function cleanupPath(p) {
   for (const suf of ["", "-wal", "-shm", "-journal"]) { try { rmSync(p + suf, { force: true }); } catch (_) {} }
 }
-/* 最小 D1 风格包装：包住裸 node:sqlite 库（绕过 LocalDatabase 构造期的自动建表），验证运行时自愈与数据层本身 */
+/* 最小 D1 风格包装：包住裸 node:sqlite 库（绕过 LocalDatabase 构造期的自动建表），验证运行时自愈与数据层本身。
+   batch 按 D1 官方语义实现：整批即一个事务，任一语句失败整体回滚。 */
 function makeD1(raw) {
   return {
     prepare(sql) {
@@ -40,10 +41,115 @@ function makeD1(raw) {
         all: async () => ({ results: stmt.all(...args) }),
         first: async () => { const rows = stmt.all(...args); return rows.length ? rows[0] : null; },
         run: async () => { const r = stmt.run(...args); return { meta: { changes: Number(r.changes) || 0, last_row_id: Number(r.lastInsertRowid) || 0 } }; },
+        /* 仅供 batch 读取（D1 真实实现为内部字段，测试桩显式暴露） */
+        _stmt: stmt,
+        get _args() { return args; },
       };
       return st;
     },
+    batch: async (stmts) => {
+      raw.exec("BEGIN");
+      try {
+        const out = stmts.map(function (st) {
+          const r = st._stmt.run(...st._args);
+          return { results: [], success: true, meta: { changes: Number(r.changes) || 0, last_row_id: Number(r.lastInsertRowid) || 0 } };
+        });
+        raw.exec("COMMIT");
+        return out;
+      } catch (e) {
+        try { raw.exec("ROLLBACK"); } catch (_) {}
+        throw e;
+      }
+    },
   };
+}
+
+/* 伪 Turso 后端：把 v2 pipeline 请求翻译到真实 node:sqlite 执行（传输层走 fetch Mock）。
+   用于既验证适配层编解码，又让契约测试跑在真 SQL 语义上——传输是假的，SQL 行为是真的。 */
+function cellV(v) {
+  if (v === null || v === undefined) return { type: "null" };
+  if (typeof v === "bigint") return { type: "integer", value: v.toString() };
+  if (typeof v === "number") return Number.isInteger(v) ? { type: "integer", value: String(v) } : { type: "float", value: String(v) };
+  if (typeof v === "string") return { type: "text", value: v };
+  if (v instanceof Uint8Array) return { type: "blob", base64: Buffer.from(v).toString("base64") };
+  return { type: "text", value: String(v) };
+}
+function makeFakeTurso(dbPath) {
+  const raw = new DatabaseSync(dbPath);
+  raw.exec("PRAGMA journal_mode = WAL;");
+  const streams = new Map();      /* 有效 baton → true（Hrana 流会话） */
+  let seq = 0;
+  const fake = {
+    raw: raw,
+    requests: [],                 /* 每次请求的 { url, baton, sqls }，供协议形状断言 */
+    emitBaseUrl: null,            /* 设置后：首个响应返回该 base_url（验证粘性路由） */
+    closeAfter: null,             /* 设置数字 N：第 N 个响应返回 baton=null（模拟服务端关流） */
+    fetch: async function (url, opts) {
+      let payload;
+      try { payload = JSON.parse(String(opts.body)); } catch (_) {
+        return new Response(JSON.stringify({ results: [{ type: "error", error: "bad json body" }] }), { status: 200 });
+      }
+      const reqBaton = payload.baton === undefined || payload.baton === null ? null : String(payload.baton);
+      let baton = reqBaton;
+      if (baton === null) {
+        baton = "b" + (++seq);
+        streams.set(baton, true);
+      } else if (!streams.has(baton)) {
+        /* 未知/过期 baton：服务端关流并报错（协议语义） */
+        return new Response(JSON.stringify({ baton: null, base_url: null, results: [{ type: "error", error: "baton expired" }] }), { status: 200 });
+      }
+      fake.requests.push({ url: String(url), baton: reqBaton, sqls: (payload.requests || []).map(function (r) { return r.type === "execute" ? String((r.stmt || {}).sql) : r.type; }) });
+      const out = [];
+      for (const req of payload.requests || []) {
+        if (req.type === "close") { streams.delete(baton); out.push({ type: "ok", response: { type: "close" } }); continue; }
+        if (req.type !== "execute") { out.push({ type: "ok", response: { type: req.type } }); continue; }
+        const stmt = req.stmt || {};
+        try {
+          const args = (stmt.args || []).map(function (a) {
+            if (!a || a.type === "null") return null;
+            if (a.type === "integer") return Number(a.value);
+            if (a.type === "float") return Number(a.value);
+            if (a.type === "text") return a.value;
+            if (a.type === "blob") return Buffer.from(a.base64 || "", "base64");
+            return null;
+          });
+          const s = raw.prepare(stmt.sql);
+          const stripped = String(stmt.sql).replace(/--[^\n]*\n?/g, "").trim();
+          const isReader = /^(select|pragma|with|values)/i.test(stripped) || /\breturning\b/i.test(stripped);
+          if (isReader) {
+            const rows = s.all(...args);
+            const cols = rows.length ? Object.keys(rows[0]) : [];
+            out.push({ type: "ok", response: { type: "execute", result: {
+              cols: cols.map(function (n) { return { name: n }; }),
+              rows: rows.map(function (r) { return cols.map(function (n) { return cellV(r[n]); }); }),
+              affected_row_count: 0, last_insert_rowid: 0 } } });
+          } else {
+            const r = s.run(...args);
+            out.push({ type: "ok", response: { type: "execute", result: {
+              cols: [], rows: [], affected_row_count: Number(r.changes) || 0,
+              last_insert_rowid: Number(r.lastInsertRowid) || 0 } } });
+          }
+        } catch (e) {
+          /* 语句级错误按协议形态返回（其余语句仍会被服务端执行） */
+          out.push({ type: "error", error: String((e && e.message) || e) });
+        }
+      }
+      let respBaton = baton;
+      let baseUrl = null;
+      if (fake.emitBaseUrl && fake.requests.length === 1) baseUrl = fake.emitBaseUrl;
+      if (fake.closeAfter !== null && fake.requests.length >= fake.closeAfter) { streams.delete(baton); respBaton = null; }
+      else if (streams.has(baton)) {
+        /* 协议要求：响应 baton 必须与请求 baton 不同 */
+        streams.delete(baton);
+        respBaton = "b" + (++seq);
+        streams.set(respBaton, true);
+      } else {
+        respBaton = null;
+      }
+      return new Response(JSON.stringify({ baton: respBaton, base_url: baseUrl, results: out }), { status: 200, headers: { "Content-Type": "application/json" } });
+    },
+  };
+  return fake;
 }
 
 const db = new LocalDatabase(DB);
@@ -1488,6 +1594,695 @@ async function main() {
     check(r.status === 400, "矩阵：ENABLE_AUTH=false 登录接口 → 400 auth disabled（原行为）");
   }
 
+  /* ===== 阶段 1 组：数据库适配层——Turso fetch Mock 分支覆盖 ===== */
+  group("阶段 1 组：Turso 适配层 fetch Mock（请求编码/响应解码/异常分支）");
+  {
+    const realFetch = globalThis.fetch;
+    const captured = [];
+    function okResult(cols, rows, changes, lastId) {
+      return new Response(JSON.stringify({
+        results: [{ type: "execute", response: { result: {
+          cols: cols.map(function (n) { return { name: n }; }),
+          rows: rows, affected_row_count: changes, last_insert_rowid: lastId } } }],
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    function errResp(msg) {
+      return new Response(JSON.stringify({ results: [{ type: "error", error: msg }] }), { status: 200 });
+    }
+    async function p(f) { try { await f(); return null; } catch (e) { return String((e && e.message) || e); } }
+
+    let responder = function () { return okResult([], [], 0, 0); };
+    globalThis.fetch = async function (url, opts) {
+      captured.push({ url: String(url), opts: opts });
+      return responder(String(url), opts);
+    };
+    try {
+      /* 0 构造校验 */
+      let msg = await p(async function () { new TursoDatabase("", "tok"); });
+      check(/缺少 TURSO_DATABASE_URL/.test(msg || ""), "构造：缺 URL 抛「缺少 TURSO_DATABASE_URL」");
+      msg = await p(async function () { new TursoDatabase("ftp://bad.example/db", "tok"); });
+      check(/格式不正确/.test(msg || ""), "构造：非 https/libsql URL 抛「格式不正确」");
+      const u = new TursoDatabase("libsql://probe-db-org.turso.io", "test-token");
+      check(u.endpoint === "https://probe-db-org.turso.io/v2/pipeline", "构造：libsql:// 改写为 https:// 并拼 /v2/pipeline 端点");
+
+      /* 1 请求编码：单次 POST、端点、鉴权头、参数类型映射 */
+      captured.length = 0;
+      responder = function () { return okResult([], [], 1, 7); };
+      const rr = await u.prepare("INSERT INTO t VALUES (?,?,?,?)").bind(true, 1.5, "文本", null).run();
+      check(captured.length === 1 && captured[0].opts.method === "POST", "编码：execute 为单次 POST");
+      check(captured[0].url === "https://probe-db-org.turso.io/v2/pipeline", "编码：请求 URL 与 endpoint 一致");
+      const h = captured[0].opts.headers;
+      check(h["Authorization"] === "Bearer test-token" && h["Content-Type"] === "application/json", "编码：Bearer 鉴权 + JSON 头");
+      const body = JSON.parse(captured[0].opts.body);
+      check(body.requests.length === 2 && body.requests[0].type === "execute" && body.requests[1].type === "close", "编码：pipeline 请求体 = execute + close 两段");
+      const enc = body.requests[0].stmt.args;
+      check(enc[0].type === "integer" && enc[0].value === "1", "编码：boolean true → integer \"1\"");
+      check(enc[1].type === "float" && enc[1].value === "1.5", "编码：小数 → float");
+      check(enc[2].type === "text" && enc[2].value === "文本", "编码：中文字符串 → text 原样透传");
+      check(enc[3].type === "null", "编码：null → null");
+      check(JSON.stringify(rr.meta) === JSON.stringify({ changes: 1, last_row_id: 7 }), "解码：affected_row_count/last_insert_rowid → meta");
+      captured.length = 0;
+      await u.prepare("SELECT 1").bind(9007199254740993n).all();
+      check(JSON.parse(captured[0].opts.body).requests[0].stmt.args[0].type === "integer", "编码：bigint → integer 文本（无精度丢失）");
+
+      /* 2 响应解码：类型矩阵 + 空结果 */
+      captured.length = 0;
+      responder = function () {
+        return new Response(JSON.stringify({
+          results: [{ type: "execute", response: { result: {
+            cols: [{ name: "i" }, { name: "f" }, { name: "s" }, { name: "n" }, { name: "u" }, { name: "b" }],
+            rows: [[{ type: "integer", value: "42" }, { type: "float", value: "2.5" }, { type: "text", value: "中文🚀" },
+                    { type: "null" }, { type: "weird" }, { type: "blob", base64: "YWJj" }]],
+            affected_row_count: 0, last_insert_rowid: 0 } } }],
+        }), { status: 200 });
+      };
+      const one = await u.prepare("SELECT * FROM probe").first();
+      check(one.i === 42 && one.f === 2.5 && one.s === "中文🚀" && one.n === null, "解码：integer/float/text/null 正确");
+      check(one.u === null, "解码：未知单元格类型静默 → null（现状行为留档）");
+      check(one.b === "YWJj", "解码：blob → base64 字符串");
+      responder = function () { return okResult([], [], 0, 0); };
+      check((await u.prepare("SELECT 0 WHERE 0").all()).results.length === 0, "解码：空结果 all() → []");
+      check((await u.prepare("SELECT 0 WHERE 0").first()) === null, "解码：空结果 first() → null");
+
+      /* 3 HTTP / 网络 / 响应结构异常分支 */
+      responder = function () { return new Response("denied", { status: 401 }); };
+      msg = await p(function () { return u.prepare("X").all(); });
+      check(/Turso HTTP 401/.test(msg || ""), "异常：HTTP 401 → 「Turso HTTP 401」");
+      responder = function () { return new Response("bad", { status: 400 }); };
+      msg = await p(function () { return u.prepare("X").all(); });
+      check(/Turso HTTP 400/.test(msg || ""), "异常：HTTP 400 → 「Turso HTTP 400」");
+      responder = function () { return new Response("boom", { status: 500 }); };
+      msg = await p(function () { return u.prepare("X").all(); });
+      check(/Turso HTTP 500/.test(msg || ""), "异常：HTTP 500 → 「Turso HTTP 500」");
+      responder = function () { throw new Error("ECONNRESET"); };
+      msg = await p(function () { return u.prepare("X").all(); });
+      check(/Turso 网络请求失败/.test(msg || "") && /ECONNRESET/.test(msg || ""), "异常：fetch reject → 「Turso 网络请求失败」并带原因");
+      responder = function () { return new Response("not-json", { status: 200 }); };
+      msg = await p(function () { return u.prepare("X").all(); });
+      check(!!msg && /Unexpected|JSON|token/i.test(msg), "异常：响应体非 JSON → 拒绝（现状为裸 SyntaxError 穿透）");
+      responder = function () { return new Response("{}", { status: 200 }); };
+      msg = await p(function () { return u.prepare("X").all(); });
+      check(/缺少 results/.test(msg || ""), "异常：缺 results → 「缺少 results」");
+      responder = function () { return errResp("no such table: ghost"); };
+      msg = await p(function () { return u.prepare("SELECT * FROM ghost").all(); });
+      check(/语句执行失败/.test(msg || "") && /ghost/.test(msg || ""), "异常：SQL 执行错误 → 「语句执行失败」并带引擎信息");
+      responder = function () { return new Response(JSON.stringify({ results: [{ type: "execute", response: {} }] }), { status: 200 }); };
+      msg = await p(function () { return u.prepare("X").all(); });
+      check(/缺少 result/.test(msg || ""), "异常：缺 result → 「缺少 result」");
+
+      /* 4 参数边界：非法类型 / NaN */
+      responder = function () { return okResult([], [], 0, 0); };
+      msg = await p(function () { return u.prepare("X").bind({ a: 1 }).all(); });
+      check(/不支持的 SQL 绑定参数类型/.test(msg || ""), "边界：对象参数 → 「不支持的 SQL 绑定参数类型」");
+      captured.length = 0;
+      await u.prepare("X").bind(NaN).all();
+      check(JSON.parse(captured[0].opts.body).requests[0].stmt.args[0].type === "float", "边界：NaN 编码为 float \"NaN\"（真库是否拒收列入必验项）");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }
+
+  /* ===== 阶段 2 组：同一契约分别跑 LocalDatabase 与 TursoDatabase ===== */
+  group("阶段 2 组：Local/Turso 双适配契约（插入/更新/删除/绑定/排序分页/事务失败回滚）");
+  {
+    async function contractSuite(tbl, dbx) {
+      const out = [];
+      await dbx.prepare("CREATE TABLE " + tbl + " (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, num INTEGER, note TEXT)").run();
+      /* 参数绑定：中文/双引号/单引号/分号/emoji/null */
+      await dbx.prepare("INSERT INTO " + tbl + " (name, num, note) VALUES (?,?,?)").bind('中文 "双引号" \'单引号\';--🚀', 42, null).run();
+      await dbx.prepare("INSERT INTO " + tbl + " (name, num, note) VALUES (?,?,?)").bind("ascii", 7, "note-7").run();
+      await dbx.prepare("INSERT INTO " + tbl + " (name, num, note) VALUES (?,?,?)").bind("第三", 7, "note-3").run();
+      /* 插入后读取 */
+      const r1 = await dbx.prepare("SELECT name, num, note FROM " + tbl + " ORDER BY num DESC, id").all();
+      out.push(r1.results);
+      /* 更新后读取 */
+      const u1 = await dbx.prepare("UPDATE " + tbl + " SET num = ? WHERE num = ?").bind(100, 7).run();
+      out.push({ changes: u1.meta.changes });
+      out.push(await dbx.prepare("SELECT num FROM " + tbl + " WHERE name = ?").bind("ascii").first());
+      /* 排序分页 */
+      const pg = await dbx.prepare("SELECT id, name FROM " + tbl + " ORDER BY num ASC, id LIMIT 2 OFFSET 1").all();
+      out.push(pg.results.map(function (r) { return { id: r.id, name: r.name }; }));
+      /* 删除后读取 */
+      const d1 = await dbx.prepare("DELETE FROM " + tbl + " WHERE name = ?").bind("第三").run();
+      out.push({ changes: d1.meta.changes });
+      out.push(await dbx.prepare("SELECT COUNT(*) AS c FROM " + tbl).first());
+      out.push(await dbx.prepare("SELECT id FROM " + tbl + " WHERE name = ?").bind("不存在").first());
+      /* 事务失败后的状态：BEGIN → INSERT → 违约失败 → ROLLBACK → 半状态不得残留 */
+      await dbx.prepare("BEGIN").run();
+      await dbx.prepare("INSERT INTO " + tbl + " (name, num, note) VALUES (?,?,?)").bind("tx", 1, null).run();
+      let threw = false;
+      try { await dbx.prepare("INSERT INTO " + tbl + " (name) VALUES (NULL)").run(); } catch (_) { threw = true; }
+      out.push({ threw: threw });
+      await dbx.prepare("ROLLBACK").run();
+      out.push(await dbx.prepare("SELECT COUNT(*) AS c FROM " + tbl + " WHERE name = ?").bind("tx").first());
+      /* 布尔绑定 */
+      await dbx.prepare("INSERT INTO " + tbl + " (name, num, note) VALUES (?,?,?)").bind("bool", true, "x").run();
+      out.push(await dbx.prepare("SELECT num FROM " + tbl + " WHERE name = ?").bind("bool").first());
+      return out;
+    }
+
+    const localPath = join(tmpdir(), "smstoweb_contract_l_" + process.pid + ".db");
+    const tursoPath = join(tmpdir(), "smstoweb_contract_t_" + process.pid + ".db");
+    cleanupPath(localPath); cleanupPath(tursoPath);
+    const ldb = new LocalDatabase(localPath);
+    const fake = makeFakeTurso(tursoPath);
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = fake.fetch;
+    const tdb = new TursoDatabase("https://contract-db-org.turso.io/probe", "tok");
+    let outL = null, outT = null, suiteErr = null;
+    try {
+      outL = await contractSuite("ct_local", ldb);
+      outT = await contractSuite("ct_turso", tdb);
+    } catch (e) { suiteErr = String((e && e.stack) || e); }
+    finally {
+      globalThis.fetch = realFetch;
+    }
+    check(!suiteErr, "契约：双适配套件无异常" + (suiteErr ? "（" + suiteErr + "）" : ""));
+    if (!suiteErr) {
+      check(outL.length === 10 && outT.length === 10, "契约：双适配步骤数一致（各 10 步）");
+      const same = JSON.stringify(outL) === JSON.stringify(outT);
+      check(same, "契约：同一 SQL 序列 10 步输出逐字段一致（Local vs Turso）" + (same ? "" : "\n    L=" + JSON.stringify(outL).slice(0, 400) + "\n    T=" + JSON.stringify(outT).slice(0, 400)));
+      check(outL[0].length === 3 && outL[0][0].name.indexOf("🚀") !== -1 && outL[0][0].name.indexOf("--") !== -1, "契约：中文+引号+分号+emoji 参数原样写入读回");
+      check(outL[0][0].note === null && outL[0][0].num === 42, "契约：null 参数 → null，整数 42 原值");
+      check(outL[1].changes === 2, "契约：批量 UPDATE changes=2");
+      check(outL[2] && outL[2].num === 100, "契约：更新后读取生效");
+      check(outL[3].length === 2 && outL[3][0].name === "ascii", "契约：ORDER BY + LIMIT/OFFSET 分页结果一致");
+      check(outL[4].changes === 1 && outL[5].c === 2, "契约：删除后读取 changes=1、COUNT=2");
+      check(outL[6] === null, "契约：无匹配行 first() → null");
+      check(outL[7].threw === true, "契约：事务内违约语句双适配均抛错");
+      check(outL[8].c === 0, "契约：ROLLBACK 后失败事务写入不残留");
+      check(outL[9].num === 1, "契约：boolean 绑定 true → 整数 1");
+    }
+    cleanupPath(localPath); cleanupPath(tursoPath);
+  }
+
+  /* ===== 阶段 3 组：ensureSchema 经 Turso 适配层迁移裸库 ===== */
+  group("阶段 3 组：ensureSchema × Turso（bare 库经 fetch Mock 真 SQL 迁移）");
+  {
+    const p8 = join(tmpdir(), "smstoweb_scheema_turso_" + process.pid + ".db");
+    cleanupPath(p8);
+    const fake = makeFakeTurso(p8);
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = fake.fetch;
+    let err = null;
+    try {
+      const tdb = new TursoDatabase("https://bare-db-org.turso.io/probe", "tok");
+      const e8 = env({ DB: tdb });
+      const r1 = await call("GET", "/api/messages", e8);
+      check(r1.status === 200, "迁移：裸库首请求 → 200（自愈经 Turso 适配层完成）");
+      const tables = fake.raw.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map(function (r) { return r.name; });
+      check(tables.indexOf("devices") !== -1 && tables.indexOf("messages") !== -1 && tables.indexOf("tokens") !== -1 && tables.indexOf("settings") !== -1, "迁移：四表建齐（devices/messages/tokens/settings）");
+      const cols = fake.raw.prepare("PRAGMA table_info(tokens)").all().map(function (r) { return r.name; }).join(",");
+      check(cols === "id,name,token_hash,token_prefix,created_at,last_used_at,revoked_at,expires_at,note", "迁移：tokens 表 9 列（幂等补列路径）");
+      const idxCount = fake.raw.prepare("SELECT COUNT(*) AS c FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'").all()[0].c;
+      check(idxCount >= 8, "迁移：8 个业务索引建齐（实际 " + idxCount + "）");
+      const st = await call("GET", "/api/stats", e8);
+      check(st.status === 200 && st.data && st.data.schema && st.data.schema.state === "ok", "迁移：stats schema.state=ok");
+      const r2 = await call("GET", "/api/messages", e8);
+      check(r2.status === 200, "迁移：第二次请求幂等 200（WeakSet 生效，不再重跑）");
+    } catch (e) { err = String((e && e.stack) || e); }
+    finally { globalThis.fetch = realFetch; }
+    if (err) check(false, "迁移：套件异常（" + err + "）");
+    cleanupPath(p8);
+  }
+
+  /* ===== 阶段 1-3 · 第一提交点：原子事务基础设施（L1/L2） ===== */
+  group("第一提交点 A：D1 batchAtomic（原子语义 / 异常分类）");
+  {
+    const pA = join(tmpdir(), "smstoweb_atomic_d1_" + process.pid + ".db");
+    cleanupPath(pA);
+    const raw = new DatabaseSync(pA);
+    raw.exec("CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT NOT NULL UNIQUE)");
+    const d1 = makeD1(raw);
+    const p = async function (f) { try { await f(); return null; } catch (e) { return e; } };
+
+    const r0 = await atomicBatch(d1, []);
+    check(r0.results.length === 0, "A1 空批：不发请求，直接返回 results=[]");
+
+    const r1 = await atomicBatch(d1, [
+      { sql: "INSERT INTO t (v) VALUES (?)", args: ["a"] },
+      { sql: "INSERT INTO t (v) VALUES (?)", args: ["b"] },
+    ]);
+    check(r1.results.length === 2 && r1.results[0].changes === 1 && r1.results[1].changes === 1, "A2 成功：逐语句 changes 与入参一一对应");
+    check(raw.prepare("SELECT COUNT(*) AS c FROM t").all()[0].c === 2, "A2 成功：两条均已提交");
+
+    const e3 = await p(function () {
+      return atomicBatch(d1, [
+        { sql: "INSERT INTO t (v) VALUES (?)", args: ["c"] },
+        { sql: "INSERT INTO t (v) VALUES (?)", args: ["a"] },
+      ]);
+    });
+    check(!!e3 && e3.code === "FAILED" && e3.phase === "execute" && e3.retryable === true, "A3 语句级失败：code=FAILED / retryable=true");
+    check(raw.prepare("SELECT COUNT(*) AS c FROM t").all()[0].c === 2, "A3 语句级失败：整批回滚（无部分落地，c 仍为 2）");
+
+    const d1boom = { prepare: d1.prepare.bind(d1), batch: async function () { throw new Error("network connection lost"); } };
+    const e4 = await p(function () { return atomicBatch(d1boom, [{ sql: "INSERT INTO t (v) VALUES (?)", args: ["z"] }]); });
+    check(!!e4 && e4.code === "UNKNOWN" && e4.phase === "execute" && e4.retryable === false && e4.effectUnproven === true, "A4 无响应：code=UNKNOWN / retryable=false / effectUnproven=true");
+
+    let batchCalls = 0;
+    const d1prep = { prepare: function () { return { bind: function () { throw new Error("bad bind"); } }; }, batch: async function () { batchCalls++; return []; } };
+    const e5 = await p(function () { return atomicBatch(d1prep, [{ sql: "X", args: [] }]); });
+    check(!!e5 && e5.code === "FAILED" && e5.phase === "prepare" && batchCalls === 0, "A5 准备阶段失败：FAILED/prepare 且未调用 batch（零执行）");
+
+    const e6 = await p(function () { return atomicBatch({ prepare: function () { return {}; } }, [{ sql: "X", args: [] }]); });
+    check(!!e6 && e6.code === "FAILED" && /既不支持/.test(e6.detail), "A6 无 batch/batchAtomic 能力：FAILED/prepare（明确拒绝而非静默降级）");
+
+    const e7 = await p(function () { return atomicBatch(d1, [{ sql: "", args: [] }]); });
+    check(!!e7 && e7.code === "FAILED" && e7.phase === "prepare", "A7 空 sql：FAILED/prepare（脏语句绝不进入批次）");
+
+    check(AtomicBatchError.prototype instanceof Error, "A8 worker 侧 AtomicBatchError 继承 Error（可被全局错误路径统一捕获）");
+    raw.close();
+    cleanupPath(pA);
+  }
+
+  group("第一提交点 B：Turso batchAtomic 协议形状（3-RTT / baton / 真 SQL 原子性）");
+  {
+    const pB = join(tmpdir(), "smstoweb_atomic_turso_" + process.pid + ".db");
+    cleanupPath(pB);
+    const fake = makeFakeTurso(pB);
+    fake.raw.exec("CREATE TABLE t (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT NOT NULL UNIQUE)");
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = fake.fetch;
+    const tdb = new TursoDatabase("libsql://probe-db-org.turso.io", "tok");
+    const p = async function (f) { try { await f(); return null; } catch (e) { return e; } };
+    let err = null;
+    try {
+      const rb = await tdb.batchAtomic([
+        { sql: "INSERT INTO t (v) VALUES (?)", args: ["a"] },
+        { sql: "INSERT INTO t (v) VALUES (?)", args: ["b"] },
+      ]);
+      check(fake.requests.length === 3, "B1 成功：恰好 3 个 RTT（BEGIN / 写 / COMMIT），实际 " + fake.requests.length);
+      check(fake.requests[0].sqls.length === 1 && fake.requests[0].sqls[0] === "BEGIN", "B1 R1：BEGIN 独占管道（不与写语句同请求）");
+      check(fake.requests[1].sqls.length === 2 && /^INSERT/i.test(fake.requests[1].sqls[0]) && /^INSERT/i.test(fake.requests[1].sqls[1]), "B1 R2：写语句一次请求承载 2 条");
+      check(fake.requests[2].sqls.length === 1 && fake.requests[2].sqls[0] === "COMMIT", "B1 R3：COMMIT 独占管道");
+      check(fake.requests[0].baton === null, "B1 baton：R1 用 null 开新流");
+      check(fake.requests[1].baton !== null && fake.requests[2].baton !== null, "B1 baton：R2/R3 均携带服务端返回的 baton");
+      check(fake.requests[2].baton !== fake.requests[1].baton, "B1 baton：响应 baton 与请求 baton 不同（协议要求串行换手）");
+      check(fake.requests.every(function (r) { return r.url === "https://probe-db-org.turso.io/v2/pipeline"; }), "B1 URL：无 base_url 时三次请求均打原端点");
+      check(rb.results.length === 2 && rb.results[0].changes === 1 && rb.results[1].last_row_id === 2, "B1 结果：changes/last_row_id 逐条映射正确");
+      check(fake.raw.prepare("SELECT COUNT(*) AS c FROM t").all()[0].c === 2, "B1 数据：事务已提交（真 SQL 语义，非 Mock 计数）");
+
+      /* B2 base_url：R1 返回粘性地址 ⇒ R2/R3 必须改投 */
+      fake.requests.length = 0;
+      fake.emitBaseUrl = "https://sticky-node-7.turso.io";
+      await tdb.batchAtomic([{ sql: "INSERT INTO t (v) VALUES (?)", args: ["c"] }]);
+      check(fake.requests[0].url === "https://probe-db-org.turso.io/v2/pipeline", "B2 base_url：R1 仍打原端点");
+      check(fake.requests[1].url === "https://sticky-node-7.turso.io/v2/pipeline" && fake.requests[2].url === "https://sticky-node-7.turso.io/v2/pipeline", "B2 base_url：R2/R3 改投粘性地址（基地址 + /v2/pipeline）");
+      fake.emitBaseUrl = null;
+
+      /* B3 写语句失败 ⇒ 同 baton ROLLBACK ⇒ FAILED + 真 SQL 回滚 */
+      fake.raw.exec("CREATE TABLE u (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT UNIQUE)");
+      fake.raw.exec("INSERT INTO u (v) VALUES ('dup')");
+      fake.requests.length = 0;
+      err = await p(function () {
+        return tdb.batchAtomic([
+          { sql: "INSERT INTO u (v) VALUES (?)", args: ["ok1"] },
+          { sql: "INSERT INTO u (v) VALUES (?)", args: ["dup"] },
+        ]);
+      });
+      check(!!err && err.code === "FAILED" && err.phase === "execute" && err.retryable === true, "B3 写语句 SQL error：FAILED/execute（ROLLBACK 已确认）");
+      check(fake.requests.length === 3 && fake.requests[2].sqls[0] === "ROLLBACK", "B3 写语句 SQL error：第 3 个请求为 ROLLBACK（同 baton 链路；BEGIN→写→ROLLBACK）");
+      check(fake.raw.prepare("SELECT COUNT(*) AS c FROM u").all()[0].c === 1, "B3 写语句 SQL error：整事务回滚（仅预置 dup 一行）");
+
+      /* B4 写语句全部成功但服务端关流（baton=null）⇒ UNKNOWN，不报成功 */
+      fake.requests.length = 0;
+      fake.closeAfter = 2;
+      err = await p(function () { return tdb.batchAtomic([{ sql: "INSERT INTO t (v) VALUES (?)", args: ["d"] }]); });
+      check(!!err && err.code === "UNKNOWN" && err.phase === "execute" && err.effectUnproven === true, "B4 写成功后流被关闭：UNKNOWN/execute（不声称成功）");
+      check(fake.requests.length === 2, "B4 写成功后流被关闭：无第 3 个请求（未发 COMMIT）");
+      /* 测试桩清理：fake 单连接仍持有未提交事务，显式回滚以免污染后续用例 */
+      try { fake.raw.exec("ROLLBACK"); } catch (_) {}
+      fake.closeAfter = null;
+    } catch (e) {
+      check(false, "B 组异常：" + String((e && e.stack) || e));
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+    fake.raw.close();
+    cleanupPath(pB);
+  }
+
+  group("第一提交点 C：Turso 故障注入矩阵（分类逐类对齐第四轮状态机）");
+  {
+    const realFetch = globalThis.fetch;
+    const tdb = new TursoDatabase("libsql://probe-db-org.turso.io", "tok");
+    const okItem = { type: "ok", response: { type: "execute", result: { cols: [], rows: [], affected_row_count: 1, last_insert_rowid: 0 } } };
+    function pipe(baton, items) {
+      return new Response(JSON.stringify({ baton: baton, base_url: null, results: items }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    function errItem(msg) { return { type: "error", error: msg }; }
+    let calls = [];
+    function plan(steps) {
+      calls = [];
+      let i = 0;
+      globalThis.fetch = async function (url, opts) {
+        calls.push({ url: String(url), body: JSON.parse(String(opts.body)) });
+        const step = steps[i++];
+        if (!step) throw new Error("意外多出的请求 #" + i);
+        return step({ url: String(url), body: calls[calls.length - 1].body });
+      };
+    }
+    const p = async function (f) { try { await f(); return null; } catch (e) { return e; } };
+    const two = [{ sql: "INSERT INTO t (v) VALUES (?)", args: ["x"] }, { sql: "INSERT INTO t (v) VALUES (?)", args: ["y"] }];
+    try {
+      /* C1 BEGIN 网络失败 */
+      plan([function () { throw new Error("ECONNRESET at begin"); }]);
+      let e = await p(function () { return tdb.batchAtomic(two); });
+      check(!!e && e.code === "FAILED" && e.phase === "begin" && e.retryable === true, "C1 BEGIN 网络失败：FAILED/begin（写语句从未发出 ⇒ 未提交）");
+      check(calls.length === 1, "C1 BEGIN 网络失败：只发了 1 个请求（不重试、不发写语句）");
+
+      /* C2 BEGIN HTTP 503 */
+      plan([function () { return new Response("upstream down", { status: 503 }); }]);
+      e = await p(function () { return tdb.batchAtomic(two); });
+      check(!!e && e.code === "FAILED" && e.phase === "begin" && /503/.test(e.detail), "C2 BEGIN HTTP 503：FAILED/begin（流失效且数据未动）");
+
+      /* C3 BEGIN 语句错误 */
+      plan([function () { return pipe("A", [errItem("cannot start a transaction within a transaction")]); }]);
+      e = await p(function () { return tdb.batchAtomic(two); });
+      check(!!e && e.code === "FAILED" && e.phase === "begin", "C3 BEGIN SQL error：FAILED/begin");
+
+      /* C4 BEGIN 成功但 baton=null */
+      plan([function () { return pipe(null, [okItem]); }]);
+      e = await p(function () { return tdb.batchAtomic(two); });
+      check(!!e && e.code === "FAILED" && e.phase === "begin" && /流已关闭/.test(e.detail), "C4 BEGIN 成功但流关闭：FAILED/begin（事务不存在）");
+
+      /* C5 写阶段网络失败 ⇒ UNKNOWN，且绝不发 ROLLBACK/COMMIT */
+      plan([function () { return pipe("A", [okItem]); }, function () { throw new Error("timeout after write"); }]);
+      e = await p(function () { return tdb.batchAtomic(two); });
+      check(!!e && e.code === "UNKNOWN" && e.phase === "execute" && e.retryable === false, "C5 写阶段无响应：UNKNOWN/execute（不得重试、不得报成功）");
+      check(calls.length === 2, "C5 写阶段无响应：仅 2 个请求（无 ROLLBACK、无 COMMIT）");
+
+      /* C6 写阶段 HTTP 500 ⇒ 流失效 ⇒ FAILED（无残留未提交事务） */
+      plan([function () { return pipe("A", [okItem]); }, function () { return new Response("boom", { status: 500 }); }]);
+      e = await p(function () { return tdb.batchAtomic(two); });
+      check(!!e && e.code === "FAILED" && e.phase === "execute" && /500/.test(e.detail), "C6 写阶段 HTTP 500：FAILED/execute（T3：流失效 ⇒ 无挂起事务，且未发 COMMIT）");
+
+      /* C7 写阶段 200 但不可解析 */
+      plan([function () { return pipe("A", [okItem]); }, function () { return new Response("not-json", { status: 200 }); }]);
+      e = await p(function () { return tdb.batchAtomic(two); });
+      check(!!e && e.code === "FAILED" && e.phase === "execute", "C7 写阶段响应不可解析：FAILED/execute（未发 COMMIT ⇒ 数据轴未提交）");
+
+      /* C8 COMMIT 网络失败 ⇒ UNKNOWN，且绝不自动重试 */
+      plan([function () { return pipe("A", [okItem]); }, function () { return pipe("B", [okItem, okItem]); }, function () { throw new Error("timeout at commit"); }]);
+      e = await p(function () { return tdb.batchAtomic(two); });
+      check(!!e && e.code === "UNKNOWN" && e.phase === "commit" && e.effectUnproven === true, "C8 COMMIT 无响应：UNKNOWN/commit（T2）");
+      check(calls.length === 3, "C8 COMMIT 无响应：无第 4 个请求（S1 保守变体：零内部重试）");
+
+      /* C9 COMMIT HTTP 500 ⇒ UNKNOWN */
+      plan([function () { return pipe("A", [okItem]); }, function () { return pipe("B", [okItem, okItem]); }, function () { return new Response("bad gateway", { status: 502 }); }]);
+      e = await p(function () { return tdb.batchAtomic(two); });
+      check(!!e && e.code === "UNKNOWN" && e.phase === "commit" && /502/.test(e.detail), "C9 COMMIT HTTP 502：UNKNOWN/commit（协议未规定是否已执行）");
+
+      /* C10 COMMIT 200 但不可解析 ⇒ UNKNOWN */
+      plan([function () { return pipe("A", [okItem]); }, function () { return pipe("B", [okItem, okItem]); }, function () { return new Response("garbage", { status: 200 }); }]);
+      e = await p(function () { return tdb.batchAtomic(two); });
+      check(!!e && e.code === "UNKNOWN" && e.phase === "commit", "C10 COMMIT 响应不可解析：UNKNOWN/commit");
+
+      /* C11 COMMIT 锁竞争（C-2α）⇒ 同 baton ROLLBACK 成功（C-2β）⇒ FAILED */
+      plan([
+        function () { return pipe("A", [okItem]); },
+        function () { return pipe("B", [okItem, okItem]); },
+        function () { return pipe("C", [errItem("database is locked")]); },
+        function () { return pipe("D", [okItem]); },
+      ]);
+      e = await p(function () { return tdb.batchAtomic(two); });
+      check(!!e && e.code === "FAILED" && e.phase === "commit" && e.retryable === true, "C11 COMMIT 锁竞争 + ROLLBACK 成功：FAILED/commit（C-2α→C-2β，确认未提交）");
+      check(calls.length === 4 && calls[3].body.requests[0].stmt.sql === "ROLLBACK", "C11 COMMIT 锁竞争：第 4 个请求为 ROLLBACK（复用成功响应中的 baton）");
+      check(calls[3].body.baton === "C", "C11 COMMIT 锁竞争：ROLLBACK 使用 COMMIT 响应返回的 baton（不是旧 baton）");
+
+      /* C12 COMMIT 明确「已无事务」（C-2 终止态）⇒ FAILED，不发 ROLLBACK */
+      plan([function () { return pipe("A", [okItem]); }, function () { return pipe("B", [okItem, okItem]); }, function () { return pipe("C", [errItem("cannot commit - no transaction is active")]); }]);
+      e = await p(function () { return tdb.batchAtomic(two); });
+      check(!!e && e.code === "FAILED" && e.phase === "commit" && e.retryable === true, "C12 COMMIT「无事务」：FAILED/commit（引擎明确已回滚）");
+      check(calls.length === 3, "C12 COMMIT「无事务」：不发 ROLLBACK（没有可回滚的事务）");
+
+      /* C13 COMMIT 其他 SQL error（C-2γ）⇒ UNKNOWN，不发 ROLLBACK、不复用 baton */
+      plan([function () { return pipe("A", [okItem]); }, function () { return pipe("B", [okItem, okItem]); }, function () { return pipe("C", [errItem("disk I/O error")]); }]);
+      e = await p(function () { return tdb.batchAtomic(two); });
+      check(!!e && e.code === "UNKNOWN" && e.phase === "commit", "C13 COMMIT 其他 SQL error：UNKNOWN/commit（C-2γ，保守不判定）");
+      check(calls.length === 3, "C13 COMMIT 其他 SQL error：不发 ROLLBACK（状态不明不复用 baton）");
+
+      /* C14 COMMIT 锁竞争 + ROLLBACK 无响应（C-2δ）⇒ UNKNOWN */
+      plan([
+        function () { return pipe("A", [okItem]); },
+        function () { return pipe("B", [okItem, okItem]); },
+        function () { return pipe("C", [errItem("database is locked")]); },
+        function () { throw new Error("timeout at rollback"); },
+      ]);
+      e = await p(function () { return tdb.batchAtomic(two); });
+      check(!!e && e.code === "UNKNOWN" && e.phase === "rollback", "C14 COMMIT 锁竞争 + ROLLBACK 无响应：UNKNOWN/rollback（C-2δ）");
+
+      /* C15 baton 过期（R2 返回 error + baton=null）⇒ FAILED，且不发 ROLLBACK */
+      plan([function () { return pipe("A", [okItem]); }, function () { return pipe(null, [errItem("baton expired")]); }]);
+      e = await p(function () { return tdb.batchAtomic(two); });
+      check(!!e && e.code === "FAILED" && e.phase === "execute" && /流已关闭/.test(e.detail), "C15 baton 过期：FAILED/execute（流已关闭 ⇒ 服务端已回滚）");
+      check(calls.length === 2, "C15 baton 过期：不发 ROLLBACK（无可用 baton）");
+
+      /* C16 预处理边界：零请求 */
+      plan([]);
+      e = await p(function () { return tdb.batchAtomic("not-an-array"); });
+      check(!!e && e.code === "FAILED" && e.phase === "prepare" && calls.length === 0, "C16 入参非数组：FAILED/prepare（零请求）");
+      e = await p(function () { return tdb.batchAtomic([{ args: [] }]); });
+      check(!!e && e.code === "FAILED" && e.phase === "prepare" && calls.length === 0, "C16 缺 sql：FAILED/prepare（零请求）");
+      e = await p(function () { return tdb.batchAtomic([{ sql: "INSERT INTO t VALUES (?)", args: [{ bad: 1 }] }]); });
+      check(!!e && e.code === "FAILED" && e.phase === "prepare" && calls.length === 0, "C16 非法绑定类型：FAILED/prepare（提前编码，脏参数绝不进事务）");
+
+      /* C17 适配层错误类一致性 */
+      check(DbAtomicBatchError.prototype instanceof Error && AtomicBatchError !== DbAtomicBatchError, "C17 适配层与 worker 侧错误类各自独立但同为 Error 子类（调用方只认 code/phase）");
+    } catch (e) {
+      check(false, "C 组异常：" + String((e && e.stack) || e));
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }
+
+  group("第一提交点 D：Node 连接级 FIFO 队列 / 事务不变量 / 连接重建八步");
+  {
+    const pD = join(tmpdir(), "smstoweb_atomic_local_" + process.pid + ".db");
+    cleanupPath(pD);
+    const ldb = new LocalDatabase(pD);
+    const p = async function (f) { try { await f(); return null; } catch (e) { return e; } };
+    let err = null;
+    try {
+      await ldb.prepare("CREATE TABLE q (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT NOT NULL)").run();
+      /* D0 调用缝：handler 将来调用的是 worker 侧 atomicBatch(env.DB, …)，必须能正确委派到适配层 */
+      const rSeam = await atomicBatch(ldb, [{ sql: "INSERT INTO q (v) VALUES (?)", args: ["seam"] }]);
+      check(rSeam.results.length === 1 && rSeam.results[0].changes === 1, "D0 委派：atomicBatch(env.DB, …) 正确路由到适配层 batchAtomic（真实调用缝已验证）");
+      const r1 = await ldb.batchAtomic([
+        { sql: "INSERT INTO q (v) VALUES (?)", args: ["a"] },
+        { sql: "INSERT INTO q (v) VALUES (?)", args: ["b"] },
+      ]);
+      check(r1.results.length === 2 && r1.results[0].changes === 1 && r1.results[1].last_row_id === 3, "D1 成功：逐语句 changes/last_row_id 正确");
+      check(ldb._inTx === false, "D1 成功：事务结束后 _inTx 复位为 false");
+
+      err = await p(function () {
+        return ldb.batchAtomic([
+          { sql: "INSERT INTO q (v) VALUES (?)", args: ["c"] },
+          { sql: "INSERT INTO q (v) VALUES (NULL)", args: [] },
+        ]);
+      });
+      check(!!err && err.code === "FAILED" && err.phase === "execute" && err.retryable === true, "D2 语句失败：FAILED/execute（ROLLBACK 成功确认）");
+      check(ldb._inTx === false, "D2 语句失败：异常后 _inTx 复位（不污染后续任务）");
+      const c2 = (await ldb.prepare("SELECT COUNT(*) AS c FROM q").first()).c;
+      check(c2 === 3, "D2 语句失败：整体回滚（c 仍为 3：seam+a+b）");
+
+      /* D3 并发 30 个任务（10 个事务批 + 20 个单条写）经同一队列串行执行，无丢失/无交错 */
+      const jobs = [];
+      for (let i = 0; i < 10; i++) {
+        jobs.push(ldb.batchAtomic([
+          { sql: "INSERT INTO q (v) VALUES (?)", args: ["p" + i + "-1"] },
+          { sql: "INSERT INTO q (v) VALUES (?)", args: ["p" + i + "-2"] },
+        ]));
+      }
+      for (let i = 0; i < 20; i++) jobs.push(ldb.prepare("INSERT INTO q (v) VALUES (?)").bind("s" + i).run());
+      await Promise.all(jobs);
+      const c3 = (await ldb.prepare("SELECT COUNT(*) AS c FROM q").first()).c;
+      check(c3 === 43, "D3 队列：30 个并发任务全部落地（3+10×2+20=43，实际 " + c3 + "）");
+      check(ldb._queue instanceof Promise && ldb._connState === "ready", "D3 队列：链尾保持 Promise 且连接态 ready（调度链未被 rejection 污染）");
+
+      /* D4 事务内专用通道的不变量：事务外调用必须直接抛错 */
+      err = await p(async function () { ldb._execDirect("SELECT 1", []); });
+      check(!!err && err.code === "FAILED" && err.phase === "guard", "D4 _execDirect 事务外调用：guard 拒绝（_inTx 不变量生效）");
+
+      /* D5 重入保护：伪造 _inTx=true 后调用 batchAtomic 必须拒绝（不嵌套事务） */
+      ldb._inTx = true;
+      err = await p(function () { return ldb.batchAtomic([{ sql: "INSERT INTO q (v) VALUES ('r')", args: [] }]); });
+      ldb._inTx = false;
+      check(!!err && err.code === "FAILED" && err.phase === "guard", "D5 事务重入：batchAtomic 被 guard 拒绝");
+
+      /* ===== D6 关闭证明：fail-closed =====
+       * 判据：Node 的 database.close() 是 sqlite3_close_v2 包装，未 finalize 语句时只置 zombie；
+       * 因此"close() 未抛错"不是释放证明。以下 Mock 只验证控制流，不宣称已证明连接释放/事务回滚。 */
+      const hasStmtClose = typeof StatementSync.prototype.close === "function";
+
+      /* D6a：模拟「缓存语句无 close()」⇒ 不得重开、不得创建同文件新连接、必须 failed */
+      const pA = join(tmpdir(), "smstoweb_atomic_local_noclose_" + process.pid + ".db");
+      cleanupPath(pA);
+      const dbA = new LocalDatabase(pA);
+      await dbA.prepare("CREATE TABLE z (id INTEGER PRIMARY KEY, v TEXT)").run();
+      const origStmtA = dbA.statement.bind(dbA);
+      dbA.statement = function (sql) {
+        if (sql === "ROLLBACK") throw new Error("simulated: rollback failed");
+        const s = origStmtA(sql);
+        /* 显式去掉 close()，模拟无法 finalize（与 v24.19.0 真实能力一致） */
+        return { run: s.run.bind(s), all: s.all.bind(s), get: s.get.bind(s), iterate: s.iterate.bind(s) };
+      };
+      let openCallsA = 0;
+      const origOpenA = dbA._open.bind(dbA);
+      dbA._open = function () { openCallsA++; return origOpenA(); };
+      err = await p(function () {
+        return dbA.batchAtomic([
+          { sql: "INSERT INTO z (id, v) VALUES (?, ?)", args: [1, "a"] },
+          { sql: "INSERT INTO z (id, v) VALUES (?, ?)", args: [1, "b"] },
+        ]);
+      });
+      check(!!err && err.code === "UNKNOWN" && err.phase === "rollback", "D6a 无 close()：事务结果仍为 UNKNOWN/rollback（不改写成 FAILED）");
+      check(dbA._connState === "failed" && dbA._inTx === false, "D6a 无 close()：_connState=failed 且 _inTx 复位");
+      check(openCallsA === 0 && dbA.sqlite === null, "D6a 无 close()：未调用 _open()，未创建同文件新连接（open 次数 " + openCallsA + "）");
+      check(dbA.stmts.size === 0, "D6a 无 close()：语句缓存已清空（但不作为 finalize 证明）");
+      check(!!err && /需进程重启恢复/.test(String(err.message)), "D6a 无 close()：错误信息明确表达连接不可用且需进程重启");
+      const racedA = await Promise.race([
+        dbA.prepare("SELECT COUNT(*) AS c FROM z").all().then(function () { return "resolved"; }, function (e) { return "rejected:" + (e && e.code) + ":" + (e && e.phase); }),
+        new Promise(function (r) { setTimeout(function () { r("HANG"); }, 200); }),
+      ]);
+      check(/^rejected:FAILED:conn/.test(racedA), "D6a 无 close()：后续队列任务立即 reject（fail-fast；实际 " + racedA + "）");
+      let stmtGuardA = null;
+      try { dbA.statement("SELECT 1"); } catch (e) { stmtGuardA = e; }
+      check(!!stmtGuardA && stmtGuardA.code === "FAILED" && stmtGuardA.phase === "conn", "D6a 无 close()：普通 SQL 无法绕过失败态访问连接（statement 守卫）");
+      cleanupPath(pA);
+
+      /* D6b：模拟「某 StatementSync.close() 抛错」⇒ 同样 fail-closed，且不得调用 _open() */
+      const pB = join(tmpdir(), "smstoweb_atomic_local_closethrow_" + process.pid + ".db");
+      cleanupPath(pB);
+      const dbB = new LocalDatabase(pB);
+      await dbB.prepare("CREATE TABLE z (id INTEGER PRIMARY KEY, v TEXT)").run();
+      const origStmtB = dbB.statement.bind(dbB);
+      dbB.statement = function (sql) {
+        if (sql === "ROLLBACK") throw new Error("simulated: rollback failed");
+        const s = origStmtB(sql);
+        return {
+          run: s.run.bind(s), all: s.all.bind(s), get: s.get.bind(s), iterate: s.iterate.bind(s),
+          close: function () { throw new Error("simulated: finalize failed"); },
+        };
+      };
+      let openCallsB = 0;
+      const origOpenB = dbB._open.bind(dbB);
+      dbB._open = function () { openCallsB++; return origOpenB(); };
+      err = await p(function () {
+        return dbB.batchAtomic([
+          { sql: "INSERT INTO z (id, v) VALUES (?, ?)", args: [1, "a"] },
+          { sql: "INSERT INTO z (id, v) VALUES (?, ?)", args: [1, "b"] },
+        ]);
+      });
+      check(!!err && err.code === "UNKNOWN" && err.phase === "rollback", "D6b finalize 抛错：仍为 UNKNOWN/rollback");
+      check(dbB._connState === "failed" && openCallsB === 0 && dbB.sqlite === null, "D6b finalize 抛错：failed、未调用 _open()、无新连接");
+      check(/finalize|close\(\)/.test(String(dbB._rebuildError)), "D6b finalize 抛错：诊断保留真实原因（" + String(dbB._rebuildError) + "）");
+      const racedB = await Promise.race([
+        dbB.prepare("SELECT COUNT(*) AS c FROM z").all().then(function () { return "resolved"; }, function (e) { return "rejected:" + (e && e.code) + ":" + (e && e.phase); }),
+        new Promise(function (r) { setTimeout(function () { r("HANG"); }, 200); }),
+      ]);
+      check(/^rejected:FAILED:conn/.test(racedB), "D6b finalize 抛错：后续任务 fail-fast（实际 " + racedB + "）");
+      cleanupPath(pB);
+
+      /* D6c：不 Mock finalize 能力，按当前运行时真实能力决策（仅控制流，不对释放做任何断言） */
+      const pC = join(tmpdir(), "smstoweb_atomic_local_realcap_" + process.pid + ".db");
+      cleanupPath(pC);
+      const dbC = new LocalDatabase(pC);
+      await dbC.prepare("CREATE TABLE z2 (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT)").run();
+      const origStmtC = dbC.statement.bind(dbC);
+      dbC.statement = function (sql) {
+        if (sql === "ROLLBACK") throw new Error("simulated: rollback failed");
+        return origStmtC(sql);
+      };
+      let openCallsC = 0;
+      const origOpenC = dbC._open.bind(dbC);
+      dbC._open = function () { openCallsC++; return origOpenC(); };
+      err = await p(function () {
+        return dbC.batchAtomic([
+          { sql: "INSERT INTO z2 (v) VALUES (?)", args: ["c1"] },
+          { sql: "INSERT INTO z2 (id) VALUES (?)", args: [1] },
+        ]);
+      });
+      dbC.statement = origStmtC;
+      check(!!err && err.code === "UNKNOWN" && err.phase === "rollback", "D6c 真实能力（StatementSync.close=" + hasStmtClose + "）：数据面仍为 UNKNOWN/rollback");
+      check(dbC._connState === (hasStmtClose ? "ready" : "failed"), "D6c 真实能力：连接决策与能力一致（期望 " + (hasStmtClose ? "ready" : "failed") + "，实际 " + dbC._connState + "）");
+      if (hasStmtClose) {
+        const capWrite = await p(function () { return dbC.prepare("INSERT INTO z2 (v) VALUES ('after-rebuild')").run(); });
+        check(!capWrite, "D6c 能力可用分支：重开后真实写入成功（真机可写性验证，非 Mock 推断）");
+      } else {
+        check(openCallsC === 0 && dbC.sqlite === null, "D6c 无 finalize 能力：fail-closed，open 次数 0 且无可用连接（不宣称已释放）");
+        const racedC = await Promise.race([
+          dbC.prepare("SELECT COUNT(*) AS c FROM z2").all().then(function () { return "resolved"; }, function (e) { return "rejected:" + (e && e.code) + ":" + (e && e.phase); }),
+          new Promise(function (r) { setTimeout(function () { r("HANG"); }, 200); }),
+        ]);
+        check(/^rejected:FAILED:conn/.test(racedC), "D6c 无 finalize 能力：后续任务 fail-fast（实际 " + racedC + "）");
+      }
+      cleanupPath(pC);
+
+      /* ===== D7 _open() 初始化失败封口 ===== */
+      /* D7a：初始化中途抛错 ⇒ 清理路径执行、半初始化连接被关闭、不得进入可用状态 */
+      const pD2 = join(tmpdir(), "smstoweb_atomic_local_openfail_" + process.pid + ".db");
+      cleanupPath(pD2);
+      const dbD2 = new LocalDatabase(pD2);
+      const realInit = dbD2._initConn.bind(dbD2);
+      const keepConnD = dbD2.sqlite;
+      let probeConn = null;
+      dbD2._initConn = function (conn) {
+        probeConn = conn;
+        throw new Error("simulated: init failed after connect");
+      };
+      let initErr = null;
+      try { dbD2._open(); } catch (e) { initErr = e; }
+      dbD2._initConn = realInit;
+      check(!!initErr, "D7a _open 中途失败：抛出原始错误（" + String(initErr && initErr.message) + "）");
+      check(dbD2.sqlite === null, "D7a _open 中途失败：半初始化连接未被当成可用连接（sqlite=null）");
+      check(/清理: ok/.test(String(dbD2._initError)), "D7a _open 中途失败：清理路径被执行且记录成功（" + String(dbD2._initError) + "）");
+      check(!!probeConn && probeConn.isOpen === false, "D7a _open 中途失败：半初始化连接已被真实关闭（isOpen=false，node:sqlite 实语义）");
+      probeConn = null;
+      try { keepConnD.close(); } catch (_) {}
+      cleanupPath(pD2);
+
+      /* D7b：清理本身失败（close 抛错）⇒ 不得声称已释放、不得恢复 ready、需为 failed */
+      const pE = join(tmpdir(), "smstoweb_atomic_local_cleanupfail_" + process.pid + ".db");
+      cleanupPath(pE);
+      const dbE = new LocalDatabase(pE);
+      const protoE = Object.getPrototypeOf(dbE.sqlite);
+      const origCloseE = protoE.close;
+      let closeSeq = 0;   /* 第 1 次=旧连接，第 2 次=半初始化新连接的清理 */
+      protoE.close = function () {
+        closeSeq++;
+        if (closeSeq === 2) throw new Error("simulated: cleanup close failed");
+        return origCloseE.call(this);
+      };
+      let rebuildOkE = null;
+      try {
+        dbE._initConn = function () { throw new Error("simulated: init failed after connect"); };
+        dbE.stmts.clear();       /* 空缓存：finalize 门槛通过，才会走到 _open() */
+        rebuildOkE = dbE._rebuild();
+      } finally {
+        protoE.close = origCloseE;
+      }
+      check(rebuildOkE === false, "D7b 清理失败：_rebuild 返回 false（不重开）");
+      check(dbE._connState === "failed" && dbE.sqlite === null, "D7b 清理失败：_connState=failed 且无可用的半初始化连接");
+      check(/close 失败/.test(String(dbE._initError)) && /重开连接失败/.test(String(dbE._rebuildError)), "D7b 清理失败：诊断如实记录清理失败，未声称已释放（" + String(dbE._initError) + "）");
+      const racedE = await Promise.race([
+        dbE.prepare("SELECT COUNT(*) AS c FROM sqlite_master").all().then(function () { return "resolved"; }, function (e) { return "rejected:" + (e && e.code) + ":" + (e && e.phase); }),
+        new Promise(function (r) { setTimeout(function () { r("HANG"); }, 200); }),
+      ]);
+      check(/^rejected:FAILED:conn/.test(racedE), "D7b 清理失败：后续任务 fail-fast（" + racedE + "）");
+      let stmtGuardE = null;
+      try { dbE.statement("SELECT 1"); } catch (e) { stmtGuardE = e; }
+      check(!!stmtGuardE && stmtGuardE.code === "FAILED" && stmtGuardE.phase === "conn", "D7b 清理失败：普通 SQL 无法绕过失败态访问半初始化连接");
+      cleanupPath(pE);
+    } catch (e) {
+      check(false, "D 组异常：" + String((e && e.stack) || e));
+    } finally {
+      try { ldb.sqlite.close(); } catch (_) {}
+    }
+    cleanupPath(pD);
+  }
+
+  /* ===== 阶段 5 组：结构化日志 ===== */
   console.log("\n===== 结果：" + pass + " 通过，" + fail + " 失败 =====");
   if (fail) console.log("失败项：\n - " + failed.join("\n - "));
   cleanup();
