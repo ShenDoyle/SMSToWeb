@@ -1256,15 +1256,25 @@ async function handleSetAlias(request, env) {
   return json({ success: true });
 }
 
-/* 删除设备（tag）：仅在无短信时可删，防止误删有数据的记录 */
+/* 删除设备（tag）：仅在无活跃（未软删）消息时可删，防止误删有数据的记录。
+   存在性、活跃消息守卫与两条 DELETE 全部在同一原子事务内（守卫与写入同批，不存在"守卫通过后
+   又产生不一致删除"的跨事务窗口）；响应只依据该事务自身返回的 changes，不做事务后验证读，
+   也不把任何事后读出的状态等同于"本次事务已提交"。 */
 async function handleDeleteDevice(idParam, env) {
   const id = parseInt(idParam, 10);
   if (!Number.isInteger(id) || id <= 0) return json({ success: false, error: "invalid id" }, 400);
-  const cnt = await env.DB.prepare("SELECT COUNT(*) AS n FROM messages WHERE device_id = ?1 AND deleted_at IS NULL").bind(id).first();
-  if (cnt && cnt.n > 0) return json({ success: false, error: "has messages" }, 400);
-  await env.DB.prepare("DELETE FROM messages WHERE device_id = ?1").bind(id).run();
-  const res = await env.DB.prepare("DELETE FROM devices WHERE id = ?1").bind(id).run();
-  return json({ success: true, deleted: res.meta ? res.meta.changes : 0 });
+  /* S1 设备存在性（事务内 no-op，changes=匹配行数）；S2 仅在无活跃消息时删除该设备全部消息（含软删）；
+     S3 仅在无残留消息时删除设备记录。S2/S3 的守卫条件与写操作同批提交。 */
+  const noActive = "NOT EXISTS (SELECT 1 FROM messages WHERE device_id = ?1 AND deleted_at IS NULL)";
+  const r = await atomicBatch(env.DB, [
+    { sql: "UPDATE devices SET id = id WHERE id = ?1", args: [id] },
+    { sql: "DELETE FROM messages WHERE device_id = ?1 AND " + noActive, args: [id] },
+    { sql: "DELETE FROM devices WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM messages WHERE device_id = ?1)", args: [id] },
+  ]);
+  const exists = r.results[0].changes > 0;
+  const deleted = r.results[2].changes;
+  if (exists && deleted === 0) return json({ success: false, error: "has messages" }, 400);
+  return json({ success: true, deleted: deleted });
 }
 
 /* 来源清单：聚合 messages.source 及条数，供管理页动态生成「来源筛选」下拉（替代写死的三项） */
@@ -1278,7 +1288,9 @@ async function handleListSources(env) {
 }
 
 /* 合并设备标签：把 from 的全部消息迁移到 to，成功后删除 from。
-   目标已有同（设备+发件人+正文+时间）的重复消息时，UPDATE OR IGNORE 跳过，随后清掉残留（去重索引约束），不报错 */
+   目标已有同（设备+发件人+正文+时间）的重复消息时，UPDATE OR IGNORE 跳过，随后清掉残留（去重索引约束），不报错。
+   设备存在性、迁移、残留清理、源设备删除全部在同一原子事务内；守卫条件与写入同批，
+   不在事务外做"先检查再假设不变"的预检。响应只依据事务自身返回的 changes。 */
 async function handleMergeDevices(request, env) {
   let body;
   try { body = await request.json(); } catch { return json({ success: false, error: "invalid json" }, 400); }
@@ -1287,15 +1299,21 @@ async function handleMergeDevices(request, env) {
   if (!Number.isInteger(from) || from <= 0 || !Number.isInteger(to) || to <= 0 || from === to) {
     return json({ success: false, error: "invalid device ids" }, 400);
   }
-  const devs = await env.DB.prepare("SELECT id FROM devices WHERE id IN (?1, ?2)").bind(from, to).all();
-  const ids = (devs.results || []).map(function (r) { return r.id; });
-  if (ids.indexOf(from) === -1 || ids.indexOf(to) === -1) {
+  /* M1 = S3.changes（活跃迁移数）；S3/S4 的 bothExist 守卫确保两端设备都存在时才发生任何写入；
+     S4 清理源设备残留（软删 + 唯一索引冲突未迁移的活跃记录）；S5 删除源设备记录。
+     S1/S2 为事务内存在性探针（no-op UPDATE，changes=匹配行数）。 */
+  const bothExist = "EXISTS (SELECT 1 FROM devices WHERE id = ?1) AND EXISTS (SELECT 1 FROM devices WHERE id = ?2)";
+  const r = await atomicBatch(env.DB, [
+    { sql: "UPDATE devices SET id = id WHERE id = ?1", args: [from] },
+    { sql: "UPDATE devices SET id = id WHERE id = ?1", args: [to] },
+    { sql: "UPDATE OR IGNORE messages SET device_id = ?2 WHERE device_id = ?1 AND deleted_at IS NULL AND " + bothExist, args: [from, to] },
+    { sql: "DELETE FROM messages WHERE device_id = ?1 AND " + bothExist, args: [from, to] },
+    { sql: "DELETE FROM devices WHERE id = ?1 AND EXISTS (SELECT 1 FROM devices WHERE id = ?2)", args: [from, to] },
+  ]);
+  if (r.results[0].changes === 0 || r.results[1].changes === 0) {
     return json({ success: false, error: "device not found" }, 404);
   }
-  const moved = await env.DB.prepare("UPDATE OR IGNORE messages SET device_id = ?1 WHERE device_id = ?2 AND deleted_at IS NULL").bind(to, from).run();
-  await env.DB.prepare("DELETE FROM messages WHERE device_id = ?1").bind(from).run();
-  await env.DB.prepare("DELETE FROM devices WHERE id = ?1").bind(from).run();
-  return json({ success: true, moved: moved.meta ? moved.meta.changes : 0 });
+  return json({ success: true, moved: r.results[2].changes });
 }
 
 /* ---------------- 号码归属地（免费、无 key） ----------------

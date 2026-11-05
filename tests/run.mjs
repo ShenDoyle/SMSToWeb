@@ -2283,6 +2283,183 @@ async function main() {
   }
 
   /* ===== 阶段 5 组：结构化日志 ===== */
+  group("阶段 1-3 第二提交点：设备删除/合并原子事务（守卫入事务 + 回滚 + fail-closed）");
+  {
+    const mkDev = async function (name, sim) {
+      await db.prepare("INSERT INTO devices (device, sim) VALUES (?1, ?2)").bind(name, sim || "").run();
+      const row = await db.prepare("SELECT id FROM devices WHERE device = ?1 AND sim = ?2").bind(name, sim || "").first();
+      return row.id;
+    };
+    const mkMsg = async function (devId, sender, content, time, deletedAt) {
+      await db.prepare("INSERT INTO messages (device_id, sender, content, received_at, source, deleted_at) VALUES (?1, ?2, ?3, ?4, 'sms', ?5)")
+        .bind(devId, sender, content, time, deletedAt || null).run();
+    };
+    const countMsgs = async function (devId, activeOnly) {
+      const sql = activeOnly
+        ? "SELECT COUNT(*) AS n FROM messages WHERE device_id = ?1 AND deleted_at IS NULL"
+        : "SELECT COUNT(*) AS n FROM messages WHERE device_id = ?1";
+      return (await db.prepare(sql).bind(devId).first()).n;
+    };
+    const devExists = async function (id) {
+      return !!(await db.prepare("SELECT id FROM devices WHERE id = ?1").bind(id).first());
+    };
+
+    /* T1 删除成功（无活跃消息；软删记录一并物理删除） */
+    const d1 = await mkDev("cp2-删-成功");
+    await mkMsg(d1, "s", "cp2-del-soft", "2026-10-19 11:00:00", "2026-10-19 12:00:00");
+    r = await call("DELETE", "/api/devices/" + d1, e0);
+    check(r.status === 200 && r.data && r.data.success === true && r.data.deleted === 1, "T1 删除成功：无活跃消息（含软删一并删除，deleted=1）");
+    check(!(await devExists(d1)) && (await countMsgs(d1)) === 0, "T1 删除成功：设备记录与全部消息均无残留");
+
+    /* T2 删除不存在设备：保持原语义 success=true / deleted=0 */
+    r = await call("DELETE", "/api/devices/999999", e0);
+    check(r.status === 200 && r.data && r.data.success === true && r.data.deleted === 0, "T2 删除不存在设备：保持原语义（success=true, deleted=0）");
+
+    /* T3 存在活跃消息：维持原拒绝行为，且事务内守卫保证零删除 */
+    const d3 = await mkDev("cp2-删-有活跃");
+    await mkMsg(d3, "s", "cp2-del-active", "2026-10-19 13:00:00", null);
+    r = await call("DELETE", "/api/devices/" + d3, e0);
+    check(r.status === 400 && r.data && r.data.error === "has messages", "T3 存在活跃消息：仍拒绝（400 has messages）");
+    check((await devExists(d3)) && (await countMsgs(d3)) === 1, "T3 拒绝后设备与活跃消息均未受影响（守卫在事务内生效）");
+
+    /* T4 删除事务中途失败 → 真实 ROLLBACK，整体回滚 */
+    const d4 = await mkDev("cp2-删-回滚");
+    await mkMsg(d4, "s", "cp2-del-rb", "2026-10-19 14:00:00", "2026-10-19 14:30:00");
+    const delSeq = [];
+    const realExec = db._execDirect.bind(db);
+    db._execDirect = function (sql, args) {
+      delSeq.push(sql);
+      if (/^DELETE FROM devices/.test(sql)) throw new Error("injected: delete devices failed");
+      return realExec(sql, args);
+    };
+    try { r = await call("DELETE", "/api/devices/" + d4, e0); } finally { db._execDirect = realExec; }
+    check(r.status === 500 && r.data && r.data.error === "internal error", "T4 删除事务中途失败：走全局错误路径（500，不误报成功）");
+    check(delSeq.filter(function (s) { return s === "BEGIN"; }).length === 1 && delSeq.filter(function (s) { return s === "ROLLBACK"; }).length === 1,
+      "T4 删除事务中途失败：BEGIN 1 次 + ROLLBACK 1 次（真实回滚）");
+    check((await devExists(d4)) && (await countMsgs(d4)) === 1, "T4 删除事务中途失败：整体回滚（设备仍在、软删消息未被删）");
+
+    /* T5 / T8 / T9 合并成功：M1~M6（唯一索引冲突 + 源软删清理） */
+    const mFrom = await mkDev("cp2-合并-源");
+    const mTo = await mkDev("cp2-合并-目标");
+    await mkMsg(mTo, "s", "cp2-merge-dup", "2026-10-19 18:00:00", null);
+    await mkMsg(mFrom, "s", "cp2-merge-a1", "2026-10-19 18:10:00", null);
+    await mkMsg(mFrom, "s", "cp2-merge-dup", "2026-10-19 18:00:00", null);      /* 与目标唯一键冲突 → 不迁移 */
+    await mkMsg(mFrom, "s", "cp2-merge-soft", "2026-10-19 18:20:00", "2026-10-19 18:30:00"); /* 源软删 → 清理 */
+    const toBefore5 = await countMsgs(mTo, true);
+    const fromActiveBefore5 = await countMsgs(mFrom, true);
+    const fromSoftBefore5 = (await countMsgs(mFrom, false)) - fromActiveBefore5;
+    r = await call("POST", "/api/devices/merge", e0, { body: { from: mFrom, to: mTo } });
+    const M1 = r.data && r.data.moved;
+    check(r.status === 200 && r.data && r.data.success === true, "T5 合并成功：返回 success=true");
+    check(M1 === 1, "T5 M1 活跃迁移数 = 1（仅无冲突的活跃消息被迁移）");
+    check(M1 === fromActiveBefore5 - 1, "T8 M2 唯一索引冲突未迁移的活跃数 = 1（守卫/OR IGNORE 语义保留）");
+    check(fromSoftBefore5 === 1, "T9 合并前源设备含 1 条软删消息（M3 前置条件成立）");
+    check((await countMsgs(mFrom, false)) === 0 && !(await devExists(mFrom)), "T5 M4/M5 源消息（软删+冲突）实际清空，源设备记录无残留");
+    check((await countMsgs(mTo, true)) === toBefore5 + M1, "T5 M6 目标活跃消息数 = 迁移前 + M1（" + toBefore5 + " + " + M1 + "）");
+    check((await db.prepare("SELECT COUNT(*) AS n FROM messages WHERE device_id = ?1 AND content = 'cp2-merge-dup'").bind(mTo).first()).n === 1,
+      "T8 冲突记录未被重复迁移（目标同键消息仍只有 1 条）");
+    /* 说明：本组只断言 M1~M6 与目标/源码各自的计数，不断言全局消息总数守恒 */
+
+    /* T6 源设备不存在 → 404，且目标无写入 */
+    const t6To = await mkDev("cp2-合并-T6目标");
+    await mkMsg(t6To, "s", "cp2-t6-to", "2026-10-19 20:00:00", null);
+    const t6Before = await countMsgs(t6To, true);
+    r = await call("POST", "/api/devices/merge", e0, { body: { from: 999999, to: t6To } });
+    check(r.status === 404 && r.data && r.data.error === "device not found", "T6 合并源设备不存在：404 device not found");
+    check((await countMsgs(t6To, true)) === t6Before, "T6 源不存在：事务内守卫拦截，目标消息数不变");
+
+    /* T7 目标设备不存在 → 404，且源无写入 */
+    const t7From = await mkDev("cp2-合并-T7源");
+    await mkMsg(t7From, "s", "cp2-t7-from", "2026-10-19 20:10:00", null);
+    const t7Before = await countMsgs(t7From, true);
+    r = await call("POST", "/api/devices/merge", e0, { body: { from: t7From, to: 999999 } });
+    check(r.status === 404 && r.data && r.data.error === "device not found", "T7 合并目标设备不存在：404 device not found");
+    check((await countMsgs(t7From, true)) === t7Before && (await devExists(t7From)), "T7 目标不存在：事务内守卫拦截，源消息与设备原样保留");
+
+    /* T10 合并各阶段失败 → 真实 ROLLBACK，整体回滚（迁移阶段 / 收尾阶段各注入一次） */
+    const rbFrom = await mkDev("cp2-合并-回滚-源");
+    const rbTo = await mkDev("cp2-合并-回滚-目标");
+    await mkMsg(rbFrom, "s", "cp2-rb-a", "2026-10-19 21:00:00", null);
+    await mkMsg(rbFrom, "s", "cp2-rb-soft", "2026-10-19 21:10:00", "2026-10-19 21:20:00");
+    const rbToBefore = await countMsgs(rbTo, true);
+    const rbSeq = [];
+    db._execDirect = function (sql, args) {
+      rbSeq.push(sql);
+      if (/^UPDATE OR IGNORE messages/.test(sql)) throw new Error("injected: migrate failed");
+      return realExec(sql, args);
+    };
+    try { r = await call("POST", "/api/devices/merge", e0, { body: { from: rbFrom, to: rbTo } }); } finally { db._execDirect = realExec; }
+    check(r.status === 500, "T10 迁移阶段失败：500（走全局错误路径）");
+    check(rbSeq.filter(function (s) { return s === "ROLLBACK"; }).length === 1, "T10 迁移阶段失败：执行了真实 ROLLBACK");
+    check((await countMsgs(rbFrom, false)) === 2 && (await devExists(rbFrom)) && (await countMsgs(rbTo, true)) === rbToBefore,
+      "T10 迁移阶段失败：源消息/源设备/目标计数全部回滚原样");
+    const rb2Seq = [];
+    db._execDirect = function (sql, args) {
+      rb2Seq.push(sql);
+      if (/^DELETE FROM devices/.test(sql)) throw new Error("injected: delete source device failed");
+      return realExec(sql, args);
+    };
+    try { r = await call("POST", "/api/devices/merge", e0, { body: { from: rbFrom, to: rbTo } }); } finally { db._execDirect = realExec; }
+    check(r.status === 500, "T10 收尾阶段失败：500（不误报成功）");
+    check((await countMsgs(rbFrom, false)) === 2 && (await devExists(rbFrom)) && (await countMsgs(rbTo, true)) === rbToBefore,
+      "T10 收尾阶段失败：已迁移与已清理效果整体回滚（源消息/设备/目标均原样）");
+
+    /* T11 / T12 UNKNOWN 不自动重试 + v24.19.0 下 ROLLBACK 失败仍 P0 fail-closed（独立库，避免污染共享 db） */
+    const pP0 = join(tmpdir(), "smstoweb_cp2_p0_" + process.pid + ".db");
+    cleanupPath(pP0);
+    const dbP0 = new LocalDatabase(pP0);
+    const eP0 = env({ DB: dbP0, ENABLE_AUTH: "" });
+    await dbP0.prepare("INSERT INTO devices (device, sim) VALUES ('cp2-p0', '')").run();
+    const devP0 = (await dbP0.prepare("SELECT id FROM devices WHERE device = 'cp2-p0'").first()).id;
+    await dbP0.prepare("INSERT INTO messages (device_id, sender, content, received_at, deleted_at) VALUES (?1, 's', 'cp2-p0-soft', '2026-10-19 19:00:00', '2026-10-19 19:10:00')").bind(devP0).run();
+    let baCalls = 0;
+    const p0Seq = [];
+    const origBA = dbP0.batchAtomic.bind(dbP0);
+    const p0Exec = dbP0._execDirect.bind(dbP0);
+    dbP0.batchAtomic = function (stmts) { baCalls++; return origBA(stmts); };
+    dbP0._execDirect = function (sql, args) {
+      p0Seq.push(sql);
+      if (sql === "ROLLBACK") throw new Error("injected: rollback failed");
+      if (/^DELETE FROM devices/.test(sql)) throw new Error("injected: delete devices failed");
+      return p0Exec(sql, args);
+    };
+    try { r = await call("DELETE", "/api/devices/" + devP0, eP0); } finally { dbP0._execDirect = p0Exec; dbP0.batchAtomic = origBA; }
+    check(r.status === 500, "T12 ROLLBACK 失败：UNKNOWN 走全局错误路径（500，不报成功）");
+    check(baCalls === 1 && p0Seq.filter(function (s) { return s === "BEGIN"; }).length === 1, "T11 UNKNOWN：batchAtomic 仅调用 1 次、BEGIN 仅 1 次（不自动重试原事务）");
+    check(dbP0._connState === "failed", "T12 v24.19.0 无 StatementSync.close()：连接重建 fail-closed（_connState=failed）");
+    const rAfterP0 = await call("DELETE", "/api/devices/" + devP0, eP0);
+    check(rAfterP0.status === 500 && rAfterP0.data && rAfterP0.data.error === "internal error", "T12 fail-closed 后：后续请求立即失败（fail-fast，不重试、不误报）");
+    cleanupPath(pP0);
+
+    /* T13 并发守卫与写入顺序：守卫必须在事务内 */
+    /* T13a 成功删除的语句顺序：BEGIN → 存在性 → 守卫删除消息 → 守卫删除设备 → COMMIT */
+    const d13a = await mkDev("cp2-并发-顺序");
+    await mkMsg(d13a, "s", "cp2-conc-order", "2026-10-19 23:00:00", "2026-10-19 23:10:00");
+    const ordSeq = [];
+    db._execDirect = function (sql, args) { ordSeq.push(sql); return realExec(sql, args); };
+    try { r = await call("DELETE", "/api/devices/" + d13a, e0); } finally { db._execDirect = realExec; }
+    check(ordSeq.length === 5 && ordSeq[0] === "BEGIN" && /^UPDATE devices SET id = id/.test(ordSeq[1])
+      && /^DELETE FROM messages/.test(ordSeq[2]) && /^DELETE FROM devices/.test(ordSeq[3]) && ordSeq[4] === "COMMIT",
+      "T13a 写入顺序：BEGIN → 存在性 → 消息删除 → 设备删除 → COMMIT（无跨事务窗口）");
+    check(/deleted_at IS NULL/.test(ordSeq[2]) && /NOT EXISTS \(SELECT 1 FROM messages/.test(ordSeq[3]),
+      "T13a 守卫条件直接内嵌在事务语句中（非事务外预检）");
+
+    /* T13b 并发删除（有活跃消息）：全部拒绝，设备与消息零变化 */
+    const d13b = await mkDev("cp2-并发-活跃");
+    await mkMsg(d13b, "s", "cp2-conc-active", "2026-10-19 23:20:00", null);
+    const conc1 = await Promise.all(Array.from({ length: 8 }, function () { return call("DELETE", "/api/devices/" + d13b, e0); }));
+    check(conc1.every(function (x) { return x.status === 400 && x.data && x.data.error === "has messages"; }), "T13b 并发删除（有活跃消息）：8 次全部 400（守卫在事务内逐次生效）");
+    check((await devExists(d13b)) && (await countMsgs(d13b)) === 1, "T13b 并发后：设备仍在、活跃消息未丢");
+
+    /* T13c 并发删除（仅软删消息）：FIFO 串行下恰好一次成功删除，其余 deleted=0 */
+    const d13c = await mkDev("cp2-并发-软删");
+    await mkMsg(d13c, "s", "cp2-conc-soft", "2026-10-19 23:30:00", "2026-10-19 23:40:00");
+    const conc2 = await Promise.all(Array.from({ length: 8 }, function () { return call("DELETE", "/api/devices/" + d13c, e0); }));
+    const delSum = conc2.reduce(function (a, x) { return a + ((x.data && x.data.deleted) || 0); }, 0);
+    const oneShot = conc2.filter(function (x) { return x.data && x.data.success === true && x.data.deleted === 1; }).length;
+    check(delSum === 1 && oneShot === 1 && !(await devExists(d13c)), "T13c 并发删除（仅软删）：总删除数恰为 1、设备最终不存在（无重复/无残留）");
+  }
+
   console.log("\n===== 结果：" + pass + " 通过，" + fail + " 失败 =====");
   if (fail) console.log("失败项：\n - " + failed.join("\n - "));
   cleanup();
