@@ -170,7 +170,10 @@ function makeFakeTurso(dbPath) {
 }
 
 /* TEST-DB-001 启动预清理：实例化前仅删除本 PID 主库精确路径及其 -wal/-shm/-journal 配套文件（防 PID 复用污染历史数据） */
-cleanup("启动预清理");
+if (!cleanup("启动预清理")) {
+  console.error("[TEST-DB-001] 启动预清理失败，拒绝打开测试数据库，测试终止");
+  process.exit(1);
+}
 const db = new LocalDatabase(DB);
 function env(extra) {
   return Object.assign({ DB: db, RECEIVE_TOKEN: "tok", ENABLE_AUTH: "", ADMIN_PASSWORD: "", SESSION_SECRET: "test-session-secret-0123456789abcdef", RETENTION_DAYS: "30", PLATFORM: "test" }, extra || {});
