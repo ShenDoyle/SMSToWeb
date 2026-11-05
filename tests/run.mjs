@@ -23,8 +23,25 @@ function check(cond, name) {
   else { fail++; failed.push(name); console.log("  FAIL " + name); }
 }
 function group(t) { console.log("\n# " + t); }
-function cleanup() {
-  for (const suf of ["", "-wal", "-shm", "-journal"]) { try { rmSync(DB + suf, { force: true }); } catch (_) {} }
+function cleanup(stage) {
+  let failed = 0;
+  for (const suf of ["", "-wal", "-shm", "-journal"]) {
+    try { rmSync(DB + suf, { force: true }); }
+    catch (e) {
+      failed++;
+      console.error("[cleanup] " + stage + " 清理失败: path=" + DB + suf + " code=" + (e && e.code) + " message=" + (e && e.message));
+    }
+  }
+  if (failed) console.error("[cleanup] " + stage + " 清理结果=FAILED（" + failed + " 个文件未删除）");
+  return failed === 0;
+}
+function closeMainDb(stage) {
+  if (!db || !db.sqlite) return false;
+  try { db.sqlite.close(); return true; }
+  catch (e) {
+    console.error("[cleanup] " + stage + " 关闭主库连接失败: code=" + (e && e.code) + " message=" + (e && e.message));
+    return false;
+  }
 }
 function cleanupPath(p) {
   for (const suf of ["", "-wal", "-shm", "-journal"]) { try { rmSync(p + suf, { force: true }); } catch (_) {} }
@@ -152,6 +169,8 @@ function makeFakeTurso(dbPath) {
   return fake;
 }
 
+/* TEST-DB-001 启动预清理：实例化前仅删除本 PID 主库精确路径及其 -wal/-shm/-journal 配套文件（防 PID 复用污染历史数据） */
+cleanup("启动预清理");
 const db = new LocalDatabase(DB);
 function env(extra) {
   return Object.assign({ DB: db, RECEIVE_TOKEN: "tok", ENABLE_AUTH: "", ADMIN_PASSWORD: "", SESSION_SECRET: "test-session-secret-0123456789abcdef", RETENTION_DAYS: "30", PLATFORM: "test" }, extra || {});
@@ -2537,14 +2556,17 @@ async function main() {
     check(delSum === 1 && oneShot === 1 && !(await devExists(d13c)), "T13c 并发删除（仅软删）：总删除数恰为 1、设备最终不存在（无重复/无残留）");
   }
 
+  /* TEST-DB-001 退出顺序：关主库连接 → 清文件 → 输出结果 → 退出；关闭后不再访问 db */
+  closeMainDb("退出清理");
+  cleanup("退出清理");
   console.log("\n===== 结果：" + pass + " 通过，" + fail + " 失败 =====");
   if (fail) console.log("失败项：\n - " + failed.join("\n - "));
-  cleanup();
   process.exit(fail ? 1 : 0);
 }
 
 main().catch(function (e) {
+  closeMainDb("退出清理");
+  cleanup("退出清理");
   console.error("测试异常：", e);
-  cleanup();
   process.exit(2);
 });
