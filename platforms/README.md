@@ -58,11 +58,11 @@ turso db shell sms-gateway < schema.sql   # 建表
 | `ENABLE_AUTH` | 否 | `"true"` 管理页需登录（**安全强烈建议开启**，见下方安全建议）；默认免登录 |
 | `ADMIN_PASSWORD` | 否 | 登录密码（`ENABLE_AUTH="true"` 时配置；漏配时管理接口一律拒绝访问并告警——配置缺失不放行） |
 | `SESSION_SECRET` | 开启登录时必须 | 登录会话签名密钥：高熵随机值（≥32 位随机字符串，与管理密码独立），各平台须分别配置独立值；缺失时登录与鉴权安全失败（登录 500、管理接口 401），不回退密码派生；轮换后旧会话全部失效重新登录 |
-| `RETENTION_DAYS` | 否 | 数据保留天数，默认 30 |
+| `RETENTION_DAYS` | 否 | 数据保留天数，默认 30；可在管理页「业务设置」修改（数据库优先，本变量为兼容兜底） |
 | `WAIT_MAX_SECONDS` | 否 | 长轮询挂起秒数（3–25，默认 25）；Netlify 设 `8`、Vercel Edge 设 `20` |
-| 通知渠道变量 | 否 | `FEISHU_WEBHOOK`（飞书）/ `WECOM_WEBHOOK`（企微）/ `DINGTALK_WEBHOOK`（钉钉，可选 `DINGTALK_SECRET` 加签）/ `SERVERCHAN_SENDKEY` / `PUSHPLUS_TOKEN` / `TELEGRAM_BOT_TOKEN`+`TELEGRAM_CHAT_ID` / `BARK_DEVICE_KEY`（可选 `BARK_URL`）/ `NTFY_URL`（可选 `NTFY_TOKEN`）/ `GOTIFY_URL`+`GOTIFY_TOKEN` / `RESEND_API_KEY`+`MAIL_TO`（邮件，可选 `MAIL_FROM`）/ `GENERIC_WEBHOOKS`（通用 Webhook，可选 `GENERIC_WEBHOOK_TEMPLATE` 请求体 / `GENERIC_WEBHOOK_HEADERS` 请求头）。配置哪个转发哪个，全部不配置则不转发；通知按内容自动三态渲染（🔐 验证码 / 💬 短信 / 🔔 通知） |
+| 通知渠道变量（旧版兼容兜底） | 否 | **推荐在管理页「设置 → 通知设置」配置（数据库优先，支持渠道启停/掩码显示/测试发送/从环境变量导入）**。以下变量仅在数据库无对应键时生效：`FEISHU_WEBHOOK`（飞书）/ `WECOM_WEBHOOK`（企微）/ `DINGTALK_WEBHOOK`（钉钉，可选 `DINGTALK_SECRET` 加签）/ `SERVERCHAN_SENDKEY` / `PUSHPLUS_TOKEN` / `TELEGRAM_BOT_TOKEN`+`TELEGRAM_CHAT_ID` / `BARK_DEVICE_KEY`（可选 `BARK_URL`）/ `NTFY_URL`（可选 `NTFY_TOKEN`）/ `GOTIFY_URL`+`GOTIFY_TOKEN` / `RESEND_API_KEY`+`MAIL_TO`（邮件，可选 `MAIL_FROM`）/ `GENERIC_WEBHOOKS`（通用 Webhook，可选 `GENERIC_WEBHOOK_TEMPLATE` 请求体 / `GENERIC_WEBHOOK_HEADERS` 请求头）。配置哪个转发哪个，全部不配置则不转发；通知按内容自动三态渲染（🔐 验证码 / 💬 短信 / 🔔 通知） |
 | `SITE_NAME` / `SITE_ICON` | 否 | 网站名 / 图标 URL，未设置用默认值 |
-| `NOTIFY_LINK` | 否 | 管理页首页地址；配置后所有通知渠道附「打开管理页」入口（按钮/链接/click），未配置自动省略 |
+| `NOTIFY_LINK` | 否 | 旧版兜底：管理页首页地址；推荐在管理页「设置 → 通知设置」填「跳转链接」（数据库优先）。配置后所有通知渠道附「打开管理页」入口（按钮/链接/click），未配置自动省略；设置页留空保存视为明确清除，会遮蔽本变量 |
 | `CRON_SECRET`（仅 Vercel） | 否 | 设为与 `RECEIVE_TOKEN` 相同值，供 Vercel Cron 调 /api/cron |
 | `SQLITE_PATH`（仅 node 自托管） | 否 | 本地 SQLite 模式：设置后免外部数据库（需 Node 22.13+，见 node/README.md） |
 

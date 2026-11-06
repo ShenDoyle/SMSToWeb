@@ -303,12 +303,14 @@ export class TursoDatabase {
       throw new AtomicBatchError("UNKNOWN", "execute", describeSendFailure(r));
     }
     if (r.kind === "http") {
-      /* 4xx/5xx ⇒ 服务端内部错误、流已失效 ⇒ 不会残留未提交事务；且 COMMIT 尚未发出 ⇒ 未提交（T1/T3） */
+      /* 三态分离：①协议原文——HTTP 错误后流已失效；②「事务未提交」仅为本地结构性判断
+         （COMMIT 从未发出，非服务端答复）；③未执行 ROLLBACK，回滚未直接确认 ⇒ 保留 FAILED */
       throw new AtomicBatchError("FAILED", "execute", describeSendFailure(r));
     }
     if (r.kind === "protocol") {
-      /* 200 但响应不可解析：同样未发 COMMIT ⇒ 数据轴确定未提交（T1）；通道丢弃（baton 不可信） */
-      throw new AtomicBatchError("FAILED", "execute", describeSendFailure(r));
+      /* 200 但响应不可解析：零观测——写语句是否已执行、流与事务状态均无从确认；
+         本地仅能结构性确认 COMMIT 尚未发出，不据此断言事务已回滚 ⇒ 状态不可证明（3D-1 #6） */
+      throw new AtomicBatchError("UNKNOWN", "execute", describeSendFailure(r));
     }
     let badIdx = -1;
     for (let i = 0; i < stmts.length; i++) {
@@ -320,7 +322,7 @@ export class TursoDatabase {
     const writeUrl = resolveStreamUrl(r.data.base_url, url);
     if (badIdx >= 0) {
       const detail = "第 " + (badIdx + 1) + " 条语句执行失败: " + streamErrorText(r.data.results[badIdx]);
-      if (!writeBaton) throw new AtomicBatchError("FAILED", "execute", detail + "（流已关闭，服务端已回滚）");
+      if (!writeBaton) throw new AtomicBatchError("FAILED", "execute", detail + "（流已关闭；COMMIT 未发出 ⇒ 未提交为结构性判断，回滚未直接确认）");
       throw await this._rollback(writeUrl, writeBaton, "execute", detail);
     }
     if (!writeBaton) {

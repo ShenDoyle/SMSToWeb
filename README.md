@@ -6,13 +6,13 @@
 
 Push SMS and notifications from an Android phone (and any other device) to the cloud in real time, and read them from a web page anywhere. Free to deploy, no server required, about 10 minutes end to end.
 
-**Current version: `v1.0.2`** — official releases carry a fixed version number (shown in the page footer); interim builds bump the patch version.
+**Current version: `v1.0.3`** — official releases carry a fixed version number (shown in the page footer); interim builds bump the patch version.
 
 - **Multi-platform deployment**: Cloudflare (primary) / Vercel / Deno Deploy / Netlify / Tencent EdgeOne Makers / Docker self-hosted — pick one of six, features fully identical
 - **Real-time receiving**: webhook push lands in the database in seconds; the web page refreshes itself, no manual work
 - **Universal push**: any device that can send an HTTP request (Linux / Windows / macOS / iOS / NAS / scripts) can push notifications into the same page
 - **Sources & filters**: filter dynamically by source (SMS / notifications and custom sources auto-aggregated), stacked with keyword search and Today / Last 7 days / Last 30 days ranges; adjustable page size
-- **Multi-channel forwarding**: new messages can be auto-forwarded to Feishu / WeCom / DingTalk / Telegram / ServerChan / PushPlus / Bark / ntfy / Gotify / Email / generic Webhook — configure only what you use (optional)
+- **Multi-channel forwarding**: new messages can be auto-forwarded to Feishu / WeCom / DingTalk / Telegram / ServerChan / PushPlus / Bark / ntfy / Gotify / Email / generic Webhook — configured in the admin **Settings → Notifications** page (stored in your database, per-channel enable/disable, credential update, test send); the legacy environment variables are still honoured when no database value exists
 - **Optional security**: admin login toggle, multi-format OTP code extraction (code-first / keyword-first / segmented / mixed, false-positive resistant) with one-tap copy, dark mode
 - **Data & alerts**: export CSV / JSON by current filter; toast / optional sound / floating pill for new messages while visible, browser notification + unread title while hidden; long messages auto-collapsed
 - **Number recognition**: built-in directory of common institutional numbers (carriers / banks / couriers / government) auto-labeled; optional carrier-region lookup for unknown mobile numbers (on by default, can be disabled)
@@ -71,6 +71,8 @@ All platforms deliver messages into the same web page: phone SMS goes through `/
 
 Step-by-step configuration (copy-paste commands/scripts per platform): **[Deployment & Ingestion Guide](docs/i18n/en/DEPLOYMENT.md)**
 
+Android background-survival settings (battery optimisation, autostart, vendor restrictions, lock-screen/reboot checks, per-model guidance): **[Android SmsForwarder Keep-Alive Guide](docs/安卓SF保活指南.md)** (Chinese; ask the AI assistant with your exact phone model for a tailored path).
+
 **Universal push quick reference** (full fields in the guide):
 
 ```
@@ -88,12 +90,12 @@ A `{"success":true,...}` response means it is stored; pushing the exact same pay
 | `DISABLE_RECEIVE_TOKEN` | no | set `"true"` (case/whitespace-insensitive) to **disable the `RECEIVE_TOKEN` fallback** so only hashed named tokens can push; unset = fallback enabled (migration-friendly default). Does not affect `/api/cron`, which always uses the env var |
 | `ENABLE_AUTH` | no | `"true"` requires login for the admin page (**strongly recommended**, see security notes below); default is no login |
 | `ADMIN_PASSWORD` | no | login password (set when `ENABLE_AUTH="true"`; if missing, admin APIs refuse access and log an alert — missing config never opens the door) |
-| `RETENTION_DAYS` | no | data retention in days, default 30 |
+| `RETENTION_DAYS` | no | data retention in days, default 30. Editable in **Settings → System** (the database value wins; this variable is only the fallback when no database value exists) |
 | `WAIT_MAX_SECONDS` | no | max seconds `/api/wait` long polling may hang, default 25 (range 3–25). On **Netlify Functions** (10s cap) or other short-timeout platforms set `8` so requests are not killed by the platform |
-| `PHONE_AREA_ENABLED` / `PHONE_AREA_API` | no | carrier-region lookup: on by default (free 360 API, no key, 24h backend cache, 11-digit mobile numbers only); set `false` to disable; custom source via `PHONE_AREA_API` (URL with `{number}` placeholder) |
-| Notification channel variables | no | `FEISHU_WEBHOOK` (Feishu) / `WECOM_WEBHOOK` (WeCom) / `DINGTALK_WEBHOOK` (DingTalk, optional `DINGTALK_SECRET` signing) / `SERVERCHAN_SENDKEY` / `PUSHPLUS_TOKEN` / `TELEGRAM_BOT_TOKEN`+`TELEGRAM_CHAT_ID` / `BARK_DEVICE_KEY` (optional `BARK_URL`) / `NTFY_URL` (optional `NTFY_TOKEN`) / `GOTIFY_URL`+`GOTIFY_TOKEN` / `RESEND_API_KEY`+`MAIL_TO` (email, optional `MAIL_FROM`) / `GENERIC_WEBHOOKS` (generic webhook, optional `GENERIC_WEBHOOK_TEMPLATE` body / `GENERIC_WEBHOOK_HEADERS` headers). Configure only what you use; with none set nothing is forwarded. Notifications auto-render in three modes by content (🔐 OTP / 💬 SMS / 🔔 notification) |
+| `PHONE_AREA_ENABLED` / `PHONE_AREA_API` | no | legacy fallback for carrier-region lookup: on by default (free 360 API, no key, 24h backend cache, 11-digit mobile numbers only); set `false` to disable; custom source via `PHONE_AREA_API` (URL with `{number}` placeholder). Prefer **Settings → System**, which stores the same values in the database and takes precedence |
+| Notification channel variables | no | **Legacy fallback only.** Configure channels in **Settings → Notifications** (database-backed, with per-channel enable/disable, credential update, masked display and a test-send button). These variables still work when the corresponding database key does not exist, which keeps existing deployments running after an upgrade: `FEISHU_WEBHOOK` (Feishu) / `WECOM_WEBHOOK` (WeCom) / `DINGTALK_WEBHOOK` (DingTalk, optional `DINGTALK_SECRET` signing) / `SERVERCHAN_SENDKEY` / `PUSHPLUS_TOKEN` / `TELEGRAM_BOT_TOKEN`+`TELEGRAM_CHAT_ID` / `BARK_DEVICE_KEY` (optional `BARK_URL`) / `NTFY_URL` (optional `NTFY_TOKEN`) / `GOTIFY_URL`+`GOTIFY_TOKEN` / `RESEND_API_KEY`+`MAIL_TO` (email, optional `MAIL_FROM`) / `GENERIC_WEBHOOKS` (generic webhook, optional `GENERIC_WEBHOOK_TEMPLATE` body / `GENERIC_WEBHOOK_HEADERS` headers). With nothing configured nothing is forwarded. Notifications auto-render in three modes by content (🔐 OTP / 💬 SMS / 🔔 notification) |
 | `SITE_NAME` / `SITE_ICON` | no | site name / icon URL; defaults apply when unset |
-| `NOTIFY_LINK` | no | admin page home URL; when set, every notification channel gets an "Open admin" entry (button/link/click); omitted automatically when unset |
+| `NOTIFY_LINK` | no | legacy fallback for the admin page home URL; when set, every notification channel gets an "Open admin" entry (button/link/click). Editable in **Settings → Notifications** (database value wins; leaving the field empty there is an explicit clear that also hides this variable) |
 | `SESSION_SECRET` | required when login is on | session signing secret: **high-entropy random value (≥32 random characters recommended), fully independent from the admin password**; Cloudflare and EdgeOne (and every other platform) must each have their own value; never commit it to Git or reuse the password. If missing, login and auth **fail closed** (login returns 500, admin APIs return 401, no password-derived fallback). Rotating the value invalidates all existing sessions immediately. Sessions last 30 minutes; logout only clears the browser cookie — a copied session token remains valid within its TTL (up to 30 minutes) |
 
 Cloudflare additionally needs the `DB` (D1 binding); other platforms need `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` (Turso database, see each platform guide); Node self-hosting also supports `SQLITE_PATH` local SQLite mode (see platforms/node/README.md).
@@ -101,6 +103,33 @@ Cloudflare additionally needs the `DB` (D1 binding); other platforms need `TURSO
 > **Security recommendations**
 > 1. **Turn on admin login** (`ENABLE_AUTH="true"` + `ADMIN_PASSWORD`): the admin page holds sensitive content such as SMS OTP codes; without login, anyone who knows the domain can read every message and delete data. The login endpoint is rate-limited (5 consecutive failures per IP locks it for 10 minutes); `/api/receive` and `/api/push` are rate-limited to 120 writes per IP per minute (429 beyond that).
 > 2. **Token in URLs — recommended: header, query for compatibility only**: `/api/receive` and `/api/push` accept the token via (in priority order) the `X-Receive-Token` header → `?token=` query → `Authorization: Bearer` → `token` in the JSON body. **The `X-Receive-Token` header is the recommended way** (never lands in access logs, browser history or referrers); the `?token=` query exists only for compatibility with SmsForwarder-style clients. You can create named tokens in the admin page (Settings → 接入令牌 / Access tokens), where they are stored hashed (SHA-256) and can be revoked or rotated per device instantly; each token can carry a **note** (to tell devices apart) and an **expiry** (permanent / preset days / custom date — expired tokens are rejected with 403 automatically, without losing the audit row); the deploy-time `RECEIVE_TOKEN` env var keeps working as a fallback until you set `DISABLE_RECEIVE_TOKEN="true"`.
+> 3. **Notification credentials are stored as plaintext** in your own `settings` table (v1.0.3 does **not** implement encryption at rest): whoever can read the database — including a backup, snapshot or copied SQLite file — can read the Webhook URLs and tokens. Protect database access and backups accordingly; the admin API only returns "configured + last-4 mask" and logs redact URLs.
+
+## Settings Page (admin)
+
+Open the admin page → **Settings** (齿轮 / 设置). Everything below requires a login session when `ENABLE_AUTH="true"`.
+
+| Group | What you can do | Stored in |
+|---|---|---|
+| 会话时长 (Session TTL) | 5–43200 minutes; applies to **newly issued** sessions only | `settings` table |
+| 接入令牌 (Access tokens) | create / list / revoke / rotate named ingest tokens; plaintext shown once | `tokens` table |
+| 通知设置 (Notifications) | global on/off, which message types to forward (`verify` / `sms` / `notify`), retry count (0–3), admin link, per-channel enable/disable, credentials, **test send**, **import from environment variables** | `settings` table (`notify.*`) |
+| 业务设置 (System) | data retention days (1–3650), carrier-region lookup on/off and custom API URL | `settings` table |
+
+Rules that matter in day-to-day use:
+
+- **Database first, environment variables second.** If a database key exists, it wins. If it does not, the legacy env var described in the table above is used. This is what makes upgrading non-breaking.
+- **Sensitive fields are never displayed in full.** The API and the page show only "configured ••••last4". Leaving a sensitive input **empty** keeps the existing value; tick **Clear** to remove it.
+- **Clearing a channel field writes an empty value**, which also hides the legacy env var (so it will not silently come back). Clearing a switch or a global rule deletes the key, restoring the default.
+- **Concurrent edits are protected** by a revision number: if two sessions save at the same time, the later one gets a conflict and must reload — nothing is half-written.
+- **Every save is verified by reading back.** The page reports success only when the values really landed.
+- **Login password and session signing secret stay in environment variables only** (`ADMIN_PASSWORD`, `SESSION_SECRET`) — they are deliberately *not* editable in the settings page.
+
+Migration and rollback:
+
+- Existing deployments keep working without any action: with no `notify.*` keys, the old env vars are used.
+- To move values into the database, open **Settings → Notifications → Import from environment variables** (imports only missing keys, never overwrites existing values).
+- To roll back a single channel, disable it in the page; to roll back all configuration, delete the `notify.*`, `retention_days`, `phone_area_enabled` and `phone_area_api` keys in `settings` — the env vars take over again immediately.
 
 ## FAQ (general)
 
@@ -111,6 +140,8 @@ Cloudflare additionally needs the `DB` (D1 binding); other platforms need `TURSO
 - **Very long messages** → a single body is capped at 8000 characters, the excess is truncated
 - **Renaming a device label** → a label comes from the message template's `name` field; changing `name` creates a new label. Use "✎" next to a label on the web page to rename it, "⇄" to merge its messages into another device, and "×" to delete an empty label directly
 - **Upgrading from an older version (new columns)** → run on the old database: `ALTER TABLE messages ADD COLUMN deleted_at TEXT;`, `ALTER TABLE messages ADD COLUMN starred INTEGER NOT NULL DEFAULT 0;`, `ALTER TABLE messages ADD COLUMN read_at TEXT;` (fresh databases already include them; node local SQLite auto-adds columns on startup)
+- **Notification settings moved to the database in v1.0.3 — do I need to change anything?** No. With no database value the old env vars are still used. When you are ready, use **Settings → Notifications → Import from environment variables**, then remove the env vars if you prefer.
+- **How do I undo a bad settings change?** Fix it in the page (blank sensitive fields keep the old value), or delete the corresponding `settings` keys to fall back to env vars/defaults; see [docs/UPGRADE.md](docs/UPGRADE.md) for the full rollback procedure
 
 ## Development
 

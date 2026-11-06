@@ -70,7 +70,7 @@ function jsStr(s) {
   return JSON.stringify(s).replace(/</g, "\\u003c");
 }
 /* 应用版本号：正式版发布固定版号，非正式版一般以小版本号递增升级；管理页/登录页底部页脚展示 */
-const APP_VERSION = "v1.0.2";
+const APP_VERSION = "v1.0.3";
 
 /* 把页面模板中的占位标记替换为实际配置值（用函数替换器，避免值里含 $& 等特殊序列被误解释） */
 function renderHtml(html, env) {
@@ -578,6 +578,162 @@ function extractCodeLite(content) {
   return "";
 }
 
+/* ---------------- 通知配置中心（PERF25：settings 表持久化，环境变量仅作旧配置兜底） ----------------
+   键设计：全部通知配置使用 `notify.` 前缀，一次前缀范围查询即可取回整组配置；
+   `notify.enabled` / `notify.types` / `notify.retry` / `notify.link` 为全局规则，
+   `notify.<渠道>.<字段>` 为渠道配置，`notify.<渠道>.enabled` 为渠道开关。
+
+   旧配置兼容：数据库无该键 → 回退环境变量（当前部署行为不变）；数据库存在该键（含空串）
+   → 以数据库为准，空串即「已明确清除」，不再回退环境变量。登录密码、鉴权密钥等安全凭据
+   继续只走环境变量，不迁入数据库。
+
+   敏感字段（Webhook URL / Token / Secret / 自定义请求头等）只在管理 API 返回「是否已配置 +
+   末 4 位脱敏」，日志与错误信息不打印完整值。 */
+const NOTIFY_KEY_PREFIX = "notify.";
+/* ASCII '.'(46) < '/'(47)：范围查询 [notify., notify/) 覆盖全部 notify.* 键且不含其他键 */
+const NOTIFY_KEY_END = "notify/";
+const NOTIFY_TYPES = ["verify", "sms", "notify"];
+const NOTIFY_RETRY_MAX = 3;
+
+/* 渠道定义：字段 → 旧环境变量名 / 是否敏感；need 为「已配置」判定所需字段 */
+const NOTIFY_CHANNELS = {
+  feishu: { label: "飞书", need: ["webhook"], fields: {
+    webhook: { env: "FEISHU_WEBHOOK", sensitive: true },
+    secret: { env: "FEISHU_SECRET", sensitive: true },
+  } },
+  wecom: { label: "企业微信", need: ["webhook"], fields: {
+    webhook: { env: "WECOM_WEBHOOK", sensitive: true },
+  } },
+  dingtalk: { label: "钉钉", need: ["webhook"], fields: {
+    webhook: { env: "DINGTALK_WEBHOOK", sensitive: true },
+    secret: { env: "DINGTALK_SECRET", sensitive: true },
+  } },
+  serverchan: { label: "Server酱", need: ["sendkey"], fields: {
+    sendkey: { env: "SERVERCHAN_SENDKEY", sensitive: true },
+  } },
+  pushplus: { label: "PushPlus", need: ["token"], fields: {
+    token: { env: "PUSHPLUS_TOKEN", sensitive: true },
+  } },
+  telegram: { label: "Telegram", need: ["bot_token", "chat_id"], fields: {
+    bot_token: { env: "TELEGRAM_BOT_TOKEN", sensitive: true },
+    chat_id: { env: "TELEGRAM_CHAT_ID" },
+  } },
+  bark: { label: "Bark", need: ["device_key"], fields: {
+    device_key: { env: "BARK_DEVICE_KEY", sensitive: true },
+    url: { env: "BARK_URL" },
+  } },
+  ntfy: { label: "ntfy", need: ["url"], fields: {
+    /* ntfy 主题 URL 本身即凭据（知道主题即可订阅/发布）→ 按敏感字段脱敏 */
+    url: { env: "NTFY_URL", sensitive: true },
+    token: { env: "NTFY_TOKEN", sensitive: true },
+  } },
+  gotify: { label: "Gotify", need: ["url", "token"], fields: {
+    url: { env: "GOTIFY_URL" },
+    token: { env: "GOTIFY_TOKEN", sensitive: true },
+  } },
+  resend: { label: "邮件（Resend）", need: ["api_key", "mail_to"], fields: {
+    api_key: { env: "RESEND_API_KEY", sensitive: true },
+    mail_to: { env: "MAIL_TO" },
+    mail_from: { env: "MAIL_FROM" },
+  } },
+  generic: { label: "通用 Webhook", need: ["urls"], fields: {
+    urls: { env: "GENERIC_WEBHOOKS", sensitive: true },
+    template: { env: "GENERIC_WEBHOOK_TEMPLATE" },
+    headers: { env: "GENERIC_WEBHOOK_HEADERS", sensitive: true },
+  } },
+};
+
+function parseSettingBool(v, def) {
+  const s = String(v === undefined || v === null ? "" : v).trim().toLowerCase();
+  if (!s) return def;
+  if (s === "true" || s === "1" || s === "on" || s === "yes") return true;
+  if (s === "false" || s === "0" || s === "off" || s === "no") return false;
+  return def;
+}
+function notifyFieldKey(channel, field) { return NOTIFY_KEY_PREFIX + channel + "." + field; }
+function isNotifyKey(k) { return String(k).indexOf(NOTIFY_KEY_PREFIX) === 0; }
+function isReservedSettingsKey(k) { return k === "schema_meta" || k === "settings_rev"; }
+
+/* 单次前缀范围读取（缺表/库异常 → null，调用方全量回退环境变量） */
+async function loadNotifyRows(env) {
+  try {
+    const res = await env.DB.prepare("SELECT key, value FROM settings WHERE key >= ?1 AND key < ?2")
+      .bind(NOTIFY_KEY_PREFIX, NOTIFY_KEY_END).all();
+    const out = {};
+    const rows = (res && res.results) || [];
+    for (const r of rows) {
+      if (r && r.key !== undefined && r.key !== null) {
+        out[String(r.key)] = String(r.value === undefined || r.value === null ? "" : r.value);
+      }
+    }
+    return out;
+  } catch (e) { return null; }
+}
+
+/* rows → 生效配置（数据库优先、环境变量兜底、空串视为已清除） */
+function resolveNotifyConfig(env, rows) {
+  const cfg = { enabled: true, types: NOTIFY_TYPES.slice(), retry: 0, link: "", channels: {}, rowsLoaded: !!rows };
+  const linkFromDb = !!(rows && rows["notify.link"] !== undefined);
+  if (rows) {
+    if (rows["notify.enabled"] !== undefined) cfg.enabled = parseSettingBool(rows["notify.enabled"], true);
+    if (rows["notify.types"] !== undefined) {
+      const list = String(rows["notify.types"]).split(",").map(function (s) { return s.trim(); })
+        .filter(function (t) { return NOTIFY_TYPES.indexOf(t) !== -1; });
+      if (list.length) cfg.types = list;
+    }
+    if (rows["notify.retry"] !== undefined) {
+      const n = parseInt(rows["notify.retry"], 10);
+      if (Number.isInteger(n)) cfg.retry = Math.min(NOTIFY_RETRY_MAX, Math.max(0, n));
+    }
+    if (rows["notify.link"] !== undefined) cfg.link = String(rows["notify.link"]).trim();
+  }
+  /* 数据库显式空串 = 已清除（遮蔽旧环境变量）；只有键不存在时才回退环境变量 */
+  if (!cfg.link && !linkFromDb) cfg.link = trimEnv(env && env.NOTIFY_LINK);
+  for (const name of Object.keys(NOTIFY_CHANNELS)) {
+    const spec = NOTIFY_CHANNELS[name];
+    const ch = { enabled: true, fields: {}, fromDb: false, configured: false };
+    if (rows && rows[notifyFieldKey(name, "enabled")] !== undefined) {
+      ch.enabled = parseSettingBool(rows[notifyFieldKey(name, "enabled")], true);
+      ch.fromDb = true;
+    }
+    for (const f of Object.keys(spec.fields)) {
+      const k = notifyFieldKey(name, f);
+      if (rows && rows[k] !== undefined) {
+        ch.fields[f] = String(rows[k]);
+        ch.fromDb = true;
+      } else {
+        ch.fields[f] = trimEnv(env && env[spec.fields[f].env]);
+      }
+    }
+    ch.configured = spec.need.every(function (f) { return !!ch.fields[f]; });
+    cfg.channels[name] = ch;
+  }
+  return cfg;
+}
+
+async function loadNotifyConfig(env) {
+  return resolveNotifyConfig(env, await loadNotifyRows(env));
+}
+
+/* 错误文本脱敏：绝不把完整 URL（可能含 Token）写进日志或 API 响应 */
+function safeNotifyError(e) {
+  let s = "";
+  try { s = String((e && e.message) || e || "unknown"); } catch (_) { s = "unknown"; }
+  s = s.replace(/https?:\/\/\S+/gi, "[url]");
+  return s.slice(0, 120);
+}
+
+/* 通知失败重试：notify.retry 为额外重试次数（0~3），默认 0 保持既有行为 */
+async function postNotifyRetry(cfg, url, headers, body) {
+  const retry = Math.min(NOTIFY_RETRY_MAX, Math.max(0, parseInt(cfg && cfg.retry, 10) || 0));
+  let last = null;
+  for (let i = 0; i <= retry; i++) {
+    try { return await postNotify(url, headers, body); }
+    catch (e) { last = e; }
+  }
+  throw last;
+}
+
 /* 转发消息归一化：一次验证码检测 + 三态标题，全部渠道共享结果。
  * title 策略（通知栏只显示 title 的渠道与邮件主题共用）：
  *   验证码 → 「🔐 验证码 <码> · <发件方>」；短信 → 「💬 短信 · <发件人>」；通知 → 「🔔 通知 · <应用名>」 */
@@ -636,13 +792,32 @@ function plainBody(info) {
  * msg: { title, content, time, source, sender, device }
  * 返回 Promise（配合 ctx.waitUntil 保证 Worker 响应后仍在后台完成发送）。
  */
-function dispatchNotify(env, msg) {
+async function dispatchNotify(env, msg, opts) {
+  const mode = opts || {};
+  const only = String(mode.only || "");
   const jobs = [];
   const t = trimEnv;
   const info = buildNotifyInfo(env, msg);  /* 验证码检测与跳转链接全渠道只算一次 */
+  /* 通知配置只在本函数（消息到达 / 主动推送 / 测试通知）读取：普通请求不加载敏感配置 */
+  const cfg = mode.config || await loadNotifyConfig(env);
+  /* cfg.link 已是最终生效值：数据库空串表示「已明确清除」，不得再回退环境变量 NOTIFY_LINK */
+  info.link = cfg.link;
+  if (!only) {
+    if (!cfg.enabled) return mode.collect ? [] : undefined;
+    if (cfg.types.indexOf(info.type) === -1) return mode.collect ? [] : undefined;
+  }
+  /* 仅测试指定渠道时可绕过开关，便于启用前验证配置是否可用 */
+  const active = function (name) {
+    if (only && only === name) return true;
+    const ch = cfg.channels[name];
+    return !!ch && ch.enabled;
+  };
+  const push = function (name, fn) {
+    if (!only || only === name) jobs.push({ name: name, fn: fn });
+  };
 
-  const feishu = t(env.FEISHU_WEBHOOK);
-  if (feishu) jobs.push(async function () {
+  const feishu = t(cfg.channels.feishu.fields.webhook);
+  if (feishu && active("feishu")) push("feishu", async function () {
     /* Interactive 卡片三态渲染（violet 验证码 / blue 短信 / turquoise 通知） */
     const st = notifyStyle(info);
     const els = [];
@@ -665,7 +840,7 @@ function dispatchNotify(env, msg) {
       header: { template: st.tpl, title: { tag: "plain_text", content: st.title } },
       elements: els,
     } };
-    const feishuSecret = t(env.FEISHU_SECRET);
+    const feishuSecret = t(cfg.channels.feishu.fields.secret);
     if (feishuSecret) {
       /* 飞书签名校验（机器人安全设置选「签名校验」时必配）：
          sign = base64(HMAC-SHA256(key = timestamp + "\n" + secret, message = ""))，timestamp 为秒级 */
@@ -673,11 +848,11 @@ function dispatchNotify(env, msg) {
       payload.timestamp = String(ts);
       payload.sign = await hmacSha256Base64(ts + "\n" + feishuSecret, "");
     }
-    await postNotify(feishu, null, JSON.stringify(payload));
+    await postNotifyRetry(cfg, feishu, null, JSON.stringify(payload));
   });
 
-  const wecom = t(env.WECOM_WEBHOOK);
-  if (wecom) jobs.push(async function () {
+  const wecom = t(cfg.channels.wecom.fields.webhook);
+  if (wecom && active("wecom")) push("wecom", async function () {
     /* 企微群机器人 markdown：不支持 action 按钮 → 链接行；comment 灰字承载体裁元信息；上限 4096 字节 */
     const st = notifyStyle(info);
     let md = "# " + st.title + "\n";
@@ -693,11 +868,11 @@ function dispatchNotify(env, msg) {
       const enc = new TextEncoder().encode(md);
       if (enc.length > 4096) md = new TextDecoder().decode(enc.slice(0, 4090)) + "…";
     } catch (e) { /* 极老运行时无 TextEncoder 时按原样发送 */ }
-    await postNotify(wecom, null, JSON.stringify({ msgtype: "markdown", markdown: { content: md } }));
+    await postNotifyRetry(cfg, wecom, null, JSON.stringify({ msgtype: "markdown", markdown: { content: md } }));
   });
 
-  const dingtalk = t(env.DINGTALK_WEBHOOK);
-  if (dingtalk) jobs.push(async function () {
+  const dingtalk = t(cfg.channels.dingtalk.fields.webhook);
+  if (dingtalk && active("dingtalk")) push("dingtalk", async function () {
     /* 钉钉 markdown：### 标题 + 列表元信息；title 字段（≤32 字）进会话列表预览；加签逻辑不变 */
     const st = notifyStyle(info);
     let md = "### " + st.title + "\n\n";
@@ -706,17 +881,17 @@ function dispatchNotify(env, msg) {
     md += "- 来源：" + (info.sender || "-") + "\n- 设备：" + (info.device || "-") + "\n- 时间：" + (info.time || "-");
     if (info.link) md += "\n\n[打开管理页](" + info.link + ")";
     let url = dingtalk;
-    const secret = t(env.DINGTALK_SECRET);
+    const secret = t(cfg.channels.dingtalk.fields.secret);
     if (secret) {
       const ts = Date.now();
       const sign = await hmacSha256Base64(secret, ts + "\n" + secret);
       url += (url.indexOf("?") === -1 ? "?" : "&") + "timestamp=" + ts + "&sign=" + encodeURIComponent(sign);
     }
-    await postNotify(url, null, JSON.stringify({ msgtype: "markdown", markdown: { title: info.title.slice(0, 32), text: md } }));
+    await postNotifyRetry(cfg, url, null, JSON.stringify({ msgtype: "markdown", markdown: { title: info.title.slice(0, 32), text: md } }));
   });
 
-  const serverchan = t(env.SERVERCHAN_SENDKEY);
-  if (serverchan) jobs.push(async function () {
+  const serverchan = t(cfg.channels.serverchan.fields.sendkey);
+  if (serverchan && active("serverchan")) push("serverchan", async function () {
     /* Server酱：通知栏只显示 title（≤32 字）→ 验证码进 title；desp 走 markdown 详情页 */
     let desp;
     if (info.code) {
@@ -726,15 +901,15 @@ function dispatchNotify(env, msg) {
     }
     if (info.link) desp += "\n\n[打开管理页](" + info.link + ")";
     const scTitle = info.title.length > 32 ? info.title.slice(0, 31) + "…" : info.title;
-    await postNotify(
+    await postNotifyRetry(cfg, 
       "https://sctapi.ftqq.com/" + encodeURIComponent(serverchan) + ".send",
       { "Content-Type": "application/x-www-form-urlencoded" },
       new URLSearchParams({ title: scTitle, desp: desp }).toString()
     );
   });
 
-  const pushplus = t(env.PUSHPLUS_TOKEN);
-  if (pushplus) jobs.push(async function () {
+  const pushplus = t(cfg.channels.pushplus.fields.token);
+  if (pushplus && active("pushplus")) push("pushplus", async function () {
     /* PushPlus：template=markdown，title 策略与 Server酱一致 */
     let content;
     if (info.code) {
@@ -743,12 +918,12 @@ function dispatchNotify(env, msg) {
       content = info.content + (info.time ? "\n\n> 🕐 " + info.time : "");
     }
     if (info.link) content += "\n\n[打开管理页](" + info.link + ")";
-    await postNotify("https://www.pushplus.plus/send", null,
+    await postNotifyRetry(cfg, "https://www.pushplus.plus/send", null,
       JSON.stringify({ token: pushplus, title: info.title, content: content, template: "markdown" }));
   });
 
-  const tgBot = t(env.TELEGRAM_BOT_TOKEN), tgChat = t(env.TELEGRAM_CHAT_ID);
-  if (tgBot && tgChat) jobs.push(async function () {
+  const tgBot = t(cfg.channels.telegram.fields.bot_token), tgChat = t(cfg.channels.telegram.fields.chat_id);
+  if (tgBot && tgChat && active("telegram")) push("telegram", async function () {
     /* Telegram：parse_mode=HTML（只需转义 & < > 三个字符，比 MarkdownV2 的十余个特殊字符转义稳得多）；
        blockquote 放验证码（Bot API 7.0+）；链接预览关闭保持消息干净。
        sendMessage 上限 4096 字符（超限整条 400 静默失败）：>4000 时去格式降级纯文本版式再截断 */
@@ -769,15 +944,15 @@ function dispatchNotify(env, msg) {
     } else {
       tgPayload = { chat_id: tgChat, parse_mode: "HTML", link_preview_options: { is_disabled: true }, text: html };
     }
-    await postNotify("https://api.telegram.org/bot" + tgBot + "/sendMessage", null, JSON.stringify(tgPayload));
+    await postNotifyRetry(cfg, "https://api.telegram.org/bot" + tgBot + "/sendMessage", null, JSON.stringify(tgPayload));
   });
 
-  const barkKey = t(env.BARK_DEVICE_KEY);
-  if (barkKey) jobs.push(async function () {
+  const barkKey = t(cfg.channels.bark.fields.device_key);
+  if (barkKey && active("bark")) push("bark", async function () {
     /* Bark 行为参数：验证码进 title 保证锁屏完整可见；copy+autoCopy 通知一点即复制验证码；
        验证码 level=timeSensitive 穿透专注模式（普通消息 active）；group 按 sms/notify 分组；
        url 点击跳管理页（NOTIFY_LINK），icon 复用站点图标 SITE_ICON */
-    const server = (t(env.BARK_URL) || "https://api.day.app").replace(/\/+$/, "");
+    const server = (t(cfg.channels.bark.fields.url) || "https://api.day.app").replace(/\/+$/, "");
     const bark = {
       device_key: barkKey,
       title: info.title,
@@ -792,11 +967,11 @@ function dispatchNotify(env, msg) {
     if (info.link) bark.url = info.link;
     const icon = t(env.SITE_ICON);
     if (icon) bark.icon = icon;
-    await postNotify(server + "/push", null, JSON.stringify(bark));
+    await postNotifyRetry(cfg, server + "/push", null, JSON.stringify(bark));
   });
 
-  const ntfy = t(env.NTFY_URL);
-  if (ntfy) jobs.push(async function () {
+  const ntfy = t(cfg.channels.ntfy.fields.url);
+  if (ntfy && active("ntfy")) push("ntfy", async function () {
     /* ntfy 用 JSON 发布模式（HTTP 头值仅限 Latin1，中文标题走 Title 头会被 fetch 拒绝）。
        NTFY_URL 为完整主题 URL：topic 取路径最后一段，POST 到其父目录（兼容根路径与反代子路径部署）；
        受保护主题可选 NTFY_TOKEN：值含「:」视为 user:password 走 Basic，否则按 Access Token 走 Bearer */
@@ -806,7 +981,7 @@ function dispatchNotify(env, msg) {
     const topic = decodeURIComponent(path.slice(slash + 1));
     if (!topic) throw new Error("NTFY_URL 需为完整主题 URL（如 https://ntfy.sh/my-topic）");
     const ntfyHeaders = { "Content-Type": "application/json" };
-    const ntfyTok = t(env.NTFY_TOKEN);
+    const ntfyTok = t(cfg.channels.ntfy.fields.token);
     if (ntfyTok) {
       ntfyHeaders.Authorization = ntfyTok.indexOf(":") !== -1 ? "Basic " + btoa(ntfyTok) : "Bearer " + ntfyTok;
     }
@@ -820,11 +995,11 @@ function dispatchNotify(env, msg) {
     };
     if (info.code) ntfyBody.tags = ["lock"];  /* 渲染 🔐 emoji */
     if (info.link) ntfyBody.click = info.link;
-    await postNotify(u.origin + path.slice(0, slash + 1), ntfyHeaders, JSON.stringify(ntfyBody));
+    await postNotifyRetry(cfg, u.origin + path.slice(0, slash + 1), ntfyHeaders, JSON.stringify(ntfyBody));
   });
 
-  const gotifyUrl = t(env.GOTIFY_URL), gotifyToken = t(env.GOTIFY_TOKEN);
-  if (gotifyUrl && gotifyToken) jobs.push(async function () {
+  const gotifyUrl = t(cfg.channels.gotify.fields.url), gotifyToken = t(cfg.channels.gotify.fields.token);
+  if (gotifyUrl && gotifyToken && active("gotify")) push("gotify", async function () {
     /* Gotify：extras client::display contentType=text/markdown 让 Android 客户端渲染 markdown；
        验证码 priority 8、普通 5 */
     let md;
@@ -835,13 +1010,13 @@ function dispatchNotify(env, msg) {
       md = info.content + (info.time ? "\n\n> 🕐 " + info.time : "");
     }
     if (info.link) md += "\n\n[打开管理页](" + info.link + ")";
-    await postNotify(gotifyUrl.replace(/\/+$/, "") + "/message?token=" + encodeURIComponent(gotifyToken), null,
+    await postNotifyRetry(cfg, gotifyUrl.replace(/\/+$/, "") + "/message?token=" + encodeURIComponent(gotifyToken), null,
       JSON.stringify({ title: info.title, message: md, priority: info.code ? 8 : 5,
         extras: { "client::display": { contentType: "text/markdown" } } }));
   });
 
-  const resendKey = t(env.RESEND_API_KEY), mailTo = t(env.MAIL_TO);
-  if (resendKey && mailTo) jobs.push(async function () {
+  const resendKey = t(cfg.channels.resend.fields.api_key), mailTo = t(cfg.channels.resend.fields.mail_to);
+  if (resendKey && mailTo && active("resend")) push("resend", async function () {
     /* Resend：完整 HTML 模板（全部内联 CSS，兼容邮件客户端）；subject 复用统一标题策略（验证码进主题）；
        text 附统一纯文本版式，作为不支持 HTML 的客户端的降级 */
     const st = notifyStyle(info);
@@ -865,10 +1040,10 @@ function dispatchNotify(env, msg) {
       + '<p style="margin:28px 0 0;padding-top:12px;border-top:1px solid #e5e7eb;color:#9ca3af;font-size:12px;">由 SMSToWeb 自动发送 · 请勿回复本邮件</p>'
       + "</div>";
     const to = mailTo.split(/[,;，；]/).map(function (s) { return s.trim(); }).filter(Boolean);
-    await postNotify("https://api.resend.com/emails",
+    await postNotifyRetry(cfg, "https://api.resend.com/emails",
       { Authorization: "Bearer " + resendKey },
       JSON.stringify({
-        from: t(env.MAIL_FROM) || "onboarding@resend.dev",
+        from: t(cfg.channels.resend.fields.mail_from) || "onboarding@resend.dev",
         to: to,
         subject: info.title,
         html: html,
@@ -880,9 +1055,9 @@ function dispatchNotify(env, msg) {
      （type=verify|sms|notify，code=轻量检测出的验证码，未检出为空串）；
      配置 GENERIC_WEBHOOK_TEMPLATE 后按模板渲染请求体（可解析为 JSON 则按 JSON 发送，否则按纯文本），
      第三方 API（短信网关、自建系统等）由此接入 */
-  const genericUrls = String(env.GENERIC_WEBHOOKS || "").split(",").map(function (s) { return s.trim(); })
+  const genericUrls = String(cfg.channels.generic.fields.urls || "").split(",").map(function (s) { return s.trim(); })
     .filter(function (u) { return /^https?:\/\//i.test(u); });
-  if (genericUrls.length) {
+  if (genericUrls.length && active("generic")) {
     const payload = {
       title: msg.title, content: String(msg.content || ""), time: msg.time || "",
       source: msg.source || "", sender: msg.sender || "", device: msg.device || "",
@@ -890,7 +1065,7 @@ function dispatchNotify(env, msg) {
     };
     let genericBody = JSON.stringify(payload);
     let genericCt = "application/json";
-    const tpl = t(env.GENERIC_WEBHOOK_TEMPLATE);
+    const tpl = t(cfg.channels.generic.fields.template);
     if (tpl) {
       genericBody = tpl;
       for (const k of Object.keys(payload)) {
@@ -901,7 +1076,7 @@ function dispatchNotify(env, msg) {
     /* 可选自定义请求头：GENERIC_WEBHOOK_HEADERS 为 JSON 对象字符串，如 {"Authorization":"Bearer xxx"}；
        解析失败忽略该配置（仅用默认头），不影响转发。显式指定的 Content-Type 优先于默认值 */
     const genericHeaders = { "Content-Type": genericCt };
-    const hdrRaw = t(env.GENERIC_WEBHOOK_HEADERS);
+    const hdrRaw = t(cfg.channels.generic.fields.headers);
     if (hdrRaw) {
       try {
         const parsed = JSON.parse(hdrRaw);
@@ -911,16 +1086,23 @@ function dispatchNotify(env, msg) {
       }
     }
     for (const u of genericUrls) {
-      jobs.push(async function () { await postNotify(u, genericHeaders, genericBody); });
+      push("generic", (function (target) {
+        return async function () { await postNotifyRetry(cfg, target, genericHeaders, genericBody); };
+      })(u));
     }
   }
 
-  if (!jobs.length) return Promise.resolve();
-  return Promise.allSettled(jobs.map(function (job) {
-    return job().catch(function (e) {
-      logEvent("error", "notify_forward_failed", "notify", env, "-", { message: e && e.message });
-    });
+  if (!jobs.length) return mode.collect ? [] : undefined;
+  const results = await Promise.all(jobs.map(async function (job) {
+    try {
+      await job.fn();
+      return { channel: job.name, ok: true };
+    } catch (e) {
+      logEvent("error", "notify_forward_failed", "notify", env, "-", { message: safeNotifyError(e) });
+      return { channel: job.name, ok: false, error: safeNotifyError(e) };
+    }
   }));
+  return mode.collect ? results : undefined;
 }
 
 /* ---------------- 接收（短信：SmsForwarder 等 App Webhook） ---------------- */
@@ -1389,10 +1571,91 @@ async function handleMergeDevices(request, env) {
   return json({ success: true, moved: r.results[2].changes });
 }
 
+/* ---------------- 业务配置（settings 表；环境变量仅作旧配置兜底） ----------------
+   session_ttl_minutes 沿用既有读取函数（登录低频、每次现查）；
+   retention_days / phone_area_enabled / phone_area_api 在此统一按「数据库优先 → 环境变量 → 默认值」
+   解析，只在真正需要该配置的入口读取（定时清理、号码归属地），普通列表请求不触发任何设置查询。 */
+const SCALAR_SETTINGS = {
+  session_ttl_minutes: { env: "", def: "30", kind: "int", min: 5, max: 43200 },
+  retention_days: { env: "RETENTION_DAYS", def: String(DEFAULT_RETENTION_DAYS), kind: "int", min: 1, max: 3650 },
+  phone_area_enabled: { env: "PHONE_AREA_ENABLED", def: "true", kind: "bool" },
+  phone_area_api: { env: "PHONE_AREA_API", def: "", kind: "url", maxLen: 500, allowEmpty: true },
+};
+
+/* 单条 IN 查询批量读取（缺表/库异常 → 空对象，调用方回退环境变量） */
+async function readSettingsKeys(env, keys) {
+  const out = {};
+  if (!keys || !keys.length) return out;
+  try {
+    const ph = keys.map(function (_, i) { return "?" + (i + 1); }).join(", ");
+    const res = await env.DB.prepare("SELECT key, value FROM settings WHERE key IN (" + ph + ")")
+      .bind(...keys).all();
+    for (const r of (res && res.results) || []) {
+      if (r && r.key !== undefined && r.key !== null) {
+        out[String(r.key)] = String(r.value === undefined || r.value === null ? "" : r.value);
+      }
+    }
+  } catch (e) { /* 缺表/库异常 → 交由调用方兜底 */ }
+  return out;
+}
+
+/* 严格类型/范围校验：合法返回规范化字符串，非法返回 null（供保存接口拒绝非法参数） */
+function coerceScalar(name, raw) {
+  const spec = SCALAR_SETTINGS[name];
+  if (!spec) return null;
+  const s = String(raw === undefined || raw === null ? "" : raw).trim();
+  if (spec.kind === "int") {
+    if (!/^-?\d+$/.test(s)) return null;
+    const n = parseInt(s, 10);
+    if (!Number.isInteger(n) || n < spec.min || n > spec.max) return null;
+    return String(n);
+  }
+  if (spec.kind === "bool") {
+    if (!s) return spec.def;
+    const low = s.toLowerCase();
+    if (low === "true" || low === "1" || low === "on" || low === "yes") return "true";
+    if (low === "false" || low === "0" || low === "off" || low === "no") return "false";
+    return null;
+  }
+  if (spec.kind === "url") {
+    if (!s) return spec.allowEmpty ? "" : null;
+    if (s.length > (spec.maxLen || 500)) return null;
+    return /^https?:\/\//i.test(s) ? s : null;
+  }
+  return null;
+}
+
+/* 单项读取：数据库 → 环境变量 → 默认；非法值按默认处理 */
+async function getScalarSetting(env, name) {
+  const spec = SCALAR_SETTINGS[name];
+  if (!spec) return null;
+  const map = await readSettingsKeys(env, [name]);
+  let raw;
+  if (map && map[name] !== undefined) raw = map[name];
+  else raw = env && spec.env ? env[spec.env] : "";
+  const v = coerceScalar(name, raw);
+  return v === null ? spec.def : v;
+}
+
+/* 号码归属地：一次读取两个键（开关 + 自定义源），避免每请求两次查询 */
+async function getPhoneAreaSettings(env) {
+  const map = await readSettingsKeys(env, ["phone_area_enabled", "phone_area_api"]);
+  const flagRaw = map.phone_area_enabled !== undefined
+    ? map.phone_area_enabled : (env && env.PHONE_AREA_ENABLED);
+  const apiRaw = map.phone_area_api !== undefined
+    ? map.phone_area_api : (env && env.PHONE_AREA_API);
+  const flag = coerceScalar("phone_area_enabled", flagRaw);
+  const api = coerceScalar("phone_area_api", apiRaw);
+  return {
+    enabled: (flag === null ? true : flag === "true"),
+    api: (api === null ? (trimEnv(env && env.PHONE_AREA_API) || AREA_DEFAULT_API) : (api || AREA_DEFAULT_API)),
+  };
+}
+
 /* ---------------- 号码归属地（免费、无 key） ----------------
  * 仅对 11 位手机号查询；默认走 360 公开接口（无 key），结果内存缓存 24h。
  * 外部接口失败静默降级（不显示归属地，不影响页面）。
- * 关闭方式：PHONE_AREA_ENABLED=false；自定义源：PHONE_AREA_API（URL 模板，用 {number} 占位）。 */
+ * 关闭/自定义源：设置页面「业务设置」写入 settings 表；未设置时回退 PHONE_AREA_ENABLED / PHONE_AREA_API。 */
 const AREA_CACHE = new Map();
 const AREA_TTL = 24 * 3600 * 1000;
 const AREA_DEFAULT_API = "https://cx.shouji.360.cn/phonearea.php?number={number}";
@@ -1400,8 +1663,8 @@ const AREA_DEFAULT_API = "https://cx.shouji.360.cn/phonearea.php?number={number}
 async function handlePhoneArea(request, url, env) {
   const num = String(url.searchParams.get("number") || "").replace(/\D/g, "");
   if (!/^1[3-9]\d{9}$/.test(num)) return json({ success: true, found: false });
-  const flag = String(env.PHONE_AREA_ENABLED || "true").trim().toLowerCase();
-  if (flag === "false" || flag === "0" || flag === "off") return json({ success: true, found: false, disabled: true });
+  const cfg = await getPhoneAreaSettings(env);
+  if (!cfg.enabled) return json({ success: true, found: false, disabled: true });
 
   const cached = AREA_CACHE.get(num);
   if (cached && Date.now() - cached.t < AREA_TTL) return json(Object.assign({ success: true }, cached.v));
@@ -1412,7 +1675,7 @@ async function handlePhoneArea(request, url, env) {
 
   let out = { found: false };
   try {
-    const tpl = String(env.PHONE_AREA_API || "").trim() || AREA_DEFAULT_API;
+    const tpl = cfg.api;
     const target = tpl.indexOf("{number}") !== -1 ? tpl.replace("{number}", encodeURIComponent(num)) : tpl + encodeURIComponent(num);
     const opts = {};
     const sig = timeoutSignal(4000);
@@ -1736,6 +1999,20 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .foot .ver { opacity: .6; }
   .toksecret { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; word-break: break-all;
                padding: 10px; border-radius: 8px; background: rgba(127,127,127,.12); user-select: all; }
+  /* 设置表单（通知设置 / 业务设置）：弹层内可滚动，沿用令牌面板的输入风格 */
+  .setform { max-height: 62vh; overflow: auto; padding-right: 4px; }
+  .setgrp { padding: 10px 0 6px; border-top: 1px solid rgba(127,127,127,.18); }
+  .setgrp:first-child { border-top: 0; }
+  .setgrp h4 { margin: 0 0 6px; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+  .setgrp h4 .tokbadge { margin-left: auto; }
+  .setrow { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 13px; flex-wrap: wrap; }
+  .setrow > label { flex: 0 0 auto; min-width: 76px; color: var(--muted); }
+  .setrow input[type="text"], .setrow input[type="password"], .setrow input[type="number"], .setrow select {
+    flex: 1 1 140px; min-width: 0; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--card); color: var(--text); font-size: 13px; }
+  .setrow .clr { flex: 0 0 auto; font-size: 12px; display: flex; align-items: center; gap: 4px; color: var(--muted); }
+  .setrow .settest { flex: 0 0 auto; }
+  .setnote { font-size: 12px; opacity: .65; line-height: 1.6; margin: 4px 0 8px; }
   .tokwarn { color: #c0392b; font-size: 13px; font-weight: 600; margin: 10px 0; }
   @media (min-width: 561px) {
     input[type=search], input[type=number], select { font-size: 14px; }
@@ -1808,6 +2085,9 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
           <div class="grp">接入令牌</div>
           <button class="tbtn" id="mtokens" role="menuitem" title="创建 / 查看 / 吊销 / 轮换接入令牌">接入令牌</button>
           <button class="tbtn" id="msesttl" role="menuitem" title="调整登录会话有效期（默认 30 分钟）">会话时长</button>
+          <div class="grp">通知与业务设置</div>
+          <button class="tbtn" id="mnotify" role="menuitem" title="通知渠道 / 开关 / 规则 / 重试 / 测试">通知设置</button>
+          <button class="tbtn" id="msysset" role="menuitem" title="数据保留天数 / 号码归属地查询">业务设置</button>
         </div>
       </span>
       <button class="tbtn" id="themebtn" data-i18n-title="themeTip">自动</button>
@@ -3595,6 +3875,197 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         .catch(function () { toast("保存失败"); });
     };
   }
+  /* ---------- 通知设置：渠道配置 / 总开关 / 类型规则 / 重试 / 跳转链接 / 测试 ----------
+     数据来源 GET /api/settings（通知部分 + notify_schema 渲染元数据）；保存 PUT /api/settings。
+     敏感字段只显示「已配置 + 末 4 位」；输入留空 = 不修改，勾选「清除」才会删除数据库值。 */
+  var NF_LABELS = {
+    webhook: "Webhook 地址", secret: "签名密钥", sendkey: "SendKey", token: "Token / 密钥",
+    bot_token: "Bot Token", chat_id: "Chat ID", device_key: "设备 Key", url: "服务地址",
+    api_key: "API Key", mail_to: "收件人", mail_from: "发件人", urls: "Webhook 地址",
+    template: "请求体模板", headers: "自定义请求头",
+  };
+  function nfLabel(f) { return NF_LABELS[f] || f; }
+  function nfFetchSettings() {
+    return fetch("/api/settings").then(function (r) {
+      if (r.status === 401) { location.reload(); return null; }
+      return r.json();
+    });
+  }
+  function openNotifySettings() {
+    nfFetchSettings().then(function (d) {
+      if (!d || !d.success) { toast("读取设置失败"); return; }
+      var schema = d.notify_schema || { channels: [], types: [], retry_max: 3 };
+      var cfg = d.notify || { enabled: true, types: [], retry: 0, link: "", channels: {} };
+      var html = '<h3>通知设置</h3>'
+        + '<div class="setnote">配置保存到数据库并立即生效；敏感字段只在服务端保存，页面只显示「是否已配置」。'
+        + '输入留空表示不修改，勾选「清除」才会删除已存值。测试通知使用已保存的配置。</div>'
+        + '<div class="setform"><div class="setgrp"><h4>全局规则</h4>'
+        + '<div class="setrow"><label>通知总开关</label><input type="checkbox" id="nfen" ' + (cfg.enabled ? "checked" : "") + '></div>'
+        + '<div class="setrow"><label>转发类型</label>';
+      schema.types.forEach(function (t) {
+        var label = t === "verify" ? "验证码" : (t === "sms" ? "短信" : "通知");
+        html += '<label><input type="checkbox" data-nftype="' + esc(t) + '" '
+          + (cfg.types.indexOf(t) !== -1 ? "checked" : "") + '> ' + esc(label) + '</label>';
+      });
+      html += '</div><div class="setrow"><label>失败重试</label><select id="nfretry">';
+      for (var i = 0; i <= (schema.retry_max || 0); i++) {
+        html += '<option value="' + i + '" ' + (Number(cfg.retry) === i ? "selected" : "") + '>'
+          + (i === 0 ? "不重试" : i + " 次") + '</option>';
+      }
+      html += '</select></div><div class="setrow"><label>跳转链接</label>'
+        + '<input type="text" id="nflink" placeholder="https://…（可选，附加到通知正文）" value="'
+        + esc(cfg.link || "") + '"></div></div>';
+
+      (schema.channels || []).forEach(function (ch) {
+        var state = cfg.channels[ch.key] || { enabled: true, configured: false, source: "env", fields: {} };
+        html += '<div class="setgrp"><h4>' + esc(ch.label || ch.key)
+          + '<span class="tokbadge">' + (state.configured ? "已配置" : "未配置")
+          + (state.configured ? " · " + (state.source === "db" ? "数据库" : "环境变量") : "")
+          + '</span></h4>'
+          + '<div class="setrow"><label>启用</label><input type="checkbox" id="nf_' + ch.key + '_enabled" '
+          + (state.enabled ? "checked" : "") + '></div>';
+        ch.fields.forEach(function (f) {
+          var id = "nf_" + ch.key + "_" + f.key;
+          var val = state.fields[f.key] || {};
+          if (f.sensitive) {
+            var ph = val.configured ? "已配置 " + (val.masked || "••••") + "（留空不修改）" : "未配置，输入后保存";
+            html += '<div class="setrow"><label>' + esc(nfLabel(f.key)) + '</label>'
+              + '<input type="text" id="' + id + '" autocomplete="off" spellcheck="false" placeholder="' + esc(ph) + '">'
+              + '<label class="clr"><input type="checkbox" id="clr_' + ch.key + '_' + f.key + '"> 清除</label></div>';
+          } else {
+            html += '<div class="setrow"><label>' + esc(nfLabel(f.key)) + '</label>'
+              + '<input type="text" id="' + id + '" autocomplete="off" value="' + esc(val.value || "") + '"></div>';
+          }
+        });
+        html += '<div class="setrow"><label>测试</label><button class="tbtn settest" id="nf_test_' + ch.key + '">发送测试通知</button></div></div>';
+      });
+      html += '</div><div class="btnrow"><button class="tbtn" id="nfsave">保存</button>'
+        + '<button class="tbtn" id="nfimport">从环境变量导入</button></div>';
+      openModal(html);
+
+      (schema.channels || []).forEach(function (ch) {
+        var btn = $("nf_test_" + ch.key);
+        if (!btn) return;
+        btn.onclick = function () {
+          btn.disabled = true;
+          fetch("/api/settings/notify/test", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ channel: ch.key }),
+          }).then(function (r) {
+            if (r.status === 401) { location.reload(); return null; }
+            return r.json();
+          }).then(function (res) {
+            btn.disabled = false;
+            if (!res) return;
+            if (res.success) { toast("测试通知已发送"); return; }
+            if (res.error === "NOT_CONFIGURED") { toast("该渠道尚未配置，请先保存凭据"); return; }
+            toast("发送失败" + (res.message ? "：" + res.message : ""));
+          }).catch(function () { btn.disabled = false; toast("发送失败"); });
+        };
+      });
+
+      $("nfimport").onclick = function () {
+        fetch("/api/settings/notify/import-env", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+        }).then(function (r) {
+          if (r.status === 401) { location.reload(); return null; }
+          return r.json();
+        }).then(function (res) {
+          if (!res) return;
+          if (!res.success) { toast("导入失败" + (res.error ? "：" + res.error : "")); return; }
+          closeModal();
+          toast(res.imported ? ("已导入 " + res.imported + " 项环境变量配置") : "没有可导入的环境变量配置");
+          openNotifySettings();
+        }).catch(function () { toast("导入失败"); });
+      };
+
+      $("nfsave").onclick = function () {
+        var types = [];
+        document.querySelectorAll("[data-nftype]").forEach(function (el) {
+          if (el.checked) types.push(el.getAttribute("data-nftype"));
+        });
+        if (!types.length) { toast("至少保留一种转发类型"); return; }
+        var body = {
+          revision: d.revision,
+          notify: {
+            enabled: !!$("nfen").checked,
+            types: types,
+            retry: parseInt($("nfretry").value, 10),
+            link: $("nflink").value.trim(),
+            channels: {},
+          },
+          clear: [],
+        };
+        (schema.channels || []).forEach(function (ch) {
+          var c = { enabled: !!$("nf_" + ch.key + "_enabled").checked };
+          ch.fields.forEach(function (f) {
+            var el = $("nf_" + ch.key + "_" + f.key);
+            if (!el) return;
+            if (f.sensitive) {
+              var v = el.value.trim();
+              if (v) c[f.key] = v;
+              var ck = $("clr_" + ch.key + "_" + f.key);
+              if (ck && ck.checked) body.clear.push("notify." + ch.key + "." + f.key);
+            } else {
+              c[f.key] = el.value.trim();
+            }
+          });
+          body.notify.channels[ch.key] = c;
+        });
+        fetch("/api/settings", {
+          method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+        }).then(function (r) {
+          if (r.status === 401) { location.reload(); return null; }
+          return r.json();
+        }).then(function (res) {
+          if (!res) return;
+          if (res.success) { closeModal(); toast(T("saved")); return; }
+          if (res.error === "REVISION_CONFLICT") { toast("设置已被其他会话修改，请重新打开后再保存"); return; }
+          toast("保存失败" + (res.error ? "：" + res.error : ""));
+        }).catch(function () { toast("保存失败"); });
+      };
+    }).catch(function () { toast("读取设置失败"); });
+  }
+  /* ---------- 业务设置：数据保留天数 / 号码归属地 ---------- */
+  function openSystemSettings() {
+    nfFetchSettings().then(function (d) {
+      if (!d || !d.success) { toast("读取设置失败"); return; }
+      openModal('<h3>业务设置</h3>'
+        + '<div class="setnote">保存到数据库并立即生效；留空或非法值不会写入。</div>'
+        + '<div class="setform"><div class="setgrp"><h4>消息保留</h4>'
+        + '<div class="setrow"><label>保留天数</label><input type="number" id="sysdays" min="1" max="3650" '
+        + 'inputmode="numeric" value="' + esc(String(d.retention_days || 30)) + '"></div>'
+        + '<div class="setnote">定时清理会删除超过该天数的消息（1 ~ 3650 天）。</div></div>'
+        + '<div class="setgrp"><h4>号码归属地</h4>'
+        + '<div class="setrow"><label>启用查询</label><input type="checkbox" id="sysarea" '
+        + (d.phone_area_enabled ? "checked" : "") + '></div>'
+        + '<div class="setrow"><label>接口地址</label><input type="text" id="sysareaapi" '
+        + 'placeholder="留空使用内置免费接口" value="' + esc(d.phone_area_api || "") + '"></div>'
+        + '<div class="setnote">自定义接口需支持 {number} 占位（http/https）。关闭后列表不再显示归属地。</div></div>'
+        + '</div><div class="btnrow"><button class="tbtn" id="syssave">保存</button></div>');
+      $("syssave").onclick = function () {
+        var days = parseInt($("sysdays").value, 10);
+        if (!Number.isInteger(days) || days < 1 || days > 3650) { toast("保留天数须为 1 ~ 3650"); return; }
+        fetch("/api/settings", {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            revision: d.revision,
+            retention_days: days,
+            phone_area_enabled: !!$("sysarea").checked,
+            phone_area_api: $("sysareaapi").value.trim(),
+          }),
+        }).then(function (r) {
+          if (r.status === 401) { location.reload(); return null; }
+          return r.json();
+        }).then(function (res) {
+          if (!res) return;
+          if (res.success) { closeModal(); toast(T("saved")); return; }
+          if (res.error === "REVISION_CONFLICT") { toast("设置已被其他会话修改，请重新打开后再保存"); return; }
+          toast("保存失败" + (res.error ? "：" + res.error : ""));
+        }).catch(function () { toast("保存失败"); });
+      };
+    }).catch(function () { toast("读取设置失败"); });
+  }
   /* ---------- 设置下拉菜单：统计 / 消息开关 / 免打扰 / 筛选 / 操作 ---------- */
   var setBtn = $("setbtn"), setMenu = $("setmenu");
   function setSetOpen(on) {
@@ -3624,6 +4095,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   $("mstats").onclick = function () { setSetOpen(false); openStats(); };
   $("mtokens").onclick = function () { setSetOpen(false); openTokens(); };
   $("msesttl").onclick = function () { setSetOpen(false); openSessTtl(); };
+  $("mnotify").onclick = function () { setSetOpen(false); openNotifySettings(); };
+  $("msysset").onclick = function () { setSetOpen(false); openSystemSettings(); };
   /* 免打扰：回填开关与时段；保存只写 dnd（提示音由 soundon 即时生效，不在此保存） */
   var dnd = getDND();
   $("stdnd").checked = !!dnd.on;
@@ -3971,7 +4444,7 @@ async function handleCron(env) {
   const cronRid = newRequestId();
   /* 定时清理路径同样自愈（覆盖 scheduled 触发时不经 fetch 入口的平台） */
   await ensureSchema(env, cronRid);
-  const days = Math.max(1, parseInt(env.RETENTION_DAYS, 10) || DEFAULT_RETENTION_DAYS);
+  const days = Math.max(1, parseInt(await getScalarSetting(env, "retention_days"), 10) || DEFAULT_RETENTION_DAYS);
   const res = await env.DB.prepare(
     `DELETE FROM messages WHERE received_at < datetime('now', ?1)`
   ).bind(`-${days} days`).run();
@@ -4172,30 +4645,154 @@ function schemaStatements(kind) {
   return out;
 }
 
+/* 按顶层逗号切分 CREATE TABLE 主体：括号内的逗号（DEFAULT (datetime('now')) 等）
+   与引号内的逗号不切分。schema.sql 与 sqlite_master 的实际 DDL 可能换行格式不同
+   （同一行可写多列），必须按语法切分而不是按行切分，否则会误判缺列。 */
+function splitTopLevelCommas(bodyText) {
+  const out = [];
+  let cur = "";
+  let depth = 0;
+  let quote = null;
+  for (const ch of String(bodyText || "")) {
+    if (quote) {
+      cur += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === "'" || ch === '"') { quote = ch; cur += ch; continue; }
+    if (ch === "(") depth++;
+    else if (ch === ")") depth--;
+    if (ch === "," && depth === 0) { out.push(cur); cur = ""; continue; }
+    cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
+
+/* 解析 CREATE TABLE 主体（括号内文本）→ { 列名: 列定义 }。schema.sql 与 sqlite_master 中的
+   实际建表语句共用同一套解析，避免「期望结构」与「实际结构」两套判定口径漂移。 */
+function parseTableColumns(bodyText) {
+  const cols = {};
+  for (const item of splitTopLevelCommas(String(bodyText || "").replace(/--[^\n]*/g, ""))) {
+    const t = item.trim();
+    if (!t) continue;
+    const cm = t.match(/^([A-Za-z_]\w*)\s+([\s\S]+)$/);
+    if (!cm) continue;
+    if (["PRIMARY", "UNIQUE", "FOREIGN", "CHECK", "CONSTRAINT"].includes(cm[1].toUpperCase())) continue;
+    cols[cm[1]] = cm[2].trim();
+  }
+  return cols;
+}
+
 /* 从内嵌 SCHEMA_SQL 解析「表 → 列名 → 列定义」映射，用于缺列检测与自动补列。
    约束：ALTER TABLE ADD COLUMN 无法添加 PRIMARY KEY/UNIQUE 列；新增列须带默认值或可空（schema.sql 现有约定如此）。 */
 function schemaColumnMap() {
   const map = {};
   for (const m of SCHEMA_SQL.matchAll(/CREATE TABLE IF NOT EXISTS (\w+)\s*\(([\s\S]*?)\)\s*;/g)) {
-    const cols = {};
-    for (const line of m[2].split("\n")) {
-      const t = line.replace(/--.*$/, "").trim().replace(/,+$/, "").trim();
-      if (!t) continue;
-      const cm = t.match(/^(\w+)\s+(.+)$/);
-      if (!cm) continue;
-      if (["PRIMARY", "UNIQUE", "FOREIGN", "CHECK", "CONSTRAINT"].includes(cm[1].toUpperCase())) continue;
-      cols[cm[1]] = cm[2].trim();
-    }
-    map[m[1]] = cols;
+    map[m[1]] = parseTableColumns(m[2]);
   }
   return map;
 }
 
-/* 幂等自愈：缺表建表（CREATE IF NOT EXISTS）+ 缺列检测补列（PRAGMA table_info 查列再 ALTER）。
+/* schema 结构健康标记：写入 settings 表的保留键（键值表已存在，不新增表、不改既有列，
+   与旧代码/旧库完全兼容）。值 = 内嵌 SCHEMA_SQL 派生的结构指纹。
+   跳过完整自愈的必要条件：指纹一致 + sqlite_master 中期望的表、列、索引全部齐备；
+   标记只是必要条件之一，实际结构证据来自同一次数据库查询；任何未知/缺失/异常一律回退完整 ensureSchema。 */
+const SCHEMA_META_KEY = "schema_meta";
+
+/* 当前代码期望的结构（派生自内嵌 SCHEMA_SQL，不手工维护，避免与 schema.sql 漂移） */
+function schemaExpectation() {
+  const colMap = schemaColumnMap();
+  const tables = {};
+  for (const t of Object.keys(colMap).sort()) tables[t] = Object.keys(colMap[t]).sort();
+  const indexes = [];
+  for (const sql of schemaStatements("index")) {
+    const m = /CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)/i.exec(sql);
+    if (m) indexes.push(m[1]);
+  }
+  return { tables: tables, indexes: indexes.sort() };
+}
+
+let schemaFingerprintCache = null;
+/* 结构指纹：SCHEMA_SQL 增删表/列/索引 → 指纹变化 → 旧标记自动失效 → 回退完整自愈并重写标记 */
+function schemaFingerprint() {
+  if (schemaFingerprintCache) return schemaFingerprintCache;
+  const ex = schemaExpectation();
+  const tables = Object.keys(ex.tables).map(function (t) { return t + "(" + ex.tables[t].join(",") + ")"; });
+  schemaFingerprintCache = "v1|" + tables.join(";") + "|" + ex.indexes.join(",");
+  return schemaFingerprintCache;
+}
+
+/* 单条 SQL 一次取回：结构标记 + 期望表/索引在 sqlite_master 中的实际定义。
+   Turso 每次 execute 即一次网络往返，本查询把「全部结构校验」压到 1 次往返；
+   settings 表缺失时整条语句报错 → 调用方按「未知」回退完整自愈。
+   表名/索引名均来自内嵌 SCHEMA_SQL（\w+ 字符集），不存在注入面。 */
+function schemaProbeSql() {
+  const ex = schemaExpectation();
+  const names = function (list) { return list.map(function (n) { return "'" + n + "'"; }).join(","); };
+  const parts = [
+    "SELECT 'meta:" + SCHEMA_META_KEY + "' AS k, value AS v FROM settings WHERE key = '" + SCHEMA_META_KEY + "'",
+    "SELECT 'table:' || name AS k, COALESCE(sql, '') AS v FROM sqlite_master WHERE type = 'table' AND name IN (" + names(Object.keys(ex.tables)) + ")",
+  ];
+  if (ex.indexes.length) {
+    parts.push("SELECT 'index:' || name AS k, '' AS v FROM sqlite_master WHERE type = 'index' AND name IN (" + names(ex.indexes) + ")");
+  }
+  return parts.join(" UNION ALL ");
+}
+
+/* 去掉 CREATE TABLE 语句的外层括号，取出列定义主体（第一个 '(' 到最后一个 ')'） */
+function tableBodyFromDdl(ddl) {
+  const m = /\(([\s\S]*)\)/.exec(String(ddl || ""));
+  return m ? m[1] : "";
+}
+
+/* 结构快速校验：1 次数据库调用完成「版本 + 表 + 列 + 索引」四项核对。
+   返回 true = 可安全跳过完整自愈；任何异常/未知/不匹配一律 false（回退完整 ensureSchema）。
+   不把模块级缓存当作结构正确性的证据——每次实例冷启动都重新向数据库取证。 */
+async function schemaFastCheck(env) {
+  try {
+    const res = await env.DB.prepare(schemaProbeSql()).all();
+    const rows = (res && res.results) || [];
+    const seen = {};
+    for (const r of rows) if (r && r.k !== undefined) seen[String(r.k)] = r.v;
+    if (seen["meta:" + SCHEMA_META_KEY] !== schemaFingerprint()) return false;
+    const ex = schemaExpectation();
+    for (const t of Object.keys(ex.tables)) {
+      const ddl = seen["table:" + t];
+      if (typeof ddl !== "string" || !ddl) return false;
+      const actual = parseTableColumns(tableBodyFromDdl(ddl));
+      for (const c of ex.tables[t]) {
+        if (!Object.prototype.hasOwnProperty.call(actual, c)) return false;
+      }
+    }
+    for (const n of ex.indexes) if (!Object.prototype.hasOwnProperty.call(seen, "index:" + n)) return false;
+    return true;
+  } catch (e) {
+    /* 缺表/缺列/语法或连接异常 = 状态未知：绝不当作健康，回退完整自愈 */
+    return false;
+  }
+}
+
+/* 完整自愈成功后写结构标记（1 次数据库调用）。写失败不影响本次请求（自愈已完成），
+   但不会留下标记 → 下次请求重新完整自愈，安全降级。 */
+async function markSchemaHealthy(env) {
+  try {
+    await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)")
+      .bind(SCHEMA_META_KEY, schemaFingerprint()).run();
+  } catch (e) { /* 标记写失败：不阻断、不误报，下次完整自愈 */ }
+}
+
+/* 幂等自愈：快速校验（1 次往返）→ 不匹配才执行完整迁移（建表 → 补列 → 建索引 → 写标记）。
    任何失败仅告警不阻断主流程（静默降级），且不标记完成——下次请求自动重试。
-   覆盖六平台：D1 / Turso / 本地 SQLite 三类适配层均支持 prepare→all/run 与 PRAGMA。 */
+   覆盖六平台：D1 / Turso / 本地 SQLite 三类适配层均支持 prepare→all/run、sqlite_master 与 PRAGMA。 */
 async function ensureSchema(env, requestId = "-") {
   if (!env || !env.DB || schemaHealed.has(env.DB)) return;
+  /* 快路径：结构指纹 + 实际表/列/索引全部匹配才跳过完整迁移（证据每次来自数据库本身） */
+  if (await schemaFastCheck(env)) {
+    schemaHealed.add(env.DB);
+    schemaStatus.set(env.DB, { state: "ok", at: nowUTC(), error: "" });
+    return;
+  }
   try {
     /* 顺序有讲究：建表 → 补列 → 建索引。索引可能引用新列，
        若先建索引，旧库缺列会导致索引创建失败并中断自愈，补列永远执行不到 */
@@ -4217,6 +4814,8 @@ async function ensureSchema(env, requestId = "-") {
     for (const sql of schemaStatements("index")) await env.DB.prepare(sql).run();
     schemaHealed.add(env.DB);
     schemaStatus.set(env.DB, { state: "ok", at: nowUTC(), error: "" });
+    /* 标记必须最后写：只有完整迁移全部成功才设置，中途失败绝不留下「已完成」证据 */
+    await markSchemaHealthy(env);
   } catch (e) {
     /* 失败同样记录：管理页统计弹窗可见「最近自愈失败 + 原因」，未标记完成 → 下次请求自动重试 */
     schemaStatus.set(env.DB, { state: "failed", at: nowUTC(), error: String((e && e.message) || e).slice(0, 200) });
@@ -4464,12 +5063,251 @@ async function handleRotateToken(request, env) {
 }
 
 /* ---------------- 服务端设置（settings 键值表） ----------------
- * 当前仅 session_ttl_minutes（会话时长，分钟）。GET 需登录；PUT 需登录 + application/json
- * CSRF 闸门（与令牌管理同型）+ allowWrite 限速。校验：整数且 5~43200（30 天），
- * 否则 INVALID_TTL → 400。缺表由 ensureSchema 首请求自愈；读侧另有缺表回退默认兜底。 */
+ * PERF25：通知渠道配置、通知开关/规则/重试、数据保留天数、号码归属地接入参数全部入库。
+ * 安全边界：ADMIN_PASSWORD / SESSION_SECRET / RECEIVE_TOKEN 等登录与鉴权凭据仍只走环境变量；
+ * schema_meta（结构指纹）与 settings_rev（并发修订号）为保留键，普通设置读写一律拒绝。
+ * 读取：GET 一次 `SELECT key, value WHERE key <> 'schema_meta'` 取回整组设置；
+ * 写入：单次原子批（删除 + 条件 UPSERT + 修订号自增），条件语句全部绑定同一修订号，
+ *       并发写入只有一个批次生效，另一个批次 0 命中 → 409，绝不出现半写状态；
+ *       写入成功后重新从数据库读回逐项比对，比对不符即返回失败（不假报成功）。
+ * 敏感字段：API 只返回「是否已配置 + 末 4 位」；保存时空值表示不修改，显式清除必须走 clear 列表。 */
+const SETTINGS_ENV_KEYS = ["session_ttl_minutes", "retention_days", "phone_area_enabled", "phone_area_api"];
+
+function maskSettingValue(v) {
+  const s = String(v === undefined || v === null ? "" : v);
+  if (!s) return "";
+  return s.length > 4 ? "••••" + s.slice(-4) : "••••";
+}
+
+function isAllowedSettingKey(k) {
+  if (SETTINGS_ENV_KEYS.indexOf(k) !== -1) return true;
+  if (k === "notify.enabled" || k === "notify.types" || k === "notify.retry" || k === "notify.link") return true;
+  if (!isNotifyKey(k)) return false;
+  const parts = String(k).split(".");
+  if (parts.length !== 3) return false;
+  const spec = NOTIFY_CHANNELS[parts[1]];
+  if (!spec) return false;
+  return parts[2] === "enabled" || Object.prototype.hasOwnProperty.call(spec.fields, parts[2]);
+}
+
+function isSensitiveSettingKey(k) {
+  if (!isNotifyKey(k)) return false;
+  const parts = String(k).split(".");
+  if (parts.length !== 3 || parts[2] === "enabled") return false;
+  const spec = NOTIFY_CHANNELS[parts[1]];
+  const field = spec && spec.fields[parts[2]];
+  return !!(field && field.sensitive);
+}
+
+/* 单项值校验/规范化：返回 { ok, value } 或 { ok:false } */
+function normalizeSettingValue(k, raw) {
+  if (SETTINGS_ENV_KEYS.indexOf(k) !== -1) {
+    const v = coerceScalar(k, raw);
+    return v === null ? { ok: false } : { ok: true, value: v };
+  }
+  if (k === "notify.enabled" || k === "notify.types" || k === "notify.retry" || k === "notify.link") {
+    if (k === "notify.enabled") {
+      const v = coerceScalar("phone_area_enabled", raw);
+      return v === null ? { ok: false } : { ok: true, value: v };
+    }
+    if (k === "notify.types") {
+      const arr = Array.isArray(raw) ? raw : String(raw === undefined || raw === null ? "" : raw).split(",");
+      const list = arr.map(function (s) { return String(s).trim(); })
+        .filter(function (t) { return NOTIFY_TYPES.indexOf(t) !== -1; });
+      if (!list.length) return { ok: false };
+      /* 去重且保持固定顺序，便于前后端一致比对 */
+      const uniq = NOTIFY_TYPES.filter(function (t) { return list.indexOf(t) !== -1; });
+      return { ok: true, value: uniq.join(",") };
+    }
+    if (k === "notify.retry") {
+      const s = String(raw === undefined || raw === null ? "" : raw).trim();
+      if (!/^\d+$/.test(s)) return { ok: false };
+      const n = parseInt(s, 10);
+      if (n < 0 || n > NOTIFY_RETRY_MAX) return { ok: false };
+      return { ok: true, value: String(n) };
+    }
+    /* notify.link：空串=清除；否则必须 http(s) */
+    const s = String(raw === undefined || raw === null ? "" : raw).trim();
+    if (!s) return { ok: true, value: "" };
+    if (s.length > 500 || !/^https?:\/\//i.test(s)) return { ok: false };
+    return { ok: true, value: s };
+  }
+  const parts = String(k).split(".");
+  const spec = NOTIFY_CHANNELS[parts[1]];
+  const field = parts[2];
+  if (field === "enabled") {
+    const v = coerceScalar("phone_area_enabled", raw);
+    return v === null ? { ok: false } : { ok: true, value: v };
+  }
+  const meta = spec && spec.fields[field];
+  if (!meta) return { ok: false };
+  let s = String(raw === undefined || raw === null ? "" : raw).trim();
+  if (s === "") return { ok: true, value: "" };
+  if (s.length > 4000) return { ok: false };
+  if (field === "urls") {
+    const list = s.split(",").map(function (x) { return x.trim(); }).filter(Boolean);
+    if (!list.length || list.some(function (u) { return !/^https?:\/\//i.test(u); })) return { ok: false };
+    return { ok: true, value: list.join(",") };
+  }
+  if (field === "headers") {
+    try {
+      const obj = JSON.parse(s);
+      if (!obj || typeof obj !== "object" || Array.isArray(obj)) return { ok: false };
+    } catch (e) { return { ok: false }; }
+    return { ok: true, value: s };
+  }
+  if ((field === "webhook" || field === "url") && s.length > 1000) return { ok: false };
+  if ((field === "webhook" || field === "url") && !/^https?:\/\//i.test(s)) return { ok: false };
+  return { ok: true, value: s };
+}
+
+/* 整组读取（排除保留键 schema_meta；库异常 → null 表示回退环境变量） */
+async function loadAllSettings(env) {
+  try {
+    const res = await env.DB.prepare("SELECT key, value FROM settings WHERE key <> 'schema_meta'").all();
+    const out = {};
+    for (const r of (res && res.results) || []) {
+      if (!r || r.key === undefined || r.key === null) continue;
+      const k = String(r.key);
+      if (k === "schema_meta") continue; /* 双保险：保留键永不返回 */
+      out[k] = String(r.value === undefined || r.value === null ? "" : r.value);
+    }
+    return out;
+  } catch (e) { return null; }
+}
+
+function scalarFromRows(env, name, all) {
+  const spec = SCALAR_SETTINGS[name];
+  let raw;
+  if (all && all[name] !== undefined) raw = all[name];
+  else raw = spec.env ? (env && env[spec.env]) : "";
+  const v = coerceScalar(name, raw);
+  return v === null ? spec.def : v;
+}
+
+function notifyConfigView(cfg) {
+  const channels = {};
+  for (const name of Object.keys(NOTIFY_CHANNELS)) {
+    const spec = NOTIFY_CHANNELS[name];
+    const ch = cfg.channels[name];
+    const fields = {};
+    for (const f of Object.keys(spec.fields)) {
+      const v = String(ch.fields[f] === undefined || ch.fields[f] === null ? "" : ch.fields[f]);
+      if (spec.fields[f].sensitive) {
+        fields[f] = { sensitive: true, configured: !!v, masked: maskSettingValue(v) };
+      } else {
+        fields[f] = { sensitive: false, value: v };
+      }
+    }
+    channels[name] = {
+      label: spec.label, enabled: ch.enabled, configured: ch.configured,
+      source: ch.fromDb ? "db" : "env", fields: fields,
+    };
+  }
+  return { enabled: cfg.enabled, types: cfg.types.slice(), retry: cfg.retry, link: cfg.link, channels: channels };
+}
+
+function notifySchemaView() {
+  const channels = Object.keys(NOTIFY_CHANNELS).map(function (name) {
+    const spec = NOTIFY_CHANNELS[name];
+    return {
+      key: name, label: spec.label,
+      fields: Object.keys(spec.fields).map(function (f) {
+        return { key: f, sensitive: !!spec.fields[f].sensitive };
+      }),
+    };
+  });
+  return { types: NOTIFY_TYPES.slice(), retry_max: NOTIFY_RETRY_MAX, channels: channels };
+}
+
+async function getSettingsRevision(env) {
+  const map = await readSettingsKeys(env, ["settings_rev"]);
+  const n = parseInt(map.settings_rev, 10);
+  return Number.isInteger(n) && n >= 0 ? n : 0;
+}
+
+/* 原子写入 + 修订号保护 + 写后回读验证 */
+async function saveSettingsEntries(env, writes, deletes, clientRev) {
+  const keys = Object.keys(writes || {});
+  const dels = Array.isArray(deletes) ? deletes.filter(function (k, i, a) { return a.indexOf(k) === i; }) : [];
+  const currentRev = await getSettingsRevision(env);
+  if (keys.length === 0 && dels.length === 0) return { ok: true, revision: currentRev, saved: 0 };
+  if (clientRev !== undefined && clientRev !== null && clientRev !== "") {
+    const r = parseInt(clientRev, 10);
+    if (!Number.isInteger(r) || r !== currentRev) {
+      return { ok: false, error: "REVISION_CONFLICT", status: 409, revision: currentRev };
+    }
+  }
+  const expected = String(currentRev);
+  const nextRev = currentRev + 1;
+  const stmts = [{ sql: "INSERT OR IGNORE INTO settings (key, value) VALUES ('settings_rev', ?1)", args: [expected] }];
+  for (const k of dels) {
+    if (isReservedSettingsKey(k)) continue;
+    stmts.push({
+      sql: "DELETE FROM settings WHERE key = ?1 AND key <> 'schema_meta' AND key <> 'settings_rev'"
+        + " AND (SELECT value FROM settings WHERE key = 'settings_rev') = ?2",
+      args: [k, expected],
+    });
+  }
+  for (const k of keys) {
+    if (isReservedSettingsKey(k)) continue;
+    stmts.push({
+      sql: "INSERT INTO settings (key, value) SELECT ?1, ?2 WHERE"
+        + " (SELECT value FROM settings WHERE key = 'settings_rev') = ?3"
+        + " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      args: [k, String(writes[k]), expected],
+    });
+  }
+  stmts.push({
+    sql: "UPDATE settings SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)"
+      + " WHERE key = 'settings_rev' AND value = ?1",
+    args: [expected],
+  });
+  let out;
+  try { out = await atomicBatch(env.DB, stmts); }
+  catch (e) {
+    return { ok: false, error: "SETTINGS_SAVE_FAILED", status: 500, unknown: !!(e && e.code === "UNKNOWN") };
+  }
+  const revResult = out && out.results && out.results[out.results.length - 1];
+  if (!revResult || Number(revResult.changes) !== 1) {
+    /* 并发写入抢先：本批次所有条件语句 0 命中、修订号未推进 → 整批等价未生效 */
+    return { ok: false, error: "REVISION_CONFLICT", status: 409, revision: await getSettingsRevision(env) };
+  }
+  /* 写后回读：逐项比对，防止适配层「返回成功但实际未落库」 */
+  const verifyKeys = ["settings_rev"].concat(keys, dels);
+  const verify = await readSettingsKeys(env, verifyKeys);
+  for (const k of keys) {
+    if (String(verify[k] === undefined ? "" : verify[k]) !== String(writes[k])) {
+      return { ok: false, error: "SETTINGS_VERIFY_FAILED", status: 500, revision: nextRev };
+    }
+  }
+  for (const k of dels) if (verify[k] !== undefined) {
+    return { ok: false, error: "SETTINGS_VERIFY_FAILED", status: 500, revision: nextRev };
+  }
+  if (parseInt(verify.settings_rev, 10) !== nextRev) {
+    return { ok: false, error: "SETTINGS_VERIFY_FAILED", status: 500, revision: nextRev };
+  }
+  return { ok: true, revision: nextRev, saved: keys.length + dels.length };
+}
+
 async function handleGetSettings(env) {
-  const m = await getSessionTtlMinutes(env);
-  return json({ success: true, session_ttl_minutes: m });
+  const all = await loadAllSettings(env);
+  if (!all) return json({ success: false, error: "SETTINGS_READ_FAILED" }, 500);
+  const notifyRows = {};
+  for (const k of Object.keys(all)) if (isNotifyKey(k)) notifyRows[k] = all[k];
+  const cfg = resolveNotifyConfig(env, notifyRows);
+  const revision = parseInt(all.settings_rev, 10) || 0;
+  const ttl = parseInt(scalarFromRows(env, "session_ttl_minutes", all), 10);
+  return json({
+    success: true,
+    revision: revision,
+    session_ttl_minutes: ttl,
+    retention_days: parseInt(scalarFromRows(env, "retention_days", all), 10),
+    phone_area_enabled: scalarFromRows(env, "phone_area_enabled", all) === "true",
+    phone_area_api: scalarFromRows(env, "phone_area_api", all),
+    notify: notifyConfigView(cfg),
+    notify_schema: notifySchemaView(),
+  });
 }
 
 async function handlePutSettings(request, env) {
@@ -4477,12 +5315,161 @@ async function handlePutSettings(request, env) {
   if (!allowWrite(request)) return json({ success: false, error: "too many requests" }, 429);
   const body = await readTokenApiBody(request);
   if (!body) return json({ success: false, error: "invalid json" }, 400);
-  const n = Number(body.session_ttl_minutes);
-  if (!Number.isInteger(n) || n < SESSION_TTL_MIN_MIN || n > SESSION_TTL_MAX_MIN) {
-    return json({ success: false, error: "INVALID_TTL" }, 400);
+
+  const writes = {};
+  const deletes = [];
+  const addValue = function (k, raw) {
+    if (isReservedSettingsKey(k) || !isAllowedSettingKey(k)) return false;
+    /* 敏感字段空值 = 不修改（显式清除必须走 clear） */
+    if (isSensitiveSettingKey(k) && String(raw === undefined || raw === null ? "" : raw).trim() === "") return true;
+    const r = normalizeSettingValue(k, raw);
+    if (!r.ok) return false;
+    writes[k] = r.value;
+    return true;
+  };
+
+  /* 兼容旧接口：顶层直接携带 session_ttl_minutes */
+  if (body.session_ttl_minutes !== undefined) {
+    if (!addValue("session_ttl_minutes", body.session_ttl_minutes)) {
+      return json({ success: false, error: "INVALID_TTL" }, 400);
+    }
   }
-  await env.DB.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('session_ttl_minutes', ?)").bind(String(n)).run();
-  return json({ success: true, session_ttl_minutes: n });
+  for (const k of SETTINGS_ENV_KEYS) {
+    if (k === "session_ttl_minutes") continue;
+    if (body[k] !== undefined && !addValue(k, body[k])) {
+      return json({ success: false, error: "INVALID_SETTING", setting: k }, 400);
+    }
+  }
+  if (body.settings && typeof body.settings === "object" && !Array.isArray(body.settings)) {
+    for (const k of Object.keys(body.settings)) {
+      if (isReservedSettingsKey(k)) return json({ success: false, error: "RESERVED_KEY", setting: k }, 400);
+      if (!addValue(k, body.settings[k])) {
+        return json({ success: false, error: "INVALID_SETTING", setting: k }, 400);
+      }
+    }
+  }
+  if (body.notify && typeof body.notify === "object" && !Array.isArray(body.notify)) {
+    const n = body.notify;
+    if (n.enabled !== undefined && !addValue("notify.enabled", n.enabled)) {
+      return json({ success: false, error: "INVALID_SETTING", setting: "notify.enabled" }, 400);
+    }
+    if (n.types !== undefined && !addValue("notify.types", n.types)) {
+      return json({ success: false, error: "INVALID_SETTING", setting: "notify.types" }, 400);
+    }
+    if (n.retry !== undefined && !addValue("notify.retry", n.retry)) {
+      return json({ success: false, error: "INVALID_SETTING", setting: "notify.retry" }, 400);
+    }
+    if (n.link !== undefined && !addValue("notify.link", n.link)) {
+      return json({ success: false, error: "INVALID_SETTING", setting: "notify.link" }, 400);
+    }
+    if (n.channels && typeof n.channels === "object" && !Array.isArray(n.channels)) {
+      for (const ch of Object.keys(n.channels)) {
+        if (!NOTIFY_CHANNELS[ch]) return json({ success: false, error: "INVALID_SETTING", setting: "notify." + ch }, 400);
+        const c = n.channels[ch];
+        if (!c || typeof c !== "object" || Array.isArray(c)) {
+          return json({ success: false, error: "INVALID_SETTING", setting: "notify." + ch }, 400);
+        }
+        if (c.enabled !== undefined) {
+          const k = notifyFieldKey(ch, "enabled");
+          if (!addValue(k, c.enabled)) return json({ success: false, error: "INVALID_SETTING", setting: k }, 400);
+        }
+        for (const f of Object.keys(c)) {
+          if (f === "enabled") continue;
+          const k = notifyFieldKey(ch, f);
+          if (!addValue(k, c[f])) return json({ success: false, error: "INVALID_SETTING", setting: k }, 400);
+        }
+      }
+    }
+  }
+  if (Array.isArray(body.clear)) {
+    for (const raw of body.clear) {
+      const k = String(raw);
+      if (isReservedSettingsKey(k)) {
+        return json({ success: false, error: "RESERVED_KEY", setting: k }, 400);
+      }
+      if (!isAllowedSettingKey(k)) {
+        return json({ success: false, error: "INVALID_SETTING", setting: k }, 400);
+      }
+      delete writes[k];
+      const parts = k.split(".");
+      if (isNotifyKey(k) && parts.length === 3 && parts[2] !== "enabled") {
+        /* 渠道字段明确清除 → 写入空串（空串会遮蔽环境变量兜底，避免「删了又回退」）；
+           渠道开关/全局规则清除 → 删除键，回退默认值 */
+        writes[k] = "";
+      } else {
+        deletes.push(k);
+      }
+    }
+  }
+  if (Object.keys(writes).length === 0 && deletes.length === 0) {
+    /* 空操作：仍回读当前修订号，语义与保存成功一致 */
+    const rev = await getSettingsRevision(env);
+    return json({ success: true, revision: rev, saved: 0 });
+  }
+  const saved = await saveSettingsEntries(env, writes, deletes, body.revision);
+  if (!saved.ok) {
+    return json({ success: false, error: saved.error, revision: saved.revision }, saved.status || 500);
+  }
+  const payload = { success: true, revision: saved.revision, saved: saved.saved };
+  if (writes.session_ttl_minutes !== undefined) payload.session_ttl_minutes = Number(writes.session_ttl_minutes);
+  return json(payload);
+}
+
+/* 发送一条测试通知：只测指定渠道，绕过总开关/类型规则/渠道开关，便于启用前验证配置 */
+async function handleTestNotify(request, env) {
+  if (!tokenApiJsonOnly(request)) return json({ success: false, error: "invalid content type" }, 400);
+  if (!allowWrite(request)) return json({ success: false, error: "too many requests" }, 429);
+  const body = await readTokenApiBody(request);
+  if (!body) return json({ success: false, error: "invalid json" }, 400);
+  const channel = String(body.channel || "");
+  if (!NOTIFY_CHANNELS[channel]) return json({ success: false, error: "INVALID_CHANNEL" }, 400);
+  const cfg = await loadNotifyConfig(env);
+  if (!cfg.channels[channel] || !cfg.channels[channel].configured) {
+    return json({ success: false, error: "NOT_CONFIGURED" }, 400);
+  }
+  const results = await dispatchNotify(env, {
+    title: "SMSToWeb 测试通知",
+    content: "这是一条设置页触发的测试通知；收到即表示该渠道配置可用。",
+    time: new Date().toISOString().replace("T", " ").slice(0, 19) + " UTC",
+    source: "notify", sender: "SMSToWeb", device: "设置页",
+  }, { only: channel, collect: true, config: cfg });
+  const r = results && results[0];
+  if (!r) return json({ success: false, error: "NOT_CONFIGURED" }, 400);
+  if (!r.ok) return json({ success: false, error: "SEND_FAILED", message: r.error || "" }, 502);
+  return json({ success: true, channel: channel });
+}
+
+/* 把当前环境变量里的通知配置一次性写入数据库（迁移入口；已存在的键不覆盖） */
+async function handleImportNotifyEnv(request, env) {
+  if (!tokenApiJsonOnly(request)) return json({ success: false, error: "invalid content type" }, 400);
+  if (!allowWrite(request)) return json({ success: false, error: "too many requests" }, 429);
+  const body = await readTokenApiBody(request);
+  if (!body) return json({ success: false, error: "invalid json" }, 400);
+  const existing = await loadNotifyRows(env);
+  if (!existing) return json({ success: false, error: "SETTINGS_READ_FAILED" }, 500);
+  const writes = {};
+  for (const name of Object.keys(NOTIFY_CHANNELS)) {
+    const spec = NOTIFY_CHANNELS[name];
+    for (const f of Object.keys(spec.fields)) {
+      const k = notifyFieldKey(name, f);
+      if (existing[k] !== undefined) continue; /* 数据库已有该键：不覆盖 */
+      const v = trimEnv(env && env[spec.fields[f].env]);
+      if (!v) continue;
+      const r = normalizeSettingValue(k, v);
+      if (!r.ok) return json({ success: false, error: "INVALID_ENV_VALUE", setting: k }, 400);
+      writes[k] = r.value;
+    }
+  }
+  if (existing["notify.link"] === undefined && trimEnv(env && env.NOTIFY_LINK)) {
+    const r = normalizeSettingValue("notify.link", trimEnv(env && env.NOTIFY_LINK));
+    if (r.ok && r.value) writes["notify.link"] = r.value;
+  }
+  if (!Object.keys(writes).length) {
+    return json({ success: true, imported: 0, revision: await getSettingsRevision(env) });
+  }
+  const saved = await saveSettingsEntries(env, writes, [], undefined);
+  if (!saved.ok) return json({ success: false, error: saved.error }, saved.status || 500);
+  return json({ success: true, imported: Object.keys(writes).length, revision: saved.revision });
 }
 
 /* ---------------- 路由 ---------------- */
@@ -4544,6 +5531,13 @@ export default {
       }
       if (path === "/api/settings" && request.method === "PUT") {
         return await handlePutSettings(request, env);
+      }
+      /* 通知渠道测试与旧环境变量迁移：同样受登录 + JSON CSRF 闸门 + 写限速保护 */
+      if (path === "/api/settings/notify/test" && request.method === "POST") {
+        return await handleTestNotify(request, env);
+      }
+      if (path === "/api/settings/notify/import-env" && request.method === "POST") {
+        return await handleImportNotifyEnv(request, env);
       }
       /* 定时清理 HTTP 触发（与移植平台入口级 /api/cron 行为一致）：
          Cloudflare 平台 cron 之外，也允许外部调度器调 GET /api/cron?token=<RECEIVE_TOKEN> 触发 */

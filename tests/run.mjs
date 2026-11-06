@@ -10,6 +10,7 @@
  */
 import { fetchApp, runCron, handleCronRequest, createToken, listTokens, findTokenByHash, revokeToken, rotateToken, touchLastUsed, atomicBatch, AtomicBatchError } from "../platforms/node/app.js";
 import { LocalDatabase, TursoDatabase, AtomicBatchError as DbAtomicBatchError } from "../platforms/node/db.js";
+import { TursoDatabase as SharedTursoDatabase, AtomicBatchError as SharedAtomicBatchError } from "../platforms/shared/db.js";
 import { rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -769,13 +770,13 @@ async function main() {
     rl = await call("POST", "/api/tokens", eL, { headers: XLG, body: { name: "up-exp", note: "旧库带备注", expires_in_days: 30 }, cookie: "sms_auth=" + ((rl.setCookie.match(/sms_auth=([^;]*)/) || [])[1] || "") });
     check(rl.status === 200 && rl.data.success && typeof rl.data.expires_at === "string", "旧库补列后创建带备注+有效期令牌 → 200");
 
-    /* 7) 页脚版本号：管理页与登录页底部均展示 v1.0.2 */
+    /* 7) 页脚版本号：管理页与登录页底部均展示 v1.0.3 */
     const pg = await fetchApp(R("GET", "/", { cookie: ckE }), eE);
     const pgHtml = await pg.text();
-    check(pg.status === 200 && pgHtml.includes('<span class="ver">v1.0.2</span>'), "管理页页脚含版本号 v1.0.2");
+    check(pg.status === 200 && pgHtml.includes('<span class="ver">v1.0.3</span>'), "管理页页脚含版本号 v1.0.3");
     const lg = await fetchApp(R("GET", "/", {}), eE);
     const lgHtml = await lg.text();
-    check(lg.status === 200 && lgHtml.includes('<span class="ver">v1.0.2</span>'), "登录页页脚含版本号 v1.0.2");
+    check(lg.status === 200 && lgHtml.includes('<span class="ver">v1.0.3</span>'), "登录页页脚含版本号 v1.0.3");
     check(pgHtml.includes('id="msesttl"') && pgHtml.includes("会话时长"), "设置菜单含会话时长入口");
 
     rawE.close();
@@ -2073,6 +2074,122 @@ async function main() {
       check(DbAtomicBatchError.prototype instanceof Error && AtomicBatchError !== DbAtomicBatchError, "C17 适配层与 worker 侧错误类各自独立但同为 Error 子类（调用方只认 code/phase）");
     } catch (e) {
       check(false, "C 组异常：" + String((e && e.stack) || e));
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }
+
+  /* ===== 阶段 3D-2：shared/db.js（EdgeOne/vercel/netlify/deno db.js 的唯一源）失败分类语义修正 =====
+   * 3D-1 补审裁定的最小修正验证：
+   *   E1 R2 protocol（200 不可解析）由 FAILED 改为 UNKNOWN（零观测不冒充确定性）；
+   *   E2/E3 R2 HTTP 4xx/5xx 与 R2 SQL error+baton=null 保留 FAILED，但 detail/注释三态分离
+   *       （不再出现「服务端已回滚」这类未经直接观测的事实性表述）；
+   *   E4/E5/E6 ROLLBACK ok→FAILED、ROLLBACK 失败→UNKNOWN、COMMIT 网络异常→UNKNOWN 不变；
+   *   E7 retryable/effectUnproven 由 code 派生、互斥；E8 两种分类对外同为同一 500 结构。
+   * 注：本组直接测源文件 shared/db.js；node/db.js 为独立维护副本（不参与生成同步），其 C 组测试保持原样。 */
+  group("阶段 3D-2：shared/db.js Turso 失败分类（R2 protocol→UNKNOWN + FAILED 出口三态分离）");
+  {
+    const realFetch = globalThis.fetch;
+    const sdb = new SharedTursoDatabase("libsql://probe-db-org.turso.io", "tok");
+    const okItem = { type: "ok", response: { type: "execute", result: { cols: [], rows: [], affected_row_count: 1, last_insert_rowid: 0 } } };
+    function pipe(baton, items) {
+      return new Response(JSON.stringify({ baton: baton, base_url: null, results: items }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    function errItem(msg) { return { type: "error", error: msg }; }
+    let calls = [];
+    function plan(steps) {
+      calls = [];
+      let i = 0;
+      globalThis.fetch = async function (url, opts) {
+        calls.push({ url: String(url), body: JSON.parse(String(opts.body)) });
+        const step = steps[i++];
+        if (!step) throw new Error("意外多出的请求 #" + i);
+        return step({ url: String(url), body: calls[calls.length - 1].body });
+      };
+    }
+    const p = async function (f) { try { await f(); return null; } catch (e) { return e; } }
+    const two = [{ sql: "INSERT INTO t (v) VALUES (?)", args: ["x"] }, { sql: "INSERT INTO t (v) VALUES (?)", args: ["y"] }];
+    try {
+      /* E1 R2 protocol（200 但响应不可解析）→ UNKNOWN（3D-1 #6：FAILED → UNKNOWN） */
+      plan([function () { return pipe("A", [okItem]); }, function () { return new Response("not-json", { status: 200 }); }]);
+      let e = await p(function () { return sdb.batchAtomic(two); });
+      check(!!e && e.code === "UNKNOWN" && e.phase === "execute" && e.retryable === false && e.effectUnproven === true,
+        "E1 R2 响应不可解析：UNKNOWN/execute（零观测不冒充确定性；retryable=false / effectUnproven=true）");
+      check(calls.length === 2, "E1 仅 2 个请求（不发 ROLLBACK、不发 COMMIT、零重试）");
+
+      /* E2 R2 HTTP 4xx/5xx → FAILED 保留（结构性判断，不冒充回滚确认） */
+      plan([function () { return pipe("A", [okItem]); }, function () { return new Response("boom", { status: 500 }); }]);
+      e = await p(function () { return sdb.batchAtomic(two); });
+      check(!!e && e.code === "FAILED" && e.phase === "execute" && e.retryable === true && e.effectUnproven === false && /500/.test(e.detail),
+        "E2 R2 HTTP 500：FAILED/execute 保留（retryable=true / effectUnproven=false，detail 含 500）");
+      check(!/已回滚/.test(e.detail), "E2 detail 无「已回滚」类未经直接观测的事实性表述");
+
+      /* E3 R2 SQL error + baton=null → FAILED 保留（删除「服务端已回滚」表述） */
+      plan([function () { return pipe("A", [okItem]); }, function () { return pipe(null, [errItem("UNIQUE constraint failed: t.v")]); }]);
+      e = await p(function () { return sdb.batchAtomic(two); });
+      check(!!e && e.code === "FAILED" && e.phase === "execute" && e.retryable === true && /流已关闭/.test(e.detail),
+        "E3 R2 语句失败且 baton=null：FAILED/execute（流已关闭；COMMIT 未发出 ⇒ 未提交为结构性判断）");
+      check(!/服务端已回滚/.test(e.detail), "E3 detail 不含「服务端已回滚」（回滚未直接确认）");
+      check(calls.length === 2, "E3 不发 ROLLBACK（无可用 baton）");
+
+      /* E4 R2 SQL error + 同 baton → ROLLBACK 成功 → FAILED（唯一「确认回滚」出口） */
+      plan([
+        function () { return pipe("A", [okItem]); },
+        function () { return pipe("B", [okItem, errItem("UNIQUE constraint failed: t.v")]); },
+        function () { return pipe("C", [okItem]); },
+      ]);
+      e = await p(function () { return sdb.batchAtomic(two); });
+      check(!!e && e.code === "FAILED" && e.phase === "execute" && e.retryable === true && e.effectUnproven === false,
+        "E4 ROLLBACK 成功：FAILED/execute（已 ROLLBACK，确认未提交）");
+      check(calls.length === 3 && calls[2].body.requests[0].stmt.sql === "ROLLBACK" && calls[2].body.baton === "B",
+        "E4 第 3 个请求为 ROLLBACK，使用 R2 响应返回的 baton");
+
+      /* E5 R2 SQL error → ROLLBACK 失败（200 + SQL error）→ UNKNOWN */
+      plan([
+        function () { return pipe("A", [okItem]); },
+        function () { return pipe("B", [okItem, errItem("UNIQUE constraint failed: t.v")]); },
+        function () { return pipe("C", [errItem("cannot rollback - no transaction is active")]); },
+      ]);
+      e = await p(function () { return sdb.batchAtomic(two); });
+      check(!!e && e.code === "UNKNOWN" && e.phase === "rollback" && e.retryable === false && e.effectUnproven === true,
+        "E5 ROLLBACK 失败：UNKNOWN/rollback（状态不可证明，不复用 baton）");
+      check(calls.length === 3, "E5 仅 3 个请求（ROLLBACK 失败后不重试、不发 COMMIT）");
+
+      /* E6 COMMIT 网络异常 → UNKNOWN，零自动重试 */
+      plan([
+        function () { return pipe("A", [okItem]); },
+        function () { return pipe("B", [okItem, okItem]); },
+        function () { throw new Error("timeout at commit"); },
+      ]);
+      e = await p(function () { return sdb.batchAtomic(two); });
+      check(!!e && e.code === "UNKNOWN" && e.phase === "commit" && e.retryable === false && e.effectUnproven === true,
+        "E6 COMMIT 网络异常：UNKNOWN/commit（T2，无观测）");
+      check(calls.length === 3, "E6 仅 3 个请求（无第 4 个请求：零内部重试）");
+
+      /* E7 retryable/effectUnproven 与错误分类一致（由 code 派生、互斥） */
+      const eF = new SharedAtomicBatchError("FAILED", "execute", "t");
+      const eU = new SharedAtomicBatchError("UNKNOWN", "execute", "t");
+      check(eF.retryable === true && eF.effectUnproven === false && eU.retryable === false && eU.effectUnproven === true,
+        "E7 分类一致性：retryable ⇔ FAILED、effectUnproven ⇔ UNKNOWN（互斥，由 code 派生）");
+      check(AtomicBatchError.prototype.isPrototypeOf(SharedAtomicBatchError) === false && SharedAtomicBatchError.prototype instanceof Error,
+        "E7 shared 适配层错误类独立于 worker 侧类但同为 Error 子类（调用方只认 code/phase）");
+
+      /* E8 FAILED 与 UNKNOWN 两种分类经 handler 全局 catch 对外均为同一 500 结构 */
+      const mkFake = function (err) {
+        return {
+          prepare: db.prepare.bind(db),
+          batchAtomic: async function () { throw err; },
+        };
+      };
+      const eFail = env({ DB: mkFake(new SharedAtomicBatchError("FAILED", "execute", "injected failed")) });
+      const eUnk = env({ DB: mkFake(new SharedAtomicBatchError("UNKNOWN", "execute", "injected unknown")) });
+      const rF = await call("DELETE", "/api/devices/1", eFail);
+      const rU = await call("DELETE", "/api/devices/1", eUnk);
+      check(rF.status === 500 && rU.status === 500 && rF.data && rU.data, "E8 FAILED/UNKNOWN 两种分类对外均为 500（均走全局错误路径）");
+      check(JSON.stringify(rF.data) === JSON.stringify(rU.data) && rF.data.error === "internal error" && rF.data.success === false,
+        "E8 两种分类响应结构完全一致：{\"success\":false,\"error\":\"internal error\"}（不泄露 code/phase/detail）");
+    } catch (e) {
+      check(false, "3D-2 组异常：" + String((e && e.stack) || e));
     } finally {
       globalThis.fetch = realFetch;
     }

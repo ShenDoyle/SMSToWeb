@@ -272,7 +272,9 @@ def check_schema_refs() -> None:
     scan = re.sub(r"//[^\n]*", " ", scan)
     noise = {"SELECT", "SET", "OR", "AND", "NOT", "NULL", "INTO", "VALUES", "ADD", "COLUMN",
              "TABLE", "IF", "EXISTS", "DEFAULT", "IGNORE", "REPLACE", "DO", "ON", "CONFLICT",
-             "RETURNING", "WHERE", "KEY", "CASE", "WHEN", "THEN", "ELSE", "END"}
+             "RETURNING", "WHERE", "KEY", "CASE", "WHEN", "THEN", "ELSE", "END",
+             # SQLite 内置系统表：运行时恒存在，不属于应用 schema（结构探针会查询 sqlite_master）
+             "SQLITE_MASTER", "SQLITE_SCHEMA", "SQLITE_SEQUENCE"}
     problems = []
 
     table_ctx = re.finditer(

@@ -36,7 +36,7 @@ SMSToWeb 是**你自己部署**的短信/通知网关：你的设备把短信和
 
 - **发什么**：11 位手机号（且仅手机号）发给免费的号码归属地 API（360），用于在管理页显示「归属地」标签；座机、短号、海外号码不查询。
 - **缓存**：同一号码 24 小时内只查一次（后端缓存）。
-- **怎么关**：环境变量 `PHONE_AREA_ENABLED=false`。关掉后只是不显示归属地，其他功能不受影响。
+- **怎么关**：管理页「设置 → 业务设置」关闭开关（数据库优先），或保留旧环境变量 `PHONE_AREA_ENABLED=false`。关掉后只是不显示归属地，其他功能不受影响。
 
 ### 2. 通知转发渠道 —— 全部默认关闭，配置了才发
 
@@ -44,23 +44,30 @@ SMSToWeb 是**你自己部署**的短信/通知网关：你的设备把短信和
 
 | 渠道 | 数据发往 | 默认状态 |
 |---|---|---|
-| 飞书 | 你配置的自定义机器人 Webhook（飞书服务器） | 关闭，配置 `FEISHU_WEBHOOK` 才启用 |
-| 企业微信 | 你配置的群机器人 Webhook（腾讯服务器） | 关闭，配置 `WECOM_WEBHOOK` 才启用 |
-| 钉钉 | 你配置的群机器人 Webhook（阿里服务器） | 关闭，配置 `DINGTALK_WEBHOOK` 才启用 |
-| Telegram | Telegram Bot API（telegram.org） | 关闭，配置 `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` 才启用 |
-| Server酱 | sc3.ft07.com | 关闭，配置 `SERVERCHAN_SENDKEY` 才启用 |
-| PushPlus | pushplus.plus | 关闭，配置 `PUSHPLUS_TOKEN` 才启用 |
-| Bark | 你指定的 Bark 服务器（默认 api.day.app） | 关闭，配置 `BARK_DEVICE_KEY` 才启用 |
-| ntfy | 你指定的 ntfy 服务器（默认 ntfy.sh） | 关闭，配置 `NTFY_URL` 才启用 |
-| Gotify | 你自建的 Gotify 服务器 | 关闭，配置 `GOTIFY_URL` + `GOTIFY_TOKEN` 才启用 |
-| 邮件 | Resend 邮件服务（resend.com）→ 收件邮箱 | 关闭，配置 `RESEND_API_KEY` + `MAIL_TO` 才启用 |
-| 通用 Webhook | 你指定的任意 URL | 关闭，配置 `GENERIC_WEBHOOKS` 才启用 |
+| 飞书 | 你配置的自定义机器人 Webhook（飞书服务器） | 关闭；设置页填写 Webhook 并启用（旧变量 `FEISHU_WEBHOOK` 兼容） |
+| 企业微信 | 你配置的群机器人 Webhook（腾讯服务器） | 关闭；设置页填写 Webhook 并启用（旧变量 `WECOM_WEBHOOK` 兼容） |
+| 钉钉 | 你配置的群机器人 Webhook（阿里服务器） | 关闭；设置页填写 Webhook 并启用（旧变量 `DINGTALK_WEBHOOK` 兼容） |
+| Telegram | Telegram Bot API（telegram.org） | 关闭；设置页填写 Bot Token + Chat ID 并启用（旧变量兼容） |
+| Server酱 | sc3.ft07.com | 关闭；设置页填写 SendKey 并启用（旧变量 `SERVERCHAN_SENDKEY` 兼容） |
+| PushPlus | pushplus.plus | 关闭；设置页填写 Token 并启用（旧变量 `PUSHPLUS_TOKEN` 兼容） |
+| Bark | 你指定的 Bark 服务器（默认 api.day.app） | 关闭；设置页填写 Device Key 并启用（旧变量 `BARK_DEVICE_KEY` 兼容） |
+| ntfy | 你指定的 ntfy 服务器（默认 ntfy.sh） | 关闭；设置页填写地址并启用（旧变量 `NTFY_URL` 兼容） |
+| Gotify | 你自建的 Gotify 服务器 | 关闭；设置页填写地址 + Token 并启用（旧变量兼容） |
+| 邮件 | Resend 邮件服务（resend.com）→ 收件邮箱 | 关闭；设置页填写 API Key + 收件人并启用（旧变量兼容） |
+| 通用 Webhook | 你指定的任意 URL | 关闭；设置页填写地址并启用（旧变量 `GENERIC_WEBHOOKS` 兼容） |
 
-**一个都不配置 = 数据不出你的服务器。** 渠道变量存在你的部署平台配置里，不要提交到 Git。
+**一个都不配置 = 数据不出你的服务器。**
+
+关于凭据存放（v1.0.3 起如实说明）：
+
+- 在设置页保存的渠道凭据（Webhook、Token、密钥）会以**原文**存入**你自己的** `settings` 表，因为发送通知时必须使用原文；数据库的访问权就是凭据的访问权。
+- **v1.0.3 未实现静态加密（明文保存）为已知并接受的风险**：数据库备份、快照、导出文件或本地 SQLite 文件副本同样包含原文，接触这些副本等同于接触凭据。请限制数据库与备份的访问权限，不要把 SQLite 文件放进共享目录或仓库。
+- 管理接口与页面**只返回“已配置 + 末 4 位掩码”**，不会返回完整凭据；`/api/export` 只导出消息与设备，不导出设置；通知失败日志会把 URL 替换为 `[url]`，不会把完整 Webhook 打进日志。
+- 旧环境变量仍然可用，凭据留在部署平台配置里；不要提交到 Git。迁移到数据库后，可自行删除环境变量。
 
 ## 数据保留与删除
 
-- **自动清理**：环境变量 `RETENTION_DAYS`（默认 30 天）控制消息保留时长；超过期限的消息由**部署平台的定时任务**触发清理接口删除（Cloudflare/Vercel/Netlify 有平台 cron；Deno/EdgeOne/Node 自托管需要你按各平台指南配一个外部定时器访问 `/api/cron`）。
+- **自动清理**：保留时长默认 30 天，读取顺序为 数据库 `retention_days`（管理页「业务设置」，1~3650）→ 环境变量 `RETENTION_DAYS` → 默认 30；超过期限的消息由**部署平台的定时任务**触发清理接口删除（Cloudflare/Vercel/Netlify 有平台 cron；Deno/EdgeOne/Node 自托管需要你按各平台指南配一个外部定时器访问 `/api/cron`）。
 - **如实说明**：如果你部署的平台没有运行定时清理（比如没配外部 cron），超期消息会**一直保留在库里**，不会被删。
 - **软删除**：网页上的「删除」先把消息移入回收站（`deleted_at` 标记），可随时恢复；回收站清空或单条物理删除立即从数据库移除。
 - **想立即彻底删除**：清空回收站 + 删除不再需要的设备；或直接删除整个数据库（部署平台控制台操作）。
@@ -83,13 +90,13 @@ SMSToWeb 是**你自己部署**的短信/通知网关：你的设备把短信和
 
 | 你想 | 怎么做 |
 |---|---|
-| 不发号码归属地查询 | `PHONE_AREA_ENABLED=false` |
-| 数据不发给任何第三方 | 不配置任何转发渠道变量 |
-| 关掉某个转发渠道 | 删掉对应环境变量 |
+| 不发号码归属地查询 | 设置页关闭归属地查询（或 `PHONE_AREA_ENABLED=false`） |
+| 数据不发给任何第三方 | 不在设置页启用任何渠道，也不配置任何渠道环境变量 |
+| 关掉某个转发渠道 | 设置页关闭该渠道（或删除对应数据库键 / 环境变量） |
 | 只认自己创建的命名令牌 | 设 `DISABLE_RECEIVE_TOKEN="true"` |
 | 让令牌到期自动失效 | 创建时设有效期（7/30/90/365 天或自定义日期） |
 | 令牌疑似泄露 | 管理页立即「吊销」或「轮换」 |
-| 缩短数据保留期 | 调小 `RETENTION_DAYS`（并确保定时清理在运行） |
+| 缩短数据保留期 | 设置页调小保留天数（或 `RETENTION_DAYS`），并确保定时清理在运行 |
 | 禁止陌生人看短信 | 开 `ENABLE_AUTH` + `ADMIN_PASSWORD` + `SESSION_SECRET` |
 
 ## 本项目不做的事

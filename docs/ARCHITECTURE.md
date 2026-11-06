@@ -22,6 +22,8 @@ SMSToWeb 是一个「单核心 + 多平台入口」的短信/通知聚合系统�
 
 核心设计原则：**业务代码与平台入口分离**。核心逻辑不随部署平台修改，仅通过薄适配层对接各平台的运行时与数据库接口；六平台功能严格一致。
 
+配置分层：登录密码与会话签名密钥只走环境变量（安全边界）；通知渠道、业务参数与设置修订号存于 `settings` 表，管理页可改，旧环境变量作为兼容兜底。
+
 ## 2. 目录结构
 
 ```
@@ -32,7 +34,7 @@ platforms/
   cloudflare/                 # CF 主版本副本 + wrangler.toml（静态维护）
   vercel/  netlify/  deno/    # 各平台自包含目录：入口 + app.js + db.js + schema.sql + README
   edgeone/ node/              # EdgeOne 走 Turso；node/db.js 为 Turso + 本地 SQLite 双适配（独立维护）
-tests/run.mjs                 # 零依赖测试套件（node:sqlite，204 项）
+tests/run.mjs                 # 零依赖测试套件（node:sqlite，573 项）
 docs/                         # 文档（本目录）
 schema.sql                    # 数据库建表脚本（单一来源）
 ```
@@ -54,7 +56,7 @@ schema.sql                    # 数据库建表脚本（单一来源）
 以 `POST /api/receive` 为例：
 
 1. **入口层**：平台入口（如 `platforms/edgeone/functions/index.js`）接收请求，构造 `env = buildEnv(vars)`（透传白名单变量 + 数据库凭据分支），调用 `fetchApp(request, env[, ctx])`；
-2. **鉴权**：`/api/receive`、`/api/push`、`/api/login`、`/api/logout`、`/api/cron`、静态资源为公开路径；其余管理与页面接口受登录开关（`ENABLE_AUTH`）控制——登录后签发**无状态签名 Session**（`nonce.exp.HMAC-SHA256` 三段式，Cookie `sms_auth`，TTL 30 分钟），`SESSION_SECRET` 缺失时安全失败（登录 500、管理接口一律 401，不回退密码派生），配置缺失一律不放行；
+2. **鉴权**：`/api/receive`、`/api/push`、`/api/login`、`/api/logout`、`/api/cron`、静态资源为公开路径；其余管理与页面接口受登录开关（`ENABLE_AUTH`）控制——登录后签发**无状态签名 Session**（`nonce.exp.HMAC-SHA256` 三段式，Cookie `sms_auth`，TTL 默认 30 分钟，管理页「设置 → 会话时长」可调 5~43200 分钟），`SESSION_SECRET` 缺失时安全失败（登录 500、管理接口一律 401，不回退密码派生），配置缺失一律不放行；设置类接口（`/api/settings*`）全部在登录之后，并强制 JSON Content-Type 与写入限速；
 3. **入库**：校验 token（`safeEqual` 防时序攻击）→ 按 device+sim 定位/创建设备 → 写入 messages（数据库唯一索引兜底去重，重复推送返回 `duplicated:true` 且不转发）；
 4. **通知转发**：非重复消息经 `bgRun(ctx, dispatchNotify(env, msg))` 进入后台——Cloudflare 传真实 `ctx.waitUntil` 保证响应后继续发送；其他平台 ctx 缺省时退化为内联 `await`，避免边缘函数提前截断后台任务；
 5. **响应**：立即返回 JSON（`success/device_id/duplicated`），不等转发完成（CF 平台）。
@@ -63,10 +65,12 @@ schema.sql                    # 数据库建表脚本（单一来源）
 
 `dispatchNotify(env, msg)` 是全渠道唯一组装层：
 
+- `loadNotifyConfig(env)`：一次范围查询 `settings` 中全部 `notify.*` 键（1 条 SQL），得到全局开关、转发类型、重试次数、跳转链接与 11 个渠道的字段值；数据库键缺失时逐字段回退旧环境变量，空串表示“已明确清除”不再回退；
 - `extractCodeLite(content)`：服务端轻量验证码检测（级联顺序与前端 `extractCode` 一致，码在前先于关键词在前；检测前剥离手机号/日期/时间/金额/单号）；
-- `buildNotifyInfo(env, msg)`：验证码检测 + `NOTIFY_LINK` 读取全渠道只算一次，产出 `verify/sms/notify` 三态与统一标题；
+- `buildNotifyInfo(cfg, msg)`：验证码检测 + 跳转链接只算一次，产出 `verify/sms/notify` 三态与统一标题；
+- 全局规则先过滤：总开关关闭、消息类型不在 `notify.types`、渠道 `enabled=false` 的渠道直接跳过（测试通知可只测指定渠道并绕过规则）；
 - 各渠道 renderer 消费 `info` 渲染自家格式（飞书 Interactive 卡片 / 企微钉钉 markdown / Telegram HTML / Bark / ntfy / Gotify / Resend 邮件 / 通用 Webhook 模板等），长度上限、加签、转义均在 renderer 内处理；
-- `Promise.allSettled` 并发调度，单渠道失败仅记录日志，不影响其他渠道与主流程。
+- 发送失败按 `notify.retry`（0~3）重试；并发调度用 `Promise.all` + 逐 job 隔离，单渠道失败仅记录**脱敏后**的日志（URL 替换为 `[url]`），不影响其他渠道与主流程。
 
 ## 6. 前端（内嵌管理页）
 

@@ -43,7 +43,7 @@ curl -X POST "https://<your-site>/api/receive?token=<RECEIVE_TOKEN>" \
 | `source` | 否 | 来源分类（默认 `notify`；如 `alert`、`jd`，前端可按来源筛选） |
 | `time` | 否 | 客户端时间，缺省服务端当前时间 |
 
-收到消息后同样触发 11 渠道通知转发（三态渲染：无验证码的 push → 🔔 设备通知）。
+收到消息后同样触发 11 渠道通知转发（三态渲染：无验证码的 push → 🔔 设备通知）。是否转发、转发哪些类型、各渠道启停与失败重试，均受管理页「设置 → 通知设置」控制（数据库优先，旧环境变量兜底）。
 
 ## 2. 消息查询与管理（需登录态）
 
@@ -136,31 +136,122 @@ body: `{ "id" }`。吊销旧令牌并生成**同名**新令牌，返回新明文
 | 400 | `INVALID_EXPIRY` | 有效期非法（非正整数天数 / 格式错 / 不存在日期如 `2026-02-30`） |
 | 404 | `NOT_FOUND` | 吊销/轮换的 id 不存在 |
 | 400 | `INVALID_TTL` | 会话时长非法（非整数 / 不在 5~43200 分钟范围内） |
+| 400 | `INVALID_SETTING` | 未知设置键 / 值类型或范围非法（响应带 `setting`） |
+| 400 | `RESERVED_KEY` | 试图写入或清除保留键 `schema_meta` / `settings_rev` |
 | 401 | — | 未登录（会话缺失或过期） |
+| 409 | `REVISION_CONFLICT` | 携带的 `revision` 与当前修订号不符（并发保存），响应带最新 `revision` |
 | 429 | — | 触发写入限速 |
+| 500 | `SETTINGS_READ_FAILED` | 设置读取失败（明确报错，不返回默认值冒充成功） |
+| 500 | `SETTINGS_SAVE_FAILED` | 写入失败（整批回滚） |
+| 500 | `SETTINGS_VERIFY_FAILED` | 写入后回读校验不符 |
 
 ### GET `/api/settings` — 读取设置
 
-响应：`{ "success": true, "session_ttl_minutes": 30 }`。当前仅 `session_ttl_minutes`（登录会话时长，分钟，默认 30）。
+响应（敏感值只返回配置状态与脱敏结果，永不返回明文）：
+
+```json
+{
+  "success": true,
+  "revision": 3,
+  "session_ttl_minutes": 30,
+  "retention_days": 30,
+  "phone_area_enabled": true,
+  "phone_area_api": "",
+  "notify": {
+    "enabled": true,
+    "types": ["verify", "sms", "notify"],
+    "retry": 0,
+    "link": "",
+    "channels": {
+      "feishu": {
+        "label": "飞书", "enabled": true, "configured": true, "source": "db",
+        "fields": {
+          "webhook": { "sensitive": true, "configured": true, "masked": "••••f456" },
+          "secret": { "sensitive": true, "configured": true, "masked": "••••" }
+        }
+      }
+    }
+  },
+  "notify_schema": { "types": ["verify", "sms", "notify"], "retry_max": 3, "channels": [ { "key": "feishu", "label": "飞书", "fields": [ { "key": "webhook", "sensitive": true } ] } ] }
+}
+```
+
+- `revision`：设置修订号，用于并发保存校验。
+- `notify.channels.<渠道>.source`：`db` = 值来自数据库，`env` = 回退旧环境变量；`configured=false` 表示未配置。
+- 非敏感字段返回 `value`；敏感字段只返回 `configured` + `masked`（末 4 位，长度 ≤4 时仅 `••••`）。
+- `notify_schema` 供设置页动态渲染渠道与字段，不包含任何值。
+- `schema_meta`（结构指纹保留键）永不返回。
+- 数据库读取失败返回 500 `SETTINGS_READ_FAILED`。
 
 ### PUT `/api/settings` — 修改设置
 
-body: `{ "session_ttl_minutes": 480 }`。须为整数且在 5 ~ 43200（30 天）范围内，否则 400 `INVALID_TTL`；同样强制 `Content-Type: application/json` 并受写入限速。改动**仅影响之后新签发的会话**（无状态 Token，存量会话不变）；设置缺失或非法时登录回退默认 30 分钟。
+请求（所有字段可选，至少一个才会写库）：
+
+```json
+{
+  "revision": 3,
+  "session_ttl_minutes": 480,
+  "retention_days": 90,
+  "phone_area_enabled": false,
+  "phone_area_api": "https://area.example.com/api?n={number}",
+  "settings": { "notify.retry": 2 },
+  "notify": {
+    "enabled": true,
+    "types": ["sms"],
+    "retry": 2,
+    "link": "https://example.com/",
+    "channels": { "feishu": { "enabled": true, "webhook": "https://open.feishu.cn/...", "secret": "..." } }
+  },
+  "clear": ["notify.feishu.secret", "notify.link"]
+}
+```
+
+语义：
+
+- **敏感字段传空值 = 不修改**（避免误清空）；要清除必须放进 `clear`。
+- `clear` 中：**渠道字段**写空串（同时遮蔽同名旧环境变量）；**渠道开关 / 全局规则 / 普通标量**删除键（回退环境变量或默认值）。
+- `settings` 接受与 `notify` 等价的扁平键名（如 `notify.retry`），便于脚本调用。
+- `revision` 可选；携带时必须等于当前修订号，否则 409 `REVISION_CONFLICT`，整批不写。
+- 无实际改动时返回 200、当前 `revision`、`saved=0`。
+
+校验：`session_ttl_minutes` 5~43200 整数（越界保持旧错误码 `INVALID_TTL`）；`retention_days` 1~3650 整数；`phone_area_enabled` / `notify.enabled` / `notify.<渠道>.enabled` 布尔；`phone_area_api` / `notify.link` 为 http(s)、≤500 字符、可空；`notify.types` 必须是非空的 `verify/sms/notify` 子集；`notify.retry` 0~3 整数；Webhook/URL 字段 http(s) 且限长；`GENERIC_WEBHOOKS` 等价字段为逗号分隔 http(s)；请求头字段必须是 JSON 对象。
+
+响应：`{ "success": true, "revision": 4, "saved": 5, "session_ttl_minutes": 480 }`（`saved` 为写入/删除的键数）。改动**仅影响之后新签发的会话**（无状态 Token，存量会话不变）。
+
+### POST `/api/settings/notify/test` — 测试通知
+
+body: `{ "channel": "feishu" }`。只测试指定渠道，绕过总开关、类型规则与该渠道启停（便于启用前验证）。
+
+| 状态码 | 说明 |
+|---|---|
+| 200 | `{ "success": true, "channel": "feishu" }` |
+| 400 | `INVALID_CHANNEL`（渠道不存在，带 `channels` 列表）/ `NOT_CONFIGURED`（该渠道必填字段未配置） |
+| 502 | `SEND_FAILED`，`message` 为**脱敏后**的上游错误（URL 已替换为 `[url]`，且不含完整凭据） |
+
+### POST `/api/settings/notify/import-env` — 从环境变量迁移通知配置
+
+body: `{}`。只导入「数据库键不存在且环境变量非空」的字段，**不覆盖已有值**，逐项校验。
+
+- 200：`{ "success": true, "imported": 12, "revision": 5 }`
+- 400 `INVALID_ENV_VALUE`（带 `setting`，环境变量值非法，未写入任何键）
+- 409 `REVISION_CONFLICT` / 500 `SETTINGS_READ_FAILED` / `SETTINGS_SAVE_FAILED` / `SETTINGS_VERIFY_FAILED`
+
+迁移与回退：删除对应 `notify.*` 键即回退到旧环境变量；登录密码与会话签名密钥（`ADMIN_PASSWORD`、`SESSION_SECRET`）始终只走环境变量，不在此接口范围内。
 
 ## 5. 实时与辅助
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/wait?last_id=N` | 长轮询：有比 N 更新的消息立即返回 `{ changed: true }`，否则挂起（默认 25s，`WAIT_MAX_SECONDS` 可调） |
-| GET | `/api/phone?number=` | 号码归属地查询（`PHONE_AREA_ENABLED=false` 关闭；上游限速代理，独立 120 次/分桶） |
+| GET | `/api/phone?number=` | 号码归属地查询（管理页「业务设置」可开关与换接口，数据库值优先；旧环境变量 `PHONE_AREA_ENABLED=false` 仍兼容；上游限速代理，独立 120 次/分桶） |
 | POST | `/api/login` | 登录（body: `{ password }` → `Set-Cookie: sms_auth=<签名会话>`，无状态 HMAC-SHA256 三段式 Token、TTL 默认 30 分钟（管理页「设置 → 会话时长」可调）、HttpOnly + SameSite=Lax；失败 5 次锁 10 分钟；密码错 403，`SESSION_SECRET` 缺失 500 配置错误） |
 | POST | `/api/logout` | 登出 |
-| GET | `/api/cron?token=` | 触发定时清理（删除超 `RETENTION_DAYS` 的旧消息） |
+| GET | `/api/cron?token=` | 触发定时清理（删除超过保留天数的旧消息；保留天数在管理页「业务设置」配置，数据库值优先，旧环境变量 `RETENTION_DAYS` 兜底，默认 30） |
 | GET | `/` `/manifest.webmanifest` `/sw.js` | 管理页 / PWA 清单 / Service Worker |
 
 ## 6. 通用 Webhook 转发格式（出站）
 
-配置 `GENERIC_WEBHOOKS` 后，每条消息 POST 默认 JSON：
+在管理页「设置 → 通知设置 → 通用 Webhook」填写地址（或保留旧环境变量 `GENERIC_WEBHOOKS`，数据库键优先）后，每条消息 POST 默认 JSON：
 
 ```json
 {
