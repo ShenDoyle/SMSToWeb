@@ -1405,6 +1405,110 @@ async function main() {
   const aBefore = (await call("GET", "/api/messages?device_id=" + devA.id, e0)).data.total;
   const bBefore = (await call("GET", "/api/messages?device_id=" + devB.id, e0)).data.total;
   r = await call("POST", "/api/devices/merge", e0, { body: { from: devA.id, to: devB.id } });
+  /* ===== 组：列表星标集合投影重构（P1）——分页等价 / 指纹覆盖完整集合 / 空与大量星标 ===== */
+  group("列表投影重构：数字分页与游标分页等价 / 指纹覆盖完整集合 / 空与大量星标");
+  {
+    const projPath = join(tmpdir(), "smstoweb_projection_" + process.pid + ".db");
+    cleanupPath(projPath);
+    const rawProj = new DatabaseSync(projPath);
+    const eProj = { DB: makeD1(rawProj), RECEIVE_TOKEN: "tok", ENABLE_AUTH: "false", ADMIN_PASSWORD: "secret", SESSION_SECRET: "test-session-secret-0123456789abcdef", RETENTION_DAYS: "30" };
+    const N = 30;
+    /* 直接写库造数：本组只验证列表 SQL，避免消耗 /api/receive 的速率额度影响后续用例 */
+    await call("GET", "/api/messages?slim=1&limit=10", eProj); /* 触发 ensureSchema 建表 */
+    const devProj = rawProj.prepare("INSERT INTO devices(device, sim, alias, created_at) VALUES(?,?,?,?)").run("投影机", "", "", "2026-10-08 10:00:00");
+    const insProj = rawProj.prepare("INSERT INTO messages(device_id, sender, content, received_at, source, starred, read_at) VALUES(?,?,?,?,?,?,?)");
+    for (let i = 1; i <= N; i++) {
+      insProj.run(Number(devProj.lastInsertRowid), "10086", "投影用例第 " + i + " 条 验证码 " + (150000 + i), "2026-10-08 10:00:" + String(i).padStart(2, "0"), "sms", 0, null);
+    }
+    /* 星标切换直接写库（与 /api/messages/star 的持久化效果等价，且不占用接口速率额度） */
+    const starP = (id, on) => rawProj.prepare("UPDATE messages SET starred = ? WHERE id = ?").run(on ? 1 : 0, id);
+    const listP = (qs) => call("GET", "/api/messages?slim=1&limit=10" + (qs || ""), eProj);
+    const withCursorP = (c) => call("GET", "/api/messages?slim=1&limit=10&cursor=" + encodeURIComponent(c), eProj);
+
+    /* 10 条星标：id 3,6,…,30 */
+    for (let id = 3; id <= 30; id += 3) await starP(id, true);
+
+    /* 1) 数字分页与游标分页返回完全相同的 id 序列（排序、窗口、无遗漏/重复） */
+    const seqPage = [];
+    for (let p = 1; p <= 3; p++) {
+      const r = await listP("&page=" + p);
+      check(r.status === 200 && r.data.success, "数字分页 page=" + p + " 正常返回");
+      (r.data.list || []).forEach((m) => seqPage.push(m.id));
+    }
+    const seqCursor = [];
+    let cr = await listP("");
+    (cr.data.list || []).forEach((m) => seqCursor.push(m.id));
+    let cur = cr.data.next_cursor, guard = 0;
+    while (cur && guard++ < 10) {
+      const r = await withCursorP(cur);
+      if (!r.data.success) break;
+      (r.data.list || []).forEach((m) => seqCursor.push(m.id));
+      cur = r.data.next_cursor;
+    }
+    check(seqPage.length === N && seqCursor.length === N, "两路分页各取回 30 条（无遗漏）");
+    check(JSON.stringify(seqPage) === JSON.stringify(seqCursor), "数字分页与游标分页 id 顺序逐项一致（排序不变、无重复）");
+
+    /* 2) 非当前页的星标变化仍使旧游标失效 → 指纹来自完整集合，不是当页 */
+    const p2r = await listP("&page=2");
+    const p2cur = p2r.data.next_cursor;
+    check(!!p2cur, "page=2 存在续页游标");
+    await starP(3, false); /* 首屏顶部星标行，不在 page=2/3 窗口内 */
+    const stale = await withCursorP(p2cur);
+    check(stale.status === 409 && stale.data.error === "CURSOR_STALE", "非当前页星标变化 → 409（指纹覆盖完整集合）");
+    await starP(3, true);
+
+    /* 3) 净零切换（加星再取消）不误报失效 */
+    const p1r = await listP("&page=1");
+    await starP(2, true); await starP(2, false);
+    const netzero = await withCursorP(p1r.data.next_cursor);
+    check(netzero.status === 200 && netzero.data.success, "净零星标切换 → 续页正常，不误报失效");
+    check((netzero.data.list || []).every((m) => !(p1r.data.list || []).some((x) => x.id === m.id)), "净零切换续页与首屏无交集");
+
+    /* 4) 大量星标集合（全部 30 条星标）：深页与游标一致；非当页星标变化 → 409 */
+    for (let id = 1; id <= N; id++) await starP(id, true);
+    const allPage2 = await listP("&page=2");
+    const allCur2 = allPage2.data.next_cursor;
+    const allStaleBase = await listP("&page=1");
+    await starP(1, false); /* id=1 位于末页窗口，不在 page=1/2 */
+    const allStale = await withCursorP(allStaleBase.data.next_cursor);
+    check(allStale.status === 409 && allStale.data.error === "CURSOR_STALE", "大量星标集合：末页星标变化 → 409");
+    await starP(1, true);
+    /* 顺序复核：page=2 与 page=1 无交集，且从 page=2 游标续页与 page=2 无交集 */
+    const allPage1 = await listP("&page=1");
+    check((allPage2.data.list || []).every((m) => !(allPage1.data.list || []).some((x) => x.id === m.id)), "大量星标：page=2 与 page=1 无交集");
+    const afterAll = await withCursorP(allCur2);
+    check(afterAll.status === 200 && (afterAll.data.list || []).every((m) => !(allPage2.data.list || []).some((x) => x.id === m.id)), "大量星标：page=2 游标续页无重复");
+
+    rawProj.close();
+    cleanupPath(projPath);
+
+    /* 5) 空星标集合：分页与游标均正常，空集合指纹稳定（不误报失效） */
+    const emptyProjPath = join(tmpdir(), "smstoweb_projection_empty_" + process.pid + ".db");
+    cleanupPath(emptyProjPath);
+    const rawEmpty = new DatabaseSync(emptyProjPath);
+    const eEmpty = { ...eProj, DB: makeD1(rawEmpty) };
+    /* 直接写库造数（/api/receive 有速率限制，本组数据量小、无需走 HTTP 入口） */
+    await call("GET", "/api/messages?slim=1&limit=10", eEmpty); /* 触发 ensureSchema 建表 */
+    const devEmpty = rawEmpty.prepare("INSERT INTO devices(device, sim, alias, created_at) VALUES(?,?,?,?)").run("空集机", "", "", "2026-10-09 10:00:00");
+    const insEmpty = rawEmpty.prepare("INSERT INTO messages(device_id, sender, content, received_at, source, starred, read_at) VALUES(?,?,?,?,?,?,?)");
+    for (let i = 1; i <= 12; i++) {
+      insEmpty.run(Number(devEmpty.lastInsertRowid), "10086", "空集用例第 " + i + " 条", "2026-10-09 10:00:" + String(i).padStart(2, "0"), "sms", 0, null);
+    }
+    const e1 = await call("GET", "/api/messages?slim=1&limit=10", eEmpty);
+    const e2 = await call("GET", "/api/messages?slim=1&limit=10&page=2", eEmpty);
+    check(e1.status === 200 && e1.data.success && e1.data.list.length === 10 && e1.data.has_more === true, "空星标集合：首屏 10 条且仍有下一页");
+    check(e2.status === 200 && e2.data.success && e2.data.list.length === 2 && e2.data.has_more === false, "空星标集合：page=2 返回剩余 2 条");
+    check((e2.data.list || []).every((m) => !(e1.data.list || []).some((x) => x.id === m.id)), "空星标集合：两页无交集");
+    const ecur = e1.data.next_cursor;
+    const econt = await call("GET", "/api/messages?slim=1&limit=10&cursor=" + encodeURIComponent(ecur), eEmpty);
+    check(econt.status === 200 && econt.data.success && (econt.data.list || []).length === 2, "空星标集合：游标续页正常（指纹为空集合）");
+    check((econt.data.list || []).every((m) => !(e1.data.list || []).some((x) => x.id === m.id)), "空星标集合：续页无重复");
+    const ezero = await call("GET", "/api/messages?slim=1&limit=10&cursor=" + encodeURIComponent(e1.data.next_cursor), eEmpty);
+    check(ezero.status === 200 && ezero.data.success, "空星标集合：同一游标重放不误报 CURSOR_STALE");
+    rawEmpty.close();
+    cleanupPath(emptyProjPath);
+  }
+
   check(r.data && r.data.success === true && r.data.moved === aBefore, "合并设备成功，迁移条数一致");
   const bAfter = (await call("GET", "/api/messages?device_id=" + devB.id, e0)).data.total;
   check(bAfter === bBefore + aBefore, "合并后目标设备消息数 = 原B + 原A");

@@ -1316,25 +1316,35 @@ async function handleListMessages(url, env) {
   const total = totalRow ? totalRow.n : 0;
 
   /* 星标 ID 集合子查询：与分页数据在**同一条 SQL** 内读取 ⇒ 同一读快照，
-     避免「先取指纹、后取数据」之间发生星标修改导致页面与指纹不一致 */
+     避免「先取指纹、后取数据」之间发生星标修改导致页面与指纹不一致。
+     注意：星标集合（5% 星标时已达 20KB+ CSV）绝不能作为列参与全表排序——它会随每一行
+     复制进 ORDER BY 的临时 B-Tree（实测 10 万行、page=5000 时 12.8s）。因此先用内层子查询
+     完成「过滤 + 排序 + LIMIT/OFFSET」得到当页行，再由外层关联星标集合：CSV 只与当页
+     limit+1 行组合，且仍是同一条语句、同一读快照，指纹与分页数据的一致性不变。 */
   const whereAny = where.length ? "WHERE " + where.join(" AND ") : "WHERE 1=1";
   const whereAlias = whereAny.replace(/m\./g, "m2.");
   const starSub = `(SELECT group_concat(x.id, ',') FROM (SELECT m2.id FROM messages m2 ${whereAlias} AND m2.starred = 1 ORDER BY m2.id) x)`;
 
-  const cols = "m.id, m.sender, m.content, m.received_at, m.device_id, m.source, m.starred, m.read_at, "
+  const pageCols = "m.id, m.sender, m.content, m.received_at, m.device_id, m.source, m.starred, m.read_at, "
     + "length(m.content) AS content_len, "
     + "COALESCE(NULLIF(d.alias, ''), d.device) AS device_name, d.sim, d.device, "
     + starSub + " AS _starids";
   /* 多取 1 条用于判断是否还有下一页（不额外发 COUNT）
-     绑定顺序必须与 SQL 文本一致：先为 SELECT 列表中的星标集合子查询绑定基础筛选参数，
-     再为外层 WHERE 绑定分页参数，最后 LIMIT/OFFSET */
+     绑定顺序必须与 SQL 文本一致：内层 WHERE（基础筛选 + 游标）→ 内层 LIMIT/OFFSET
+     → 外层星标集合子查询的基础筛选参数。外层 ORDER BY 只对当页 limit+1 行生效，
+     保证输出顺序与原语句逐行一致，而排序缓冲不再复制星标 CSV。 */
   const list = await env.DB.prepare(
-    `SELECT ${cols}
-     FROM messages m JOIN devices d ON d.id = m.device_id
-     ${whereSql}
-     ORDER BY m.starred DESC, m.received_at DESC, m.id DESC
-     LIMIT ? OFFSET ?`
-  ).bind(...params, ...pageParams, limit + 1, cursor ? 0 : (page - 1) * limit).all();
+    `SELECT ${cols}, s.starids AS _starids
+     FROM (
+       SELECT ${pageCols}
+       FROM messages m JOIN devices d ON d.id = m.device_id
+       ${whereSql}
+       ORDER BY m.starred DESC, m.received_at DESC, m.id DESC
+       LIMIT ? OFFSET ?
+     ) p
+     CROSS JOIN (SELECT ${starSub} AS starids) s
+     ORDER BY p.starred DESC, p.received_at DESC, p.id DESC`
+  ).bind(...pageParams, limit + 1, cursor ? 0 : (page - 1) * limit, ...params).all();
 
   let rows = list.results || [];
   const hasMore = rows.length > limit;
