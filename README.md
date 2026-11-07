@@ -6,7 +6,7 @@
 
 Push SMS and notifications from an Android phone (and any other device) to the cloud in real time, and read them from a web page anywhere. Free to deploy, no server required, about 10 minutes end to end.
 
-**Current version: `v1.0.3`** — official releases carry a fixed version number (shown in the page footer); interim builds bump the patch version.
+**Current version: `v1.0.4`** — official releases carry a fixed version number (shown in the page footer); interim builds bump the patch version.
 
 - **Multi-platform deployment**: Cloudflare (primary) / Vercel / Deno Deploy / Netlify / Tencent EdgeOne Makers / Docker self-hosted — pick one of six, features fully identical
 - **Real-time receiving**: webhook push lands in the database in seconds; the web page refreshes itself, no manual work
@@ -111,7 +111,7 @@ Open the admin page → **Settings** (齿轮 / 设置). Everything below require
 
 | Group | What you can do | Stored in |
 |---|---|---|
-| 会话时长 (Session TTL) | 5–43200 minutes; applies to **newly issued** sessions only | `settings` table |
+| 会话时长 (Session TTL) | 5–43200 minutes; applies to **newly issued** sessions only. Per-browser since v1.0.4 (stored in browser localStorage, sent with each login); the `settings` value is the **global default / fallback** | Browser localStorage + `settings` table (fallback) |
 | 接入令牌 (Access tokens) | create / list / revoke / rotate named ingest tokens; plaintext shown once | `tokens` table |
 | 通知设置 (Notifications) | global on/off, which message types to forward (`verify` / `sms` / `notify`), retry count (0–3), admin link, per-channel enable/disable, credentials, **test send**, **import from environment variables** | `settings` table (`notify.*`) |
 | 业务设置 (System) | data retention days (1–3650), carrier-region lookup on/off and custom API URL | `settings` table |

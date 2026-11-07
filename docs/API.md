@@ -218,6 +218,8 @@ body: `{ "id" }`。吊销旧令牌并生成**同名**新令牌，返回新明文
 
 响应：`{ "success": true, "revision": 4, "saved": 5, "session_ttl_minutes": 480 }`（`saved` 为写入/删除的键数）。改动**仅影响之后新签发的会话**（无状态 Token，存量会话不变）。
 
+> **会话时长优先级（v1.0.4 起）**：`session_ttl_minutes` 在此处为**全局默认值**（兼容回退策略）；若登录请求体携带 `session_ttl_minutes`（浏览器独立配置，存于浏览器 localStorage），则以请求声明为准。管理页「会话时长（本浏览器）」面板读写浏览器本地配置，不再修改此全局值。
+
 ### POST `/api/settings/notify/test` — 测试通知
 
 body: `{ "channel": "feishu" }`。只测试指定渠道，绕过总开关、类型规则与该渠道启停（便于启用前验证）。
@@ -244,7 +246,7 @@ body: `{}`。只导入「数据库键不存在且环境变量非空」的字段�
 |---|---|---|
 | GET | `/api/wait?last_id=N` | 长轮询：有比 N 更新的消息立即返回 `{ changed: true }`，否则挂起（默认 25s，`WAIT_MAX_SECONDS` 可调） |
 | GET | `/api/phone?number=` | 号码归属地查询（管理页「业务设置」可开关与换接口，数据库值优先；旧环境变量 `PHONE_AREA_ENABLED=false` 仍兼容；上游限速代理，独立 120 次/分桶） |
-| POST | `/api/login` | 登录（body: `{ password }` → `Set-Cookie: sms_auth=<签名会话>`，无状态 HMAC-SHA256 三段式 Token、TTL 默认 30 分钟（管理页「设置 → 会话时长」可调）、HttpOnly + SameSite=Lax；失败 5 次锁 10 分钟；密码错 403，`SESSION_SECRET` 缺失 500 配置错误） |
+| POST | `/api/login` | 登录（body: `{ password, session_ttl_minutes? }` → `Set-Cookie: sms_auth=<签名会话>`，无状态 HMAC-SHA256 三段式 Token、HttpOnly + SameSite=Lax；会话时长优先级：请求声明（浏览器独立配置，管理页面板写入浏览器 localStorage）> settings 全局默认 > 内置 30 分钟；声明非法 400 `INVALID_TTL` 不签发会话，每 Token exp 签发时独立确定、不可延长；失败 5 次锁 10 分钟；密码错 403，`SESSION_SECRET` 缺失 500 配置错误） |
 | POST | `/api/logout` | 登出 |
 | GET | `/api/cron?token=` | 触发定时清理（删除超过保留天数的旧消息；保留天数在管理页「业务设置」配置，数据库值优先，旧环境变量 `RETENTION_DAYS` 兜底，默认 30） |
 | GET | `/` `/manifest.webmanifest` `/sw.js` | 管理页 / PWA 清单 / Service Worker |

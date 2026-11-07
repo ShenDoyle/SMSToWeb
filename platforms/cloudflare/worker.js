@@ -70,7 +70,7 @@ function jsStr(s) {
   return JSON.stringify(s).replace(/</g, "\\u003c");
 }
 /* 应用版本号：正式版发布固定版号，非正式版一般以小版本号递增升级；管理页/登录页底部页脚展示 */
-const APP_VERSION = "v1.0.3";
+const APP_VERSION = "v1.0.4";
 
 /* 把页面模板中的占位标记替换为实际配置值（用函数替换器，避免值里含 $& 等特殊序列被误解释） */
 function renderHtml(html, env) {
@@ -213,12 +213,14 @@ function authEnabled(env) {
    - SESSION_SECRET 未配置时安全失败：拒绝签发与验证（登录返回 500、鉴权一律 401），
      绝不静默回退到 ADMIN_PASSWORD 派生——防止"密码即密钥"的离线爆破面；
    - 退出为无状态语义：/api/logout 仅清除浏览器 Cookie；已复制的有效 Token 在 TTL 内
-     （默认 30 分钟，可在管理页「设置 → 会话时长」调整，最长 30 天）仍可重放；
+     （默认 30 分钟；浏览器可独立设置，全局设置为回退默认，最长 30 天）仍可重放；
      更换 SESSION_SECRET 或 ADMIN_PASSWORD 前者使旧签名立即失效 */
 const SESSION_TTL_MS = 30 * 60 * 1000;
 
-/* 会话时长（分钟）：默认 30，可在管理页「设置 → 会话时长」调整（存 settings 表，键 session_ttl_minutes）。
-   合法范围 5 ~ 43200（30 天）；缺表/缺行/库异常/非法值一律回退默认（登录低频，每次现查不加缓存）。 */
+/* 会话时长（分钟）：优先级为 登录请求声明（浏览器独立配置，存浏览器 localStorage）>
+   settings 表全局默认（键 session_ttl_minutes，作为回退/兼容策略）> 内置默认 30。
+   合法范围 5 ~ 43200（30 天）；全局缺表/缺行/库异常/非法值一律回退默认（登录低频，每次现查不加缓存）。
+   每 Token exp 按签发时确定独立生效：改一个浏览器的配置不影响其他浏览器，也不会延长已签发会话。 */
 const SESSION_TTL_DEFAULT_MIN = 30;
 const SESSION_TTL_MIN_MIN = 5;
 const SESSION_TTL_MAX_MIN = 43200;
@@ -368,8 +370,19 @@ async function handleLogin(request, env) {
     return json({ success: false, error: "wrong password" }, 403);
   }
   clearLoginFail(request);
-  /* 会话时长每次登录现查 settings 表（低频操作可容忍；无缓存保证改动即时生效） */
-  const ttlMin = await getSessionTtlMinutes(env);
+  /* 会话时长优先级：登录请求声明（浏览器独立配置）> settings 表全局默认 > 内置默认 30 分钟。
+     请求声明了非法值 → 400 INVALID_TTL 不签发会话（已签发会话不受影响）；未声明/为 null → 现查 settings 回退。
+     每 Token exp 独立确定、不可延长：修改某浏览器配置只影响该浏览器之后的登录。 */
+  let ttlMin;
+  if (body && body.session_ttl_minutes !== undefined && body.session_ttl_minutes !== null) {
+    const declared = body.session_ttl_minutes;
+    if (!Number.isInteger(declared) || declared < SESSION_TTL_MIN_MIN || declared > SESSION_TTL_MAX_MIN) {
+      return json({ success: false, error: "INVALID_TTL" }, 400);
+    }
+    ttlMin = declared;
+  } else {
+    ttlMin = await getSessionTtlMinutes(env);
+  }
   const ttlMs = ttlMin * 60 * 1000;
   const token = await createSession(env, ttlMs);
   if (!token) return json({ success: false, error: "session secret not configured" }, 500);
@@ -400,7 +413,7 @@ function allowWrite(request) {
 }
 
 async function handleLogout(request, env) {
-  /* 无状态退出：仅清除浏览器 Cookie；已签发 Token 在 TTL（默认 30 分钟，设置可调，最长 30 天）内仍可重放，
+  /* 无状态退出：仅清除浏览器 Cookie；已签发 Token 在 TTL（默认 30 分钟，浏览器独立设置/全局默认可调，最长 30 天）内仍可重放，
      更换 SESSION_SECRET / ADMIN_PASSWORD 可立即使旧 Token 验签失败 */
   return new Response(JSON.stringify({ success: true }), {
     headers: {
@@ -1572,7 +1585,7 @@ async function handleMergeDevices(request, env) {
 }
 
 /* ---------------- 业务配置（settings 表；环境变量仅作旧配置兜底） ----------------
-   session_ttl_minutes 沿用既有读取函数（登录低频、每次现查）；
+   session_ttl_minutes 为全局默认（浏览器可在登录请求中声明独立值，优先级更高），沿用既有读取函数（登录低频、每次现查）；
    retention_days / phone_area_enabled / phone_area_api 在此统一按「数据库优先 → 环境变量 → 默认值」
    解析，只在真正需要该配置的入口读取（定时清理、号码归属地），普通列表请求不触发任何设置查询。 */
 const SCALAR_SETTINGS = {
@@ -3840,39 +3853,54 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (state.sound) beep();
     toast(state.sound ? T("soundOnMsg") : T("soundOffMsg"));
   };
-  /* ---------- 会话时长面板：设置菜单入口，复用弹层；文案中文先行（i18n 后续补） ----------
-     GET /api/settings 回填当前值；PUT 保存。改动只影响之后新签发的会话（无状态 token，存量会话不变）。 */
+  /* ---------- 会话时长面板（本浏览器独立配置）：设置菜单入口，复用弹层 ----------
+     配置存浏览器 localStorage（键 sms_ttl_min），登录请求体随声明 session_ttl_minutes，
+     服务端校验 5~43200 后按其独立签发 exp（Cookie Max-Age 与 exp 同源）。不写服务端：
+     改一个浏览器不影响其他浏览器；「跟随全局默认」删除本地键，登录回退 settings 全局值（兼容旧客户端）。
+     每 Token exp 签发时确定、不可延长：修改配置只影响本浏览器之后的新登录。 */
   var TTL_PRESETS = [["30", "30 分钟"], ["60", "1 小时"], ["480", "8 小时"], ["1440", "24 小时"], ["10080", "7 天"], ["43200", "30 天"]];
+  var TTL_LOCAL_KEY = "sms_ttl_min";
   function ttlOutOfRangeMsg() { return "时长须为 5 ~ 43200 分钟（30 天）"; }
   function openSessTtl() {
     openModal(
-      '<h3>会话时长</h3>' +
-      '<div class="tokmeta">登录后保持有效的时长，范围 5 分钟 ~ 30 天。仅对之后的新登录生效（当前登录不受影响）。</div>' +
+      '<h3>会话时长（本浏览器）</h3>' +
+      '<div class="tokmeta">仅对当前浏览器生效：保存后，下次在本浏览器登录按此时长签发会话；其他浏览器不受影响，已登录的会话不变。选择「跟随全局默认」将清除本浏览器设置。</div>' +
       '<div class="toknewrow"><select id="sessttl" aria-label="预设时长">' +
         TTL_PRESETS.map(function (p) { return '<option value="' + p[0] + '">' + esc(p[1]) + '</option>'; }).join("") +
+        '<option value="global">跟随全局默认（清除本浏览器设置）</option>' +
         '<option value="custom">自定义分钟数…</option></select>' +
       '<input type="number" id="sessttlmin" min="5" max="43200" inputmode="numeric" hidden aria-label="自定义分钟数" placeholder="分钟数（5~43200）"></div>' +
       '<div class="btnrow"><button class="tbtn" id="sessttlsave">保存</button></div>'
     );
     var sel = $("sessttl"), inp = $("sessttlmin");
-    fetch("/api/settings").then(function (r) { if (r.status === 401) { location.reload(); return null; } return r.json(); })
-      .then(function (d) {
-        if (!d || !d.success) return;
-        var m = String(d.session_ttl_minutes || 30);
-        var hit = TTL_PRESETS.some(function (p) { return p[0] === m; });
-        if (hit) sel.value = m; else { sel.value = "custom"; inp.hidden = false; inp.value = m; }
-      }).catch(function () {});
+    var localVal = null;
+    try { localVal = parseInt(localStorage.getItem(TTL_LOCAL_KEY), 10); } catch (e) {}
+    if (Number.isInteger(localVal) && localVal >= 5 && localVal <= 43200) {
+      var m = String(localVal);
+      var hit = TTL_PRESETS.some(function (p) { return p[0] === m; });
+      if (hit) sel.value = m; else { sel.value = "custom"; inp.hidden = false; inp.value = m; }
+    } else {
+      sel.value = "global";
+      /* 未单独设置：回显全局默认值供参考（只读展示，不在本面板修改全局） */
+      fetch("/api/settings").then(function (r) { if (r.status === 401) { location.reload(); return null; } return r.json(); })
+        .then(function (d) {
+          if (d && d.success && sel.value === "global") {
+            var g = String(d.session_ttl_minutes || 30);
+            var opt = sel.querySelector('option[value="global"]');
+            if (opt) opt.textContent = "跟随全局默认（当前 " + g + " 分钟）";
+          }
+        }).catch(function () {});
+    }
     sel.onchange = function () { inp.hidden = sel.value !== "custom"; };
     $("sessttlsave").onclick = function () {
+      if (sel.value === "global") {
+        try { localStorage.removeItem(TTL_LOCAL_KEY); } catch (e) {}
+        closeModal(); toast(T("saved")); return;
+      }
       var v = sel.value === "custom" ? parseInt(inp.value, 10) : parseInt(sel.value, 10);
       if (!Number.isInteger(v) || v < 5 || v > 43200) { toast(ttlOutOfRangeMsg()); return; }
-      fetch("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session_ttl_minutes: v }) })
-        .then(function (r) { if (r.status === 401) { location.reload(); return null; } return r.json(); })
-        .then(function (d) {
-          if (d && d.success) { closeModal(); toast(T("saved")); }
-          else { toast(d && d.error === "INVALID_TTL" ? ttlOutOfRangeMsg() : "保存失败"); }
-        })
-        .catch(function () { toast("保存失败"); });
+      try { localStorage.setItem(TTL_LOCAL_KEY, String(v)); } catch (e) { toast("保存失败"); return; }
+      closeModal(); toast(T("saved") + "（下次登录生效）");
     };
   }
   /* ---------- 通知设置：渠道配置 / 总开关 / 类型规则 / 重试 / 跳转链接 / 测试 ----------
@@ -4419,13 +4447,21 @@ const LOGIN_HTML = String.raw`<!DOCTYPE html>
   function tryLogin() {
     if (busy) return;
     busy = true; go.disabled = true; err.textContent = "";
+    /* 浏览器独立会话时长：本地配置随登录请求声明；服务端校验 5~43200，非法则清除坏配置回退全局默认 */
+    var payload = { password: pw.value };
+    try {
+      var ttl = parseInt(localStorage.getItem("sms_ttl_min"), 10);
+      if (Number.isInteger(ttl) && ttl >= 5 && ttl <= 43200) payload.session_ttl_minutes = ttl;
+      else if (localStorage.getItem("sms_ttl_min") !== null) localStorage.removeItem("sms_ttl_min");
+    } catch (e) {}
     fetch("/api/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: pw.value })
+      body: JSON.stringify(payload)
     }).then(function (r) { return r.json(); }).then(function (d) {
       busy = false; go.disabled = false;
       if (d && d.success) { location.reload(); return; }
+      if (d && d.error === "INVALID_TTL") { try { localStorage.removeItem("sms_ttl_min"); } catch (e) {} }
       err.textContent = d && d.error === "wrong password" ? T("wrongPw")
         : d && d.error === "too many attempts" ? T("tooMany")
         : T("loginFail");

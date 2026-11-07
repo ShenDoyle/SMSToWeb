@@ -5,7 +5,8 @@
  *       登录鉴权、http cookie 降级、防锁死、写入限速、管理页开关 UI、
 *       令牌边界（并发重名/轮换审计/前缀不泄漏/节流端到端/开关边界值）、令牌管理与登录限速、
 *       令牌有效期与备注（过期 403/格式校验/轮换透传/旧库补列自愈）、页脚版本号、
-*       会话时长可配置（settings 表 / GET·PUT /api/settings / 默认回退 / 登录 Max-Age 同步）。
+*       会话时长可配置（settings 表 / GET·PUT /api/settings / 默认回退 / 登录 Max-Age 同步）、
+*       浏览器独立会话时长（登录声明 session_ttl_minutes 优先 / 缺省回退全局 / 边界与非法拒绝 / 浏览器隔离）。
  * 运行：node tests/run.mjs   （退出码 0=全过，1=有失败，2=异常）
  */
 import { fetchApp, runCron, handleCronRequest, createToken, listTokens, findTokenByHash, revokeToken, rotateToken, touchLastUsed, atomicBatch, AtomicBatchError } from "../platforms/node/app.js";
@@ -770,14 +771,16 @@ async function main() {
     rl = await call("POST", "/api/tokens", eL, { headers: XLG, body: { name: "up-exp", note: "旧库带备注", expires_in_days: 30 }, cookie: "sms_auth=" + ((rl.setCookie.match(/sms_auth=([^;]*)/) || [])[1] || "") });
     check(rl.status === 200 && rl.data.success && typeof rl.data.expires_at === "string", "旧库补列后创建带备注+有效期令牌 → 200");
 
-    /* 7) 页脚版本号：管理页与登录页底部均展示 v1.0.3 */
+    /* 7) 页脚版本号：管理页与登录页底部均展示 v1.0.4 */
     const pg = await fetchApp(R("GET", "/", { cookie: ckE }), eE);
     const pgHtml = await pg.text();
-    check(pg.status === 200 && pgHtml.includes('<span class="ver">v1.0.3</span>'), "管理页页脚含版本号 v1.0.3");
+    check(pg.status === 200 && pgHtml.includes('<span class="ver">v1.0.4</span>'), "管理页页脚含版本号 v1.0.4");
     const lg = await fetchApp(R("GET", "/", {}), eE);
     const lgHtml = await lg.text();
-    check(lg.status === 200 && lgHtml.includes('<span class="ver">v1.0.3</span>'), "登录页页脚含版本号 v1.0.3");
+    check(lg.status === 200 && lgHtml.includes('<span class="ver">v1.0.4</span>'), "登录页页脚含版本号 v1.0.4");
     check(pgHtml.includes('id="msesttl"') && pgHtml.includes("会话时长"), "设置菜单含会话时长入口");
+    check(pgHtml.includes("sms_ttl_min") && pgHtml.includes("会话时长（本浏览器）"), "管理页会话时长面板为本浏览器独立配置（localStorage 键 sms_ttl_min）");
+    check(lgHtml.includes("sms_ttl_min"), "登录页随请求声明本地会话时长（localStorage 键 sms_ttl_min）");
 
     rawE.close();
     cleanupPath(exPath);
@@ -864,6 +867,72 @@ async function main() {
     cleanupPath(stPath);
     try { rawSL.close(); } catch (_) {}
     cleanupPath(lgSPath);
+  }
+
+  /* ===== 组：浏览器独立会话时长（登录请求声明 session_ttl_minutes > settings 全局默认 > 内置默认） ===== */
+  group("浏览器独立会话时长（声明优先 / 边界与非法拒绝 / 缺省回退全局 / 独立性 / 存量会话不延长）");
+  {
+    const btPath = join(tmpdir(), "smstoweb_browserttl_" + process.pid + ".db");
+    cleanupPath(btPath);
+    const rawB = new DatabaseSync(btPath);
+    const eB = { DB: makeD1(rawB), RECEIVE_TOKEN: "tok", ENABLE_AUTH: "true", ADMIN_PASSWORD: "secret", SESSION_SECRET: "test-session-secret-0123456789abcdef", RETENTION_DAYS: "30" };
+    /* 不同 XFF 桶模拟不同浏览器（登录限速互不干扰，也验证"改一个浏览器不影响其他"） */
+    const XA = { "X-Forwarded-For": "203.0.113.90, 10.0.0.90" }; /* 浏览器 A：声明独立 TTL */
+    const XB = { "X-Forwarded-For": "203.0.113.91, 10.0.0.91" }; /* 浏览器 B：不声明（跟随全局） */
+    const HA = (extra) => Object.assign({}, XA, extra || {});
+    const HB = (extra) => Object.assign({}, XB, extra || {});
+
+    /* 0) 先设全局默认 480：作为「全局默认策略/兼容回退」的对照组 */
+    let rb = await call("POST", "/api/login", eB, { headers: HB(), body: { password: "secret" } });
+    check(rb.status === 200, "浏览器TTL组：B 浏览器先登录 → 200（全局未设置，内置默认 30）");
+    check((rb.setCookie.match(/Max-Age=(\d+)/) || [])[1] === "1800", "B 未声明且未设全局 → Max-Age=1800（内置默认 30 分钟）");
+    const ckB0 = "sms_auth=" + ((rb.setCookie.match(/sms_auth=([^;]*)/) || [])[1] || "");
+    rb = await call("PUT", "/api/settings", eB, { headers: HB(), cookie: ckB0, body: { session_ttl_minutes: 480 } });
+    check(rb.status === 200 && rb.data.session_ttl_minutes === 480, "全局默认设为 480（8 小时）");
+
+    /* 1) 声明优先：A 声明 30 → Max-Age=1800，而非全局 28800；exp 与 30 分钟一致 */
+    rb = await call("POST", "/api/login", eB, { headers: HA(), body: { password: "secret", session_ttl_minutes: 30 } });
+    check(rb.status === 200 && (rb.setCookie.match(/Max-Age=(\d+)/) || [])[1] === "1800", "A 声明 30 → Max-Age=1800（优先于全局 480）");
+    const tokA = rb.setCookie.split("sms_auth=")[1].split(";")[0];
+    check(Math.abs(Number(tokA.split(".")[1]) - Date.now() - 30 * 60000) < 5000, "A 声明 30 → token exp 与 30 分钟一致（±5s）");
+    const ckA = "sms_auth=" + tokA;
+
+    /* 2) 缺省回退：B 不声明 → 按全局 480 签发（浏览器隔离成立：A 的声明不影响 B） */
+    rb = await call("POST", "/api/login", eB, { headers: HB(), body: { password: "secret" } });
+    check((rb.setCookie.match(/Max-Age=(\d+)/) || [])[1] === "28800", "B 不声明 → 回退全局 480（Max-Age=28800），不受 A 影响");
+    const tokB = rb.setCookie.split("sms_auth=")[1].split(";")[0];
+    check(Math.abs(Number(tokB.split(".")[1]) - Date.now() - 480 * 60000) < 5000, "B token exp 与全局 480 分钟一致（±5s）");
+
+    /* 3) null 声明等同缺省 → 回退全局 */
+    rb = await call("POST", "/api/login", eB, { headers: HA(), body: { password: "secret", session_ttl_minutes: null } });
+    check(rb.status === 200 && (rb.setCookie.match(/Max-Age=(\d+)/) || [])[1] === "28800", "声明 null → 视同缺省回退全局 480");
+
+    /* 4) 边界放行：5 / 43200 */
+    rb = await call("POST", "/api/login", eB, { headers: HA(), body: { password: "secret", session_ttl_minutes: 5 } });
+    check(rb.status === 200 && (rb.setCookie.match(/Max-Age=(\d+)/) || [])[1] === "300", "A 声明 5（下限）→ 200 且 Max-Age=300");
+    rb = await call("POST", "/api/login", eB, { headers: HA(), body: { password: "secret", session_ttl_minutes: 43200 } });
+    check(rb.status === 200 && (rb.setCookie.match(/Max-Age=(\d+)/) || [])[1] === "2592000", "A 声明 43200（30 天上限）→ 200 且 Max-Age=2592000");
+
+    /* 5) 非法声明 → 400 INVALID_TTL，不签发会话；类型严格（字符串/小数/越界全拒） */
+    rb = await call("POST", "/api/login", eB, { headers: HA(), body: { password: "secret", session_ttl_minutes: 4 } });
+    check(rb.status === 400 && rb.data.error === "INVALID_TTL" && !rb.setCookie.includes("sms_auth="), "A 声明 4（低于下限）→ 400 INVALID_TTL 且无会话 Cookie");
+    rb = await call("POST", "/api/login", eB, { headers: HA(), body: { password: "secret", session_ttl_minutes: 43201 } });
+    check(rb.status === 400 && rb.data.error === "INVALID_TTL", "A 声明 43201（高于上限）→ 400 INVALID_TTL");
+    rb = await call("POST", "/api/login", eB, { headers: HA(), body: { password: "secret", session_ttl_minutes: "30" } });
+    check(rb.status === 400 && rb.data.error === "INVALID_TTL", "A 声明 \"30\"（字符串）→ 400 INVALID_TTL");
+    rb = await call("POST", "/api/login", eB, { headers: HA(), body: { password: "secret", session_ttl_minutes: 1.5 } });
+    check(rb.status === 400 && rb.data.error === "INVALID_TTL", "A 声明 1.5（非整数）→ 400 INVALID_TTL");
+
+    /* 6) 密码错误优先：非法 TTL + 错误密码 → 403 wrong password（不泄露 TTL 校验顺序） */
+    rb = await call("POST", "/api/login", eB, { headers: HA(), body: { password: "bad", session_ttl_minutes: 4 } });
+    check(rb.status === 403 && rb.data.error === "wrong password", "错误密码 + 非法声明 → 403 wrong password");
+
+    /* 7) 已签发会话不受非法声明影响（exp 签发时确定、不可延长/缩短） */
+    rb = await call("GET", "/api/settings", eB, { headers: HA(), cookie: ckA });
+    check(rb.status === 200 && rb.data.session_ttl_minutes === 480, "非法声明 400 后，A 此前签发的会话仍有效且全局默认仍为 480");
+
+    rawB.close();
+    cleanupPath(btPath);
   }
 
   /* ===== 基线组（第 0 步前既有）：收发核心 ===== */
