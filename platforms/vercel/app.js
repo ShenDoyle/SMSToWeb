@@ -1327,8 +1327,9 @@ async function handleListMessages(url, env) {
 
   const pageCols = "m.id, m.sender, m.content, m.received_at, m.device_id, m.source, m.starred, m.read_at, "
     + "length(m.content) AS content_len, "
-    + "COALESCE(NULLIF(d.alias, ''), d.device) AS device_name, d.sim, d.device, "
-    + starSub + " AS _starids";
+    + "COALESCE(NULLIF(d.alias, ''), d.device) AS device_name, d.sim, d.device";
+  const cols = "p.id, p.sender, p.content, p.received_at, p.device_id, p.source, p.starred, p.read_at, "
+    + "p.content_len, p.device_name, p.sim, p.device";
   /* 多取 1 条用于判断是否还有下一页（不额外发 COUNT）
      绑定顺序必须与 SQL 文本一致：内层 WHERE（基础筛选 + 游标）→ 内层 LIMIT/OFFSET
      → 外层星标集合子查询的基础筛选参数。外层 ORDER BY 只对当页 limit+1 行生效，
