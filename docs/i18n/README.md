@@ -2,9 +2,9 @@
 
 **English** is the primary maintained language of this repository's documentation. This directory holds the eight translated mirrors (`zh-CN`, `zh-TW`, `ja`, `ko`, `es`, `fr`, `de`, `pt-BR`).
 
-> **Sync status (v1.0.3)**: the English primary `README.md` and the Chinese primary docs (`docs/`) now cover the database-backed settings model: notification channels moved into the `settings` table (DB-first, legacy env vars as fallback), the new settings API (`GET/PUT /api/settings`, `POST /api/settings/notify/test`, `POST /api/settings/notify/import-env`), the settings page, the `settings` key space and reserved keys, and the new [Android SmsForwarder keep-alive guide](../安卓SF保活指南.md).
+> **Sync status (v1.0.4)**: the database-backed settings model and the per-browser session TTL are covered by the English primary `README.md` and the Chinese primary docs (`docs/`). Developer-facing documents added for v1.0.4 — [Design System](../DESIGN-SYSTEM.md) and [Settings Center](../SETTINGS.md) — are maintained in the primary languages only and are intentionally **not mirrored** (they describe internal implementation conventions, not end-user instructions).
 >
-> All eight translated mirrors are **pending sync (待同步)** for the v1.0.3 changes and still describe env-only notification configuration; refer to the English/Chinese primaries until they are updated. Version strings in translations are not release markers — the release version for this build is **v1.0.3**.
+> All eight translated mirrors are **pending sync (待同步)** for the v1.0.3/v1.0.4 changes and still describe env-only notification configuration; refer to the English/Chinese primaries until they are updated. Version strings in translations are not release markers — the release version for this build is **v1.0.4**.
 
 ## Language index
 

@@ -13,6 +13,7 @@ import { fetchApp, runCron, handleCronRequest, createToken, listTokens, findToke
 import { LocalDatabase, TursoDatabase, AtomicBatchError as DbAtomicBatchError } from "../platforms/node/db.js";
 import { TursoDatabase as SharedTursoDatabase, AtomicBatchError as SharedAtomicBatchError } from "../platforms/shared/db.js";
 import { rmSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync, StatementSync } from "node:sqlite";
@@ -778,9 +779,60 @@ async function main() {
     const lg = await fetchApp(R("GET", "/", {}), eE);
     const lgHtml = await lg.text();
     check(lg.status === 200 && lgHtml.includes('<span class="ver">v1.0.4</span>'), "登录页页脚含版本号 v1.0.4");
-    check(pgHtml.includes('id="msesttl"') && pgHtml.includes("会话时长"), "设置菜单含会话时长入口");
-    check(pgHtml.includes("sms_ttl_min") && pgHtml.includes("会话时长（本浏览器）"), "管理页会话时长面板为本浏览器独立配置（localStorage 键 sms_ttl_min）");
+    check(pgHtml.includes('id="msesttl"') && pgHtml.includes('id="msetcenter"') && pgHtml.includes("登录有效期"), "设置菜单含设置中心与登录有效期入口");
+    check(pgHtml.includes("sms_ttl_min") && pgHtml.includes("登录有效期（本浏览器）"), "设置中心登录有效期分组为本浏览器独立配置（localStorage 键 sms_ttl_min）");
+    check(pgHtml.includes("登录有效期（全局默认）") && pgHtml.includes("ds-scope--global") && pgHtml.includes("ds-scope--browser"), "设置中心区分全局与本浏览器作用域（作用域徽章）");
     check(lgHtml.includes("sms_ttl_min"), "登录页随请求声明本地会话时长（localStorage 键 sms_ttl_min）");
+    /* ---- Design System：令牌单一来源、两页共用、组件层可用、模板占位已解析 ---- */
+    check(pgHtml.includes("--ds-color-primary: #15803d") && pgHtml.includes("--ds-color-bg-page")
+      && pgHtml.includes("--ds-color-danger") && pgHtml.includes("--ds-color-warning"),
+      "管理页含语义化 Design Tokens（主色/状态色/背景）");
+    check(lgHtml.includes("--ds-color-primary: #15803d") && lgHtml.includes("--ds-font-family"),
+      "登录页复用同一套 Design Tokens");
+    check(!pgHtml.includes("${DS_TOKENS_CSS}") && !lgHtml.includes("${DS_TOKENS_CSS}"),
+      "令牌模板占位在运行时已解析（无未展开占位符）");
+    check(pgHtml.includes("--bg: var(--ds-color-bg-page)") && pgHtml.includes("--accent: var(--ds-color-primary)"),
+      "旧变量以兼容别名映射到令牌（旧选择器不失效）");
+    check(pgHtml.includes(".ds-btn") && pgHtml.includes(".ds-input") && pgHtml.includes(".ds-switch")
+      && pgHtml.includes(".ds-card") && pgHtml.includes(".ds-badge") && pgHtml.includes(".ds-alert")
+      && pgHtml.includes(".ds-empty") && pgHtml.includes(".ds-scope"),
+      "公共组件层齐备（按钮/输入/开关/卡片/徽章/提示/空状态/作用域）");
+    check(pgHtml.includes(":focus-visible") && pgHtml.includes("outline: 2px solid var(--ds-color-link)"),
+      "键盘焦点可见（统一 focus-visible 焦点环）");
+    check(pgHtml.includes("DS COMPONENTS v1") && !lgHtml.includes("DS COMPONENTS v1"),
+      "组件层仅在管理页定义（登录页只注入令牌，不重复组件）");
+    check(pgHtml.includes("设置中心") && pgHtml.includes("登录与会话") && pgHtml.includes("数据与业务") && pgHtml.includes("安全"),
+      "设置中心分组：登录与会话 / 通知 / 数据与业务 / 安全");
+    check(pgHtml.includes("未保存") && pgHtml.includes("恢复默认") && pgHtml.includes("跟随全局默认"),
+      "设置中心具备未保存状态、恢复默认与跟随全局默认入口");
+    check(pgHtml.includes("登录有效期（本浏览器）") && pgHtml.includes("只影响当前浏览器"),
+      "设置中心说明文案明确浏览器作用域（不描述为全局）");
+    check(pgHtml.includes("设置有未保存的修改，关闭后这些修改将丢弃"),
+      "未保存时关闭弹窗会先确认（防静默丢失修改）");
+    /* 响应式回归护栏：弹层限宽 + 窄屏底部抽屉 + 分组标签横向滚动（防再次引入横向溢出） */
+    check(pgHtml.includes("max-width: 560px") && pgHtml.includes("max-width: calc(100vw - 32px)"),
+      "弹层与下拉菜单有视口上限（窄屏不溢出）");
+    check(pgHtml.includes("@media (max-width: 560px)") && pgHtml.includes("border-radius: 18px 18px 0 0"),
+      "窄屏弹窗转为底部抽屉");
+    check(pgHtml.includes(".ds-tabs { display: flex; gap: 6px; overflow-x: auto;"),
+      "设置分组标签行可横向滚动（不挤压换行溢出）");
+    /* 设置中心文案九语种覆盖：抽样键在 SC_I18N 中应各有 9 处定义 */
+    const scSample = ["scTitle", "scSessionBrowser", "scSessionGlobal", "scHelpLocal", "scHelpGlobal",
+      "scCloseConfirm", "scSensitivePhCfg", "scResetConfirm", "scTtlRange", "scImportEnv", "nfHeaders", "scScopeBrowser"];
+    const scMissing = scSample.filter((k) => (pgHtml.match(new RegExp("\\b" + k + ":", "g")) || []).length < 9);
+    check(scMissing.length === 0, "设置中心文案九语种全覆盖（抽样 12 键各 9 处）" + (scMissing.length ? "，缺：" + scMissing.join(",") : ""));
+    check((pgHtml.match(/"pt-BR": {/g) || []).length >= 2, "SC_I18N 含全部九语种（含 pt-BR）");
+    const stripComments = (t) => t.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+    const scLogic = stripComments(pgHtml.slice(pgHtml.indexOf("var SET_SECTIONS"), pgHtml.indexOf("function openSessTtl")));
+    check(!/[\u4e00-\u9fff]/.test(scLogic), "设置中心逻辑区无硬编码中文文案（全部走 T() 键）");
+    /* 消息列表第二阶段：渐进加载 / 未读入口 / 摘要详情 结构存在 */
+    check(pgHtml.includes('id="loadmore"') && pgHtml.includes('id="nomore"') && pgHtml.includes('id="unreadbtn"'), "列表含加载更多、到底提示与未读入口");
+    const msgKeys = ["loadMore", "loadingMore", "noMore", "detailBtn", "detailTip", "detailFail", "readFail", "loadMoreFail"];
+    const msgMissing = msgKeys.filter((k) => (pgHtml.match(new RegExp("\\b" + k + ":", "g")) || []).length < 9);
+    check(msgMissing.length === 0, "列表新增文案九语种全覆盖（8 键各 9 处）" + (msgMissing.length ? "，缺：" + msgMissing.join(",") : ""));
+    check(pgHtml.includes("p.set(\"slim\", \"1\")") && pgHtml.includes("m.summary"), "列表请求 slim=1 且卡片使用摘要字段");
+    check(pgHtml.includes("state.loadMoreDepth") && pgHtml.includes("state.seen[m.id]"), "前端具备分页去重与历史位置保护");
+    check((pgHtml.match(/cursorStale:/g) || []).length >= 9 && pgHtml.includes("CURSOR_STALE"), "游标失效提示九语种齐备且前端处理 409");
 
     rawE.close();
     cleanupPath(exPath);
@@ -933,6 +985,351 @@ async function main() {
 
     rawB.close();
     cleanupPath(btPath);
+  }
+
+  /* ===== 组：消息列表分页 / 摘要瘦身 / 未读（v1.0.4 第二阶段） ===== */
+  group("消息列表：默认 10 条 / 稳定游标 / 摘要瘦身 / 同一时间戳 / 未读筛选 / 边界");
+  {
+    const pPath = join(tmpdir(), "smstoweb_msgpage_" + process.pid + ".db");
+    cleanupPath(pPath);
+    const rawP = new DatabaseSync(pPath);
+    const eP = { DB: makeD1(rawP), RECEIVE_TOKEN: "tok", ENABLE_AUTH: "false", ADMIN_PASSWORD: "secret", SESSION_SECRET: "test-session-secret-0123456789abcdef", RETENTION_DAYS: "30" };
+    const HP = { "X-Receive-Token": "tok" };
+    /* 25 条：其中 8/9/10 三秒相同（同一时间戳、不同 id），用于验证游标不重不漏 */
+    for (let i = 1; i <= 25; i++) {
+      const sec = (i >= 8 && i <= 10) ? "08" : String(i).padStart(2, "0");
+      await call("POST", "/api/receive", eP, { headers: HP, body: {
+        name: "分页手机", sender: "10086", source: "sms",
+        content: "分页第 " + i + " 条：您的验证码是 " + (120000 + i) + "，5 分钟内有效，这是一段超过二十个字的长文本用于摘要验证。",
+        time: "2026-10-01 12:00:" + sec,
+      } });
+    }
+
+    /* 1) 默认每页 10 条 */
+    let r = await call("GET", "/api/messages?slim=1", eP);
+    check(r.status === 200 && r.data.limit === 10 && r.data.list.length === 10, "默认每页 10 条");
+    check(r.data.total === 25 && r.data.has_more === true && !!r.data.next_cursor, "首屏 total=25 / has_more / next_cursor");
+
+    /* 2) 摘要瘦身：不传完整正文，摘要≤20 字符，验证码由服务端提取 */
+    const first = r.data.list[0];
+    check(first.content === undefined, "slim=1 时列表不返回完整正文");
+    check(typeof first.summary === "string" && Array.from(first.summary).length <= 20, "摘要长度 ≤ 20 个码位");
+    check(first.content_len > 20 && first.summary_truncated === true, "长正文标记为已截断");
+    check(first.code === String(120000 + 25), "列表附带服务端提取的验证码");
+
+    /* 3) 游标链：连续翻页无遗漏、无重复，顺序为时间倒序 + id 倒序 */
+    let ids = [], seen = {}, cursor = r.data.next_cursor, pages = 1, prevKey = null, orderOk = true;
+    const tuple = (m) => [m.starred ? 1 : 0, String(m.received_at), Number(m.id)];
+    const cmp = (a, b) => (a[0] - b[0]) || (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0) || (a[2] - b[2]);
+    r.data.list.forEach(function (m) { ids.push(m.id); seen[m.id] = true; });
+    prevKey = tuple(r.data.list[0]);
+    r.data.list.slice(1).forEach(function (m) { if (cmp(prevKey, tuple(m)) <= 0) orderOk = false; prevKey = tuple(m); });
+    while (cursor && pages < 10) {
+      r = await call("GET", "/api/messages?cursor=" + encodeURIComponent(cursor), eP);
+      if (!r.data.success) break;
+      pages++;
+      for (const m of r.data.list) {
+        if (seen[m.id]) { orderOk = false; }
+        seen[m.id] = true; ids.push(m.id);
+        if (cmp(prevKey, tuple(m)) <= 0) orderOk = false;
+        prevKey = tuple(m);
+      }
+      cursor = r.data.next_cursor;
+    }
+    check(ids.length === 25 && Object.keys(seen).length === 25, "游标翻完共 25 条且无重复");
+    check(orderOk, "严格按 (starred,received_at,id) 倒序，无乱序");
+
+    /* 4) 同一时间戳的记录全部出现（不因同秒被跳过）：按 received_at 分组，最大同秒组 ≥ 3 */
+    const allRows = (await call("GET", "/api/messages?limit=100", eP)).data.list;
+    let maxSame = 0, tsCount = {};
+    allRows.forEach(function (m) { tsCount[m.received_at] = (tsCount[m.received_at] || 0) + 1; maxSame = Math.max(maxSame, tsCount[m.received_at]); });
+    check(maxSame >= 3, "同一时间戳的记录全部保留（最大同秒组=" + maxSame + "）");
+
+    /* 5) 未读筛选 + 游标：只返回未读，且翻页条件保持一致 */
+    r = await call("GET", "/api/messages?unread=1&limit=10", eP);
+    check(r.data.list.length === 10 && r.data.list.every((m) => m.read_at === null), "未读筛选首页 10 条且全未读");
+    const l0 = r.data.list;
+    r = await call("GET", "/api/messages?unread=1&limit=10&cursor=" + encodeURIComponent(r.data.next_cursor), eP);
+    check(r.data.list.every((m) => m.read_at === null), "未读筛选翻页仍只返回未读");
+    const ids0 = new Set(l0.map((m) => m.id));
+    check(r.data.list.every((m) => !ids0.has(m.id)), "未读翻页与首页无交集");
+
+    /* 6) 新消息插入后继续加载旧消息：续页只取更旧的一批 */
+    await call("POST", "/api/receive", eP, { headers: HP, body: { name: "分页手机", sender: "10086", source: "sms", content: "插入的新消息 999999", time: "2026-10-01 13:00:00" } });
+    r = await call("GET", "/api/messages?limit=10", eP);
+    const c2 = r.data.next_cursor;
+    r = await call("GET", "/api/messages?limit=10&cursor=" + encodeURIComponent(c2), eP);
+    check(r.data.list.every((m) => m.id !== 26), "游标续页不包含更晚插入的新消息（仅取旧的一批）");
+
+    /* 7) 详情接口：完整正文 + 404 */
+    const one = await call("GET", "/api/messages/" + first.id, eP);
+    check(one.status === 200 && one.data.success && one.data.item.content.length > 20, "详情接口返回完整正文");
+    const miss = await call("GET", "/api/messages/999999", eP);
+    check(miss.status === 404, "不存在的消息 → 404");
+
+    /* 8) 非法游标 / 非法分页参数 */
+    r = await call("GET", "/api/messages?cursor=bogus", eP);
+    check(r.status === 400 && r.data.error === "INVALID_CURSOR", "非法游标 → 400 INVALID_CURSOR");
+    r = await call("GET", "/api/messages?limit=abc", eP);
+    check(r.status === 200 && r.data.list.length === 10, "非法 limit 回退默认 10");
+    r = await call("GET", "/api/messages?limit=0", eP);
+    check(r.status === 200 && r.data.limit === 10, "limit=0（非法）回退默认 10");
+
+    /* 9) 已读状态更新后重新查询状态一致；未读数与真实记录一致 */
+    const uid = first.id;
+    await call("POST", "/api/messages/read", eP, { body: { id: uid, read: true } });
+    r = await call("GET", "/api/messages?limit=100", eP);
+    check(r.data.list.find((m) => m.id === uid).read_at !== null, "标记已读后重新查询 read_at 已写入");
+    const st = await call("GET", "/api/stats", eP);
+    /* 统计覆盖全部（含已软删过滤），此处用 COUNT 核对全库未读 */
+    const cnt = await call("GET", "/api/messages?unread=1&limit=100", eP);
+    check(st.data.unread === cnt.data.total, "未读数量与未读筛选总数一致（" + st.data.unread + " vs " + cnt.data.total + "）");
+
+    /* 10) 幂等/并发：重复标记已读不产生副作用 */
+    await call("POST", "/api/messages/read", eP, { body: { id: uid, read: true } });
+    const again = await call("GET", "/api/messages?limit=100", eP);
+    check(again.data.list.find((m) => m.id === uid).read_at !== null, "重复标记已读幂等");
+
+    /* 11) 空列表 */
+    const emptyPath = join(tmpdir(), "smstoweb_empty_" + process.pid + ".db");
+    cleanupPath(emptyPath);
+    const rawEmpty = new DatabaseSync(emptyPath);
+    const eEmpty = { ...eP, DB: makeD1(rawEmpty) };
+    r = await call("GET", "/api/messages", eEmpty);
+    check(r.status === 200 && r.data.list.length === 0 && r.data.has_more === false && r.data.next_cursor === null, "空列表：0 条 / 无更多 / 无游标");
+    rawEmpty.close();
+    cleanupPath(emptyPath);
+
+    rawP.close();
+    cleanupPath(pPath);
+  }
+
+  /* ===== 组：动态星标与游标连续性 / 双分页模型（v1.0.4 第二阶段专项） ===== */
+  group("分页一致性：星标漂移检测（CURSOR_STALE）/ 会话内稳定排序 / 双分页不互相污染");
+  {
+    const sPath = join(tmpdir(), "smstoweb_starfolio_" + process.pid + ".db");
+    cleanupPath(sPath);
+    const rawS2 = new DatabaseSync(sPath);
+    const eS = { DB: makeD1(rawS2), RECEIVE_TOKEN: "tok", ENABLE_AUTH: "false", ADMIN_PASSWORD: "secret", SESSION_SECRET: "test-session-secret-0123456789abcdef", RETENTION_DAYS: "30" };
+    const HS = { "X-Receive-Token": "tok" };
+    const seed = async (n) => {
+      for (let i = 1; i <= n; i++) {
+        await call("POST", "/api/receive", eS, { headers: HS, body: {
+          name: "星标手机", sender: "10086", source: "sms", content: "星标用例第 " + i + " 条 验证码 " + (140000 + i),
+          time: "2026-10-03 10:00:" + String(i).padStart(2, "0"),
+        } });
+      }
+    };
+    const star = (id, on) => call("POST", "/api/messages/star", eS, { body: { id, starred: on } });
+    const page1 = () => call("GET", "/api/messages?slim=1&limit=10", eS);
+    const withCursor = (c) => call("GET", "/api/messages?slim=1&limit=10&cursor=" + encodeURIComponent(c), eS);
+    const traverseAll = async (limit) => {
+      let r = await call("GET", "/api/messages?slim=1&limit=" + (limit || 10), eS);
+      const ids = new Set(), dup = [];
+      let cur = r.data.next_cursor, guard = 0;
+      r.data.list.forEach((m) => ids.add(m.id));
+      while (cur && guard++ < 20) {
+        r = await withCursor(cur);
+        if (!r.data.success) return { ok: false, code: r.data.error, ids: [] };
+        r.data.list.forEach((m) => { if (ids.has(m.id)) dup.push(m.id); ids.add(m.id); });
+        cur = r.data.next_cursor;
+      }
+      return { ok: true, size: ids.size, dup: dup.length };
+    };
+
+    await seed(25);
+    for (const id of [5, 10, 15, 20, 25]) await star(id, true);
+
+    /* S1：首屏后取消已加载消息的星标 → 续页必须明确失效（409），而不是静默漏读 */
+    let r0 = await page1();
+    const c0 = r0.data.next_cursor;
+    check(!!c0 && c0.split("|").length === 4 && /^[0-9a-f]{64}$/.test(c0.split("|")[3]), "游标含 SHA-256 集合指纹（4 段：starred|time|id|sha256）");
+    check(r0.data.list.some((m) => m.id === 25 && m.starred === 1), "首屏包含已星标消息（id=25）");
+    await star(25, false);
+    let rr = await withCursor(c0);
+    check(rr.status === 409 && rr.data.error === "CURSOR_STALE", "S1 取消已加载星标 → 409 CURSOR_STALE");
+    let full = await traverseAll(10);
+    check(full.ok && full.size === 25 && full.dup === 0, "S1 重载后完整取回 25 条且无重复");
+
+    /* S2：首屏后把未加载消息设为星标（跳到顶部）→ 409，不会永久遗漏 */
+    r0 = await page1();
+    const c1 = r0.data.next_cursor;
+    await star(1, true);
+    rr = await withCursor(c1);
+    check(rr.status === 409 && rr.data.error === "CURSOR_STALE", "S2 星标未加载消息 → 409 CURSOR_STALE");
+    full = await traverseAll(10);
+    check(full.ok && full.size === 25 && full.dup === 0, "S2 重载后完整取回 25 条（新星标消息也出现）");
+
+    /* S3：加载第二页后，将第二页内的消息设为星标 → 409 */
+    r0 = await page1();
+    const p2 = await withCursor(r0.data.next_cursor);
+    const c2 = p2.data.next_cursor;
+    const target = p2.data.list[0].id;
+    await star(target, true);
+    rr = await withCursor(c2);
+    check(rr.status === 409 && rr.data.error === "CURSOR_STALE", "S3 第二页后星标已加载消息 → 409");
+    full = await traverseAll(10);
+    check(full.ok && full.size === 25 && full.dup === 0, "S3 重载后完整取回 25 条");
+
+    /* S5：连续多次切换后继续加载 → 失效；净零切换（加星再取消）则顺序不变，允许续页 */
+    r0 = await page1();
+    const c3 = r0.data.next_cursor;
+    await star(2, true); await star(3, true); await star(2, false);
+    rr = await withCursor(c3);
+    check(rr.status === 409, "S5 多次切换（净变化 1）→ 409");
+    r0 = await page1();
+    const c4 = r0.data.next_cursor;
+    await star(4, true); await star(4, false);
+    rr = await withCursor(c4);
+    check(rr.status === 200 && rr.data.success, "S5 净零切换（顺序未变）→ 续页正常，不误报失效");
+    check((rr.data.list || []).every((m) => !r0.data.list.some((x) => x.id === m.id)), "净零切换续页与首屏无交集");
+
+    /* 旧 3 段游标仍兼容（不校验指纹） */
+    const legacy = c0.split("|").slice(0, 3).join("|");
+    rr = await withCursor(legacy);
+    check(rr.status === 200 && rr.data.success, "旧 3 段游标保持向后兼容");
+
+    /* ---- 确定性碰撞：相同 COUNT / 相同 SUM(id)，集合不同 ---- */
+    const cP = join(tmpdir(), "smstoweb_coll_" + process.pid + ".db");
+    cleanupPath(cP);
+    const rawC = new DatabaseSync(cP);
+    const eC = { ...eS, DB: makeD1(rawC) };
+    for (let i = 1; i <= 6; i++) {
+      await call("POST", "/api/receive", eC, { headers: HS, body: { name: "碰撞机", sender: "10086", source: "sms", content: "碰撞第 " + i + " 条", time: "2026-10-06 10:00:0" + i } });
+    }
+    const starC = (id, on) => call("POST", "/api/messages/star", eC, { body: { id, starred: on } });
+    const pageC = (cur) => call("GET", "/api/messages?slim=1&limit=2" + (cur ? "&cursor=" + encodeURIComponent(cur) : ""), eC);
+
+    /* C1：{1,4} → {2,3}（|S|=2、Σid=5） */
+    let rc;
+    await starC(1, true); await starC(4, true);
+    rc = await pageC();
+    const cc1 = rc.data.next_cursor;
+    await starC(2, true); await starC(3, true); await starC(1, false); await starC(4, false);
+    rr = await pageC(cc1);
+    check(rr.status === 409 && rr.data.error === "CURSOR_STALE", "碰撞 C1 {1,4}→{2,3}（同数量同总和）：必须 409");
+
+    /* C2：{2,5} → {1,6}（|S|=2、Σid=7） */
+    await starC(2, false); await starC(3, false);
+    await starC(2, true); await starC(5, true);
+    rc = await pageC();
+    const cc2 = rc.data.next_cursor;
+    await starC(1, true); await starC(6, true); await starC(2, false); await starC(5, false);
+    rr = await pageC(cc2);
+    check(rr.status === 409 && rr.data.error === "CURSOR_STALE", "碰撞 C2 {2,5}→{1,6}（同数量同总和）：必须 409");
+
+    /* C3：集合不变 → 继续分页（不误报） */
+    rc = await pageC();
+    const cc3 = rc.data.next_cursor;
+    rr = await pageC(cc3);
+    check(rr.status === 200 && rr.data.success && (rr.data.list || []).every((m) => !rc.data.list.some((x) => x.id === m.id)), "集合不变 → 续页正常且无重复");
+
+    /* C4：不同筛选条件分别计算指纹（同一批数据、不同筛选 → 摘要不同） */
+    await call("POST", "/api/messages/read", eC, { body: { id: 1, read: true } });
+    const curU = (await call("GET", "/api/messages?slim=1&limit=2&unread=1", eC)).data.next_cursor;
+    const curA = (await call("GET", "/api/messages?slim=1&limit=2", eC)).data.next_cursor;
+    check(!!curU && !!curA && curU.split("|")[3] !== curA.split("|")[3], "不同筛选条件分别计算指纹（摘要不同）");
+    rr = await call("GET", "/api/messages?slim=1&limit=2&unread=1&cursor=" + encodeURIComponent(curU), eC);
+    check(rr.status === 200 && (rr.data.list || []).length > 0, "同筛选重放游标：正常续页");
+
+    rawC.close(); cleanupPath(cP);
+
+    /* S4：星标行超出首屏（12 条星标）→ 取消未加载的星标行 → 409 */
+    const s4Path = join(tmpdir(), "smstoweb_starfolio4_" + process.pid + ".db");
+    cleanupPath(s4Path);
+    const raw4 = new DatabaseSync(s4Path);
+    const e4 = { ...eS, DB: makeD1(raw4) };
+    for (let i = 1; i <= 25; i++) {
+      await call("POST", "/api/receive", e4, { headers: HS, body: { name: "星标手机", sender: "10086", source: "sms", content: "S4 第 " + i + " 条", time: "2026-10-04 10:00:" + String(i).padStart(2, "0") } });
+    }
+    for (let id = 14; id <= 25; id++) await call("POST", "/api/messages/star", e4, { body: { id, starred: true } });
+    r0 = await call("GET", "/api/messages?slim=1&limit=10", e4);
+    const c5 = r0.data.next_cursor;
+    /* 首屏 10 条应为 id 25..16（12 条星标的前 10 条），未加载星标为 15、14 */
+    const loadedIds = r0.data.list.map((m) => m.id);
+    check(loadedIds.indexOf(15) === -1 && loadedIds.indexOf(14) === -1, "S4 前置：14/15 属未加载星标行");
+    await call("POST", "/api/messages/star", e4, { body: { id: 14, starred: false } });
+    rr = await call("GET", "/api/messages?slim=1&limit=10&cursor=" + encodeURIComponent(c5), e4);
+    check(rr.status === 409 && rr.data.error === "CURSOR_STALE", "S4 取消未加载星标 → 409 CURSOR_STALE");
+    raw4.close(); cleanupPath(s4Path);
+
+    /* ---- 双分页模型：page 与 cursor 不共享状态 ---- */
+    r0 = await call("GET", "/api/messages?slim=1&limit=10&page=1", eS);
+    const pg1 = new Set(r0.data.list.map((m) => m.id));
+    const rpg2 = await call("GET", "/api/messages?slim=1&limit=10&page=2", eS);
+    check(rpg2.data.list.every((m) => !pg1.has(m.id)), "page=2 与 page=1 无交集（数字分页独立）");
+    const rCont = await withCursor(rpg2.data.next_cursor);
+    const pg2 = new Set(rpg2.data.list.map((m) => m.id));
+    check(rCont.data.list.every((m) => !pg2.has(m.id)), "page=2 后接续游标：从第 2 页末继续，无交集");
+    /* 筛选条件变化必须重置游标：换设备筛选后旧游标不应被复用（前端已重置；后端指纹也会失效） */
+    const devR = await call("GET", "/api/devices", eS);
+    const devId = (devR.data.list || [])[0] && (devR.data.list || [])[0].id;
+    if (devId) {
+      rr = await call("GET", "/api/messages?slim=1&limit=10&device_id=" + devId + "&cursor=" + encodeURIComponent(c5), eS);
+      check(rr.status === 409 || (rr.data.success && (rr.data.list || []).length >= 0), "跨筛选复用旧游标：明确失效或安全返回（不产生错页）");
+    }
+    /* 未读筛选下标记已读后继续加载：键集分页不回退、不重复 */
+    r0 = await call("GET", "/api/messages?slim=1&limit=10&unread=1", eS);
+    const uCur = r0.data.next_cursor;
+    const uIds = new Set(r0.data.list.map((m) => m.id));
+    await call("POST", "/api/messages/read", eS, { body: { id: r0.data.list[0].id, read: true } });
+    rr = await withCursor(uCur);
+    check(rr.status === 200 && (rr.data.list || []).every((m) => !uIds.has(m.id)), "未读筛选：标记已读后续页不回退、不与首页重复");
+
+    rawS2.close();
+    cleanupPath(sPath);
+  }
+
+  /* ===== 组：指纹编码无歧义 / 同快照一致（最终验收补证） ===== */
+  group("指纹补证：messages.id 严格整数 / 逗号编码无歧义 / 指纹与行同快照");
+  {
+    const qPath = join(tmpdir(), "smstoweb_fpid_" + process.pid + ".db");
+    cleanupPath(qPath);
+    const rawQ = new DatabaseSync(qPath);
+    const eQ = { DB: makeD1(rawQ), RECEIVE_TOKEN: "tok", ENABLE_AUTH: "false", ADMIN_PASSWORD: "secret", SESSION_SECRET: "test-session-secret-0123456789abcdef", RETENTION_DAYS: "30" };
+    const HQ = { "X-Receive-Token": "tok" };
+    for (let i = 1; i <= 6; i++) {
+      await call("POST", "/api/receive", eQ, { headers: HQ, body: { name: "指纹机", sender: "10086", source: "sms", content: "指纹第 " + i + " 条", time: "2026-10-10 10:00:0" + i } });
+    }
+
+    /* 1) id 列类型与约束：非整数主键写入必须失败（不可能出现含逗号/字符串的 id） */
+    let threw = false;
+    try { rawQ.exec("INSERT INTO messages (id, device_id, sender, content, received_at) VALUES ('1,2', 1, '10086', 'x', '2026-10-10 11:00:00')"); } catch (e) { threw = true; }
+    check(threw, "id='1,2'（含逗号字符串）写入被拒绝 → 集合编码不可能被 id 内容污染");
+    threw = false;
+    try { rawQ.exec("INSERT INTO messages (id, device_id, sender, content, received_at) VALUES (1.5, 1, '10086', 'y', '2026-10-10 11:00:01')"); } catch (e) { threw = true; }
+    check(threw, "id=1.5（非整数）写入被拒绝");
+    let stored = null;
+    try {
+      rawQ.exec("INSERT INTO messages (id, device_id, sender, content, received_at) VALUES ('007', 1, '10086', 'z', '2026-10-10 11:00:02')");
+      stored = rawQ.prepare("SELECT id, typeof(id) AS t FROM messages WHERE content='z'").get();
+    } catch (e) { stored = null; }
+    check(!!stored && stored.id === 7 && stored.t === "integer", "id='007' 被整数亲和归一化为 7（无前导零歧义）");
+    const types = rawQ.prepare("SELECT COUNT(*) AS n FROM messages WHERE typeof(id) <> 'integer'").get();
+    check(types.n === 0, "全表 id 的 SQLite 类型均为 integer（0 条非整数）");
+
+    /* 2) 编码无歧义：整数序列逗号连接与集合一一对应（不同集合必得不同摘要） */
+    const h = (s) => createHash("sha256").update(s).digest("hex");
+    check(h("1,4") !== h("2,3") && h("1,4") !== h("14") && h("1,4") !== h("1,04"),
+      "规范化编码无歧义：{1,4} 与 {2,3} / {14} / {1,04} 摘要均不同");
+
+    /* 3) 同快照一致：一次读取得到的指纹与返回行必须来自同一状态 */
+    const starQ = (id, on) => call("POST", "/api/messages/star", eQ, { body: { id, starred: on } });
+    await starQ(1, true); await starQ(2, true);
+    let rq = await call("GET", "/api/messages?slim=1&limit=2", eQ);
+    let starIds = rq.data.list.filter((m) => m.starred === 1).map((m) => String(m.id));
+    let fp1 = rq.data.next_cursor ? rq.data.next_cursor.split("|")[3] : "";
+    check(fp1 === h("1,2") && starIds.sort().join(",") === "1,2", "状态 A：指纹=hash(1,2) 且返回行星标集合恰为 {1,2}");
+
+    await starQ(1, false); await starQ(2, false); await starQ(3, true); await starQ(4, true);
+    rq = await call("GET", "/api/messages?slim=1&limit=2", eQ);
+    starIds = rq.data.list.filter((m) => m.starred === 1).map((m) => String(m.id));
+    const fp2 = rq.data.next_cursor ? rq.data.next_cursor.split("|")[3] : "";
+    check(fp2 === h("3,4") && starIds.sort().join(",") === "3,4", "状态 B：指纹=hash(3,4) 且返回行星标集合恰为 {3,4}");
+    check(fp1 !== fp2 && h("1,4") !== h("2,3"), "跨状态指纹不同（{1,2} vs {3,4}；且同数量同总和不碰撞）");
+
+    rawQ.close();
+    cleanupPath(qPath);
   }
 
   /* ===== 基线组（第 0 步前既有）：收发核心 ===== */

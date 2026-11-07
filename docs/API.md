@@ -57,10 +57,23 @@ Query 参数：
 | `source` | 来源筛选（如 `sms` / `notify` / 自定义来源） |
 | `device_id` | 按设备筛选 |
 | `range` | 时间范围：`1d` / `7d` / `30d` |
-| `limit` / `page` | 分页（默认 50/页） |
+| `limit` / `page` | 分页（**默认 10/页**，上限 100；非法值回退默认） |
+| `cursor` | 稳定游标（`starred|received_at|id|<sha256>`，由上一页 `next_cursor` 给出）；末段为**星标 ID 集合的 SHA-256**（该筛选条件下 ID 升序、逗号规范化后计算）。与 `page` 互斥，优先用于“加载更多” |
+| `slim` | `1` 时列表只返回 `summary`（约 20 码位）与 `code`，不回传完整 `content`；详情按 `GET /api/messages/{id}` 取 |
 | `starred` | `1` 仅看星标 |
+| `unread` | `1` 仅看未读（可与 `cursor` 组合，翻页条件保持一致） |
 
-响应：`{ "total": 123, "limit": 50, "page": 1, "list": [ { "id", "device_id", "display_name", "sim_number", "sender", "source", "content", "received_at", "starred", "read_at", "deleted_at" } ] }`
+响应：`{ "success": true, "total": 123, "limit": 10, "page": 1, "pages": 13, "has_more": true, "next_cursor": "0|2026-10-01 12:00:08|42|<64 位 sha256>", "slim": true, "list": [ { "id", "device_id", "sim", "sim_number", "device_name", "sender", "source", "received_at", "starred", "read_at", "summary", "summary_truncated", "content_len", "code" } ] }`
+
+- 排序固定为 `starred DESC, received_at DESC, id DESC`（星标置顶，其余新→旧）；游标与该三段排序严格对应，同一时间戳不会漏读或重复。
+- **分页一致性语义**：游标页请求会重新计算星标 ID 集合的 SHA-256 并比对（与分页数据在**同一条 SQL** 内读取，同一读快照）；集合变化（任何增删，含 `{1,4}↔{2,3}` 这类同数量同总和替换）→ `409 {"success":false,"error":"CURSOR_STALE"}`，调用方应回到首屏重载。集合不变 → 正常续页，不误报。
+- 旧 3 段游标（`starred|received_at|id`）仍可解析，但不校验集合（向后兼容）。
+- 非法游标返回 `400 {"success":false,"error":"INVALID_CURSOR"}`。
+- **兼容性**：不传 `slim`/`cursor` 时行为与旧版一致（返回完整 `content`、按 `page` 分页），既有调用方无需改动。
+
+### GET `/api/messages/{id}` — 单条完整消息
+
+返回 `{ "success": true, "item": { …完整字段… } }`；不存在或已软删返回 `404 {"success":false,"error":"NOT_FOUND"}`。用于 `slim` 列表下打开详情（含完整正文、验证码提取、复制）。
 
 ### 消息操作
 
@@ -72,6 +85,7 @@ Query 参数：
 | POST | `/api/messages/star` | 星标切换（body: `{ id, starred }`） |
 | POST | `/api/messages/read` | 标记已读（body: `{ id }`） |
 | DELETE | `/api/messages/{id}` | 物理删除单条 |
+| GET | `/api/messages/{id}` | 单条完整消息（详情用，`slim` 列表配套） |
 
 ### GET `/api/export?format=csv|json` — 导出
 

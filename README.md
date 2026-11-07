@@ -12,9 +12,11 @@ Push SMS and notifications from an Android phone (and any other device) to the c
 - **Real-time receiving**: webhook push lands in the database in seconds; the web page refreshes itself, no manual work
 - **Universal push**: any device that can send an HTTP request (Linux / Windows / macOS / iOS / NAS / scripts) can push notifications into the same page
 - **Sources & filters**: filter dynamically by source (SMS / notifications and custom sources auto-aggregated), stacked with keyword search and Today / Last 7 days / Last 30 days ranges; adjustable page size
+- **Message list (v1.0.4)**: **10 messages per page by default**; each card shows a **~20-character summary** (Unicode-safe) and opens the full text in a detail dialog; a **Load more** button appends older messages progressively (cursor pagination, no full-history fetch); a **“N unread” pill** jump-filters unread messages; opening a message marks it read (failure rolls back and reports instead of faking success)
+- **Pagination consistency**: the cursor carries a **SHA-256 fingerprint of the starred ID set**; if starring changes mid-session, the server rejects the stale cursor with `409 CURSOR_STALE` and the page reloads from the top, so messages are never skipped or duplicated (starred-pinned ordering is unchanged)
 - **Multi-channel forwarding**: new messages can be auto-forwarded to Feishu / WeCom / DingTalk / Telegram / ServerChan / PushPlus / Bark / ntfy / Gotify / Email / generic Webhook — configured in the admin **Settings → Notifications** page (stored in your database, per-channel enable/disable, credential update, test send); the legacy environment variables are still honoured when no database value exists
 - **Optional security**: admin login toggle, multi-format OTP code extraction (code-first / keyword-first / segmented / mixed, false-positive resistant) with one-tap copy, dark mode
-- **Data & alerts**: export CSV / JSON by current filter; toast / optional sound / floating pill for new messages while visible, browser notification + unread title while hidden; long messages auto-collapsed
+- **Data & alerts**: export CSV / JSON by current filter; toast / optional sound / floating pill for new messages while visible, browser notification + unread title while hidden; long messages show a short summary and open the full text in a detail dialog
 - **Number recognition**: built-in directory of common institutional numbers (carriers / banks / couriers / government) auto-labeled; optional carrier-region lookup for unknown mobile numbers (on by default, can be disabled)
 - **9 languages**: the admin and login pages ship with zh-CN / zh-TW / en / ja / ko / es / fr / de / pt-BR built in; switch from the header 🌐 menu (`?lang=` deep link supported, choice remembered locally); dates, relative times and directory labels switch along
 - **Mobile friendly**: `viewport-fit` safe-area support for notches and gesture bars, 16px inputs to prevent iOS auto-zoom, larger touch targets, bottom-sheet dialogs, PWA add-to-home-screen
@@ -90,12 +92,12 @@ A `{"success":true,...}` response means it is stored; pushing the exact same pay
 | `DISABLE_RECEIVE_TOKEN` | no | set `"true"` (case/whitespace-insensitive) to **disable the `RECEIVE_TOKEN` fallback** so only hashed named tokens can push; unset = fallback enabled (migration-friendly default). Does not affect `/api/cron`, which always uses the env var |
 | `ENABLE_AUTH` | no | `"true"` requires login for the admin page (**strongly recommended**, see security notes below); default is no login |
 | `ADMIN_PASSWORD` | no | login password (set when `ENABLE_AUTH="true"`; if missing, admin APIs refuse access and log an alert — missing config never opens the door) |
-| `RETENTION_DAYS` | no | data retention in days, default 30. Editable in **Settings → System** (the database value wins; this variable is only the fallback when no database value exists) |
+| `RETENTION_DAYS` | no | data retention in days, default 30. Editable in **Settings → 设置中心 → 数据与业务** (the database value wins; this variable is only the fallback when no database value exists) |
 | `WAIT_MAX_SECONDS` | no | max seconds `/api/wait` long polling may hang, default 25 (range 3–25). On **Netlify Functions** (10s cap) or other short-timeout platforms set `8` so requests are not killed by the platform |
-| `PHONE_AREA_ENABLED` / `PHONE_AREA_API` | no | legacy fallback for carrier-region lookup: on by default (free 360 API, no key, 24h backend cache, 11-digit mobile numbers only); set `false` to disable; custom source via `PHONE_AREA_API` (URL with `{number}` placeholder). Prefer **Settings → System**, which stores the same values in the database and takes precedence |
-| Notification channel variables | no | **Legacy fallback only.** Configure channels in **Settings → Notifications** (database-backed, with per-channel enable/disable, credential update, masked display and a test-send button). These variables still work when the corresponding database key does not exist, which keeps existing deployments running after an upgrade: `FEISHU_WEBHOOK` (Feishu) / `WECOM_WEBHOOK` (WeCom) / `DINGTALK_WEBHOOK` (DingTalk, optional `DINGTALK_SECRET` signing) / `SERVERCHAN_SENDKEY` / `PUSHPLUS_TOKEN` / `TELEGRAM_BOT_TOKEN`+`TELEGRAM_CHAT_ID` / `BARK_DEVICE_KEY` (optional `BARK_URL`) / `NTFY_URL` (optional `NTFY_TOKEN`) / `GOTIFY_URL`+`GOTIFY_TOKEN` / `RESEND_API_KEY`+`MAIL_TO` (email, optional `MAIL_FROM`) / `GENERIC_WEBHOOKS` (generic webhook, optional `GENERIC_WEBHOOK_TEMPLATE` body / `GENERIC_WEBHOOK_HEADERS` headers). With nothing configured nothing is forwarded. Notifications auto-render in three modes by content (🔐 OTP / 💬 SMS / 🔔 notification) |
+| `PHONE_AREA_ENABLED` / `PHONE_AREA_API` | no | legacy fallback for carrier-region lookup: on by default (free 360 API, no key, 24h backend cache, 11-digit mobile numbers only); set `false` to disable; custom source via `PHONE_AREA_API` (URL with `{number}` placeholder). Prefer **Settings → 设置中心 → 数据与业务**, which stores the same values in the database and takes precedence |
+| Notification channel variables | no | **Legacy fallback only.** Configure channels in **Settings → 设置中心 → 通知** (database-backed, with per-channel enable/disable, credential update, masked display and a test-send button). These variables still work when the corresponding database key does not exist, which keeps existing deployments running after an upgrade: `FEISHU_WEBHOOK` (Feishu) / `WECOM_WEBHOOK` (WeCom) / `DINGTALK_WEBHOOK` (DingTalk, optional `DINGTALK_SECRET` signing) / `SERVERCHAN_SENDKEY` / `PUSHPLUS_TOKEN` / `TELEGRAM_BOT_TOKEN`+`TELEGRAM_CHAT_ID` / `BARK_DEVICE_KEY` (optional `BARK_URL`) / `NTFY_URL` (optional `NTFY_TOKEN`) / `GOTIFY_URL`+`GOTIFY_TOKEN` / `RESEND_API_KEY`+`MAIL_TO` (email, optional `MAIL_FROM`) / `GENERIC_WEBHOOKS` (generic webhook, optional `GENERIC_WEBHOOK_TEMPLATE` body / `GENERIC_WEBHOOK_HEADERS` headers). With nothing configured nothing is forwarded. Notifications auto-render in three modes by content (🔐 OTP / 💬 SMS / 🔔 notification) |
 | `SITE_NAME` / `SITE_ICON` | no | site name / icon URL; defaults apply when unset |
-| `NOTIFY_LINK` | no | legacy fallback for the admin page home URL; when set, every notification channel gets an "Open admin" entry (button/link/click). Editable in **Settings → Notifications** (database value wins; leaving the field empty there is an explicit clear that also hides this variable) |
+| `NOTIFY_LINK` | no | legacy fallback for the admin page home URL; when set, every notification channel gets an "Open admin" entry (button/link/click). Editable in **Settings → 设置中心 → 通知** (database value wins; leaving the field empty there is an explicit clear that also hides this variable) |
 | `SESSION_SECRET` | required when login is on | session signing secret: **high-entropy random value (≥32 random characters recommended), fully independent from the admin password**; Cloudflare and EdgeOne (and every other platform) must each have their own value; never commit it to Git or reuse the password. If missing, login and auth **fail closed** (login returns 500, admin APIs return 401, no password-derived fallback). Rotating the value invalidates all existing sessions immediately. Sessions last 30 minutes; logout only clears the browser cookie — a copied session token remains valid within its TTL (up to 30 minutes) |
 
 Cloudflare additionally needs the `DB` (D1 binding); other platforms need `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` (Turso database, see each platform guide); Node self-hosting also supports `SQLITE_PATH` local SQLite mode (see platforms/node/README.md).
@@ -109,12 +111,14 @@ Cloudflare additionally needs the `DB` (D1 binding); other platforms need `TURSO
 
 Open the admin page → **Settings** (齿轮 / 设置). Everything below requires a login session when `ENABLE_AUTH="true"`.
 
-| Group | What you can do | Stored in |
+| Group | What you can do | Scope / Stored in |
 |---|---|---|
-| 会话时长 (Session TTL) | 5–43200 minutes; applies to **newly issued** sessions only. Per-browser since v1.0.4 (stored in browser localStorage, sent with each login); the `settings` value is the **global default / fallback** | Browser localStorage + `settings` table (fallback) |
-| 接入令牌 (Access tokens) | create / list / revoke / rotate named ingest tokens; plaintext shown once | `tokens` table |
-| 通知设置 (Notifications) | global on/off, which message types to forward (`verify` / `sms` / `notify`), retry count (0–3), admin link, per-channel enable/disable, credentials, **test send**, **import from environment variables** | `settings` table (`notify.*`) |
-| 业务设置 (System) | data retention days (1–3650), carrier-region lookup on/off and custom API URL | `settings` table |
+| 登录与会话 (Sign-in & session) | **Sign-in validity (this browser)**: 5–43200 minutes for **new sign-ins in this browser only** (localStorage, sent with each login); **Sign-in validity (global default)**: the fallback used when a browser has no own value (also the compat path for old clients) | This browser (localStorage) / Global (`settings` table) |
+| 通知 (Notifications) | global on/off, which message types to forward (`verify` / `sms` / `notify`), retry count (0–3), admin link, per-channel enable/disable, credentials, **test send**, **import from environment variables** | Global (`settings` table, `notify.*`) |
+| 数据与业务 (Data & operations) | data retention days (1–3650), carrier-region lookup on/off and custom API URL | Global (`settings` table) |
+| 安全 (Security) | entry to access-token management (create / revoke / rotate, plaintext shown once) + sign-in protection notes | Global (`tokens` table) |
+
+Every row carries a **scope badge** (全局 / 本浏览器), so it is clear whether a change affects the whole service or only this browser. Save / Cancel / Restore-defaults apply **per group**; any unsaved change shows an “unsaved” badge, and switching groups or closing the dialog asks for confirmation.
 
 Rules that matter in day-to-day use:
 
@@ -128,7 +132,7 @@ Rules that matter in day-to-day use:
 Migration and rollback:
 
 - Existing deployments keep working without any action: with no `notify.*` keys, the old env vars are used.
-- To move values into the database, open **Settings → Notifications → Import from environment variables** (imports only missing keys, never overwrites existing values).
+- To move values into the database, open **Settings → 设置中心 → 通知 → Import from environment variables** (imports only missing keys, never overwrites existing values).
 - To roll back a single channel, disable it in the page; to roll back all configuration, delete the `notify.*`, `retention_days`, `phone_area_enabled` and `phone_area_api` keys in `settings` — the env vars take over again immediately.
 
 ## FAQ (general)
@@ -140,7 +144,7 @@ Migration and rollback:
 - **Very long messages** → a single body is capped at 8000 characters, the excess is truncated
 - **Renaming a device label** → a label comes from the message template's `name` field; changing `name` creates a new label. Use "✎" next to a label on the web page to rename it, "⇄" to merge its messages into another device, and "×" to delete an empty label directly
 - **Upgrading from an older version (new columns)** → run on the old database: `ALTER TABLE messages ADD COLUMN deleted_at TEXT;`, `ALTER TABLE messages ADD COLUMN starred INTEGER NOT NULL DEFAULT 0;`, `ALTER TABLE messages ADD COLUMN read_at TEXT;` (fresh databases already include them; node local SQLite auto-adds columns on startup)
-- **Notification settings moved to the database in v1.0.3 — do I need to change anything?** No. With no database value the old env vars are still used. When you are ready, use **Settings → Notifications → Import from environment variables**, then remove the env vars if you prefer.
+- **Notification settings moved to the database in v1.0.3 — do I need to change anything?** No. With no database value the old env vars are still used. When you are ready, use **Settings → 设置中心 → 通知 → Import from environment variables**, then remove the env vars if you prefer.
 - **How do I undo a bad settings change?** Fix it in the page (blank sensitive fields keep the old value), or delete the corresponding `settings` keys to fall back to env vars/defaults; see [docs/UPGRADE.md](docs/UPGRADE.md) for the full rollback procedure
 
 ## Development
@@ -149,7 +153,10 @@ Migration and rollback:
 - `platforms/gen_app.py`: generates the platform-neutral `app.js` from `src/worker.js` into the five ported platforms and syncs the Cloudflare copy `worker.js` (keeping business code byte-identical across six platforms); also syncs the 31-variable environment whitelist (ENV_KEYS, including auth entries) into the six platform entries to prevent drift (node's db.js is a Turso + local SQLite dual adapter, maintained separately and not synced)
 - `platforms/*/`: self-contained deployment directories (entry + app.js + db.js adapter + schema.sql + platform guide)
 - `docs/i18n/en/`: English documentation set (deployment/API/architecture/database); other languages under `docs/i18n/<lang>/` — see [docs/i18n/README.md](docs/i18n/README.md)
-- `tests/run.mjs`: zero-dependency test suite (needs Node 22.13+): `node tests/run.mjs`
+- **[Design System](docs/DESIGN-SYSTEM.md)**: semantic tokens (`--ds-*`) and reusable components shared by the login page and admin page (single source in `src/worker.js`, synced to all platforms by `gen_app.py`)
+- **[Settings Center](docs/SETTINGS.md)**: grouped settings, per-item scope (global vs this-browser), save/cancel/reset semantics, sensitive-field masking
+- **[API reference](docs/API.md)**: message list pagination (`page` / `cursor` / `slim`), the SHA-256 cursor fingerprint and `409 CURSOR_STALE`, single-message detail endpoint, settings API
+- `tests/run.mjs`: zero-dependency test suite (needs Node 22.13+, **667 assertions**): `node tests/run.mjs`
 - After changing core code: run `python platforms/gen_app.py` to re-sync all platforms, then `node tests/run.mjs`; CI verifies zero sync drift + syntax + tests
 
 ## License

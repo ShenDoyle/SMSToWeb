@@ -1226,11 +1226,50 @@ async function handlePush(request, env, url, ctx) {
 
 /* ---------------- 查询 / 管理 API ---------------- */
 
+/* 稳定游标：starred|received_at|id|<sha256>
+   末段为「当前筛选条件下星标 ID 集合」的 SHA-256（ID 升序、逗号规范化的确定性摘要），
+   可完整区分任意集合差异（不再使用 COUNT/SUM 这类有限统计，避免 {1,4}↔{2,3} 碰撞）。
+   旧 3 段游标（无摘要）仍兼容，不做校验。 */
+function encodeCursor(row, fpHash) {
+  return [row.starred ? 1 : 0, row.received_at, row.id, fpHash].join("|");
+}
+function decodeCursor(raw) {
+  if (!raw) return null;
+  const parts = String(raw).split("|");
+  if (parts.length === 3) {
+    /* 兼容旧游标：不做集合校验 */
+    const s0 = parts[0] === "1" ? 1 : (parts[0] === "0" ? 0 : null);
+    const id0 = parseInt(parts[2], 10);
+    if (s0 === null || !parts[1] || !Number.isInteger(id0) || id0 <= 0) return null;
+    return { starred: s0, receivedAt: parts[1], id: id0, legacy: true };
+  }
+  if (parts.length !== 4) return null;
+  const starred = parts[0] === "1" ? 1 : (parts[0] === "0" ? 0 : null);
+  const receivedAt = parts[1];
+  const id = parseInt(parts[2], 10);
+  if (starred === null || !receivedAt || !Number.isInteger(id) || id <= 0) return null;
+  if (!/^[0-9a-f]{64}$/.test(parts[3])) return null;
+  return { starred, receivedAt, id, hash: parts[3] };
+}
+/* 星标集合的确定性指纹：ID 升序 → 逗号连接 → SHA-256 十六进制 */
+async function starSetHash(idsCsv) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(String(idsCsv || "")));
+  const bytes = new Uint8Array(buf);
+  let hex = "";
+  for (let i = 0; i < bytes.length; i++) hex += bytes[i].toString(16).padStart(2, "0");
+  return hex;
+}
+
 async function handleListMessages(url, env) {
   const deviceId = parseInt(url.searchParams.get("device_id") || "", 10);
   const q = (url.searchParams.get("q") || "").trim();
   const page = Math.max(1, parseInt(url.searchParams.get("page") || "1", 10) || 1);
-  const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get("limit") || "20", 10) || 20));
+  /* 默认每页 10 条（v1.0.4 第二阶段）；上限 100 保持不变 */
+  const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get("limit") || "10", 10) || 10));
+  /* slim=1：只返回约 20 字摘要（不传完整正文），详情按 id 单独取；默认行为保持完整正文以兼容既有调用方 */
+  const slim = url.searchParams.get("slim") === "1";
+  const rawCursor = url.searchParams.get("cursor");
+  const cursor = decodeCursor(rawCursor);
 
   const source = (url.searchParams.get("source") || "").trim();
   const range = (url.searchParams.get("range") || "").trim();
@@ -1258,25 +1297,75 @@ async function handleListMessages(url, env) {
   }
   if (starredOnly) where.push("m.starred = 1");
   if (unreadOnly) where.push("m.read_at IS NULL");
-  const whereSql = where.length ? "WHERE " + where.join(" AND ") : "";
+  if (rawCursor && !cursor) return json({ success: false, error: "INVALID_CURSOR" }, 400);
+
+  /* 游标条件与 ORDER BY (starred DESC, received_at DESC, id DESC) 严格对应 */
+  const pageWhere = where.slice();
+  const pageParams = params.slice();
+  if (cursor) {
+    pageWhere.push(
+      "(m.starred < ? OR (m.starred = ? AND (m.received_at < ? OR (m.received_at = ? AND m.id < ?))))"
+    );
+    pageParams.push(cursor.starred, cursor.starred, cursor.receivedAt, cursor.receivedAt, cursor.id);
+  }
+  const whereSql = pageWhere.length ? "WHERE " + pageWhere.join(" AND ") + "" : "";
 
   const totalRow = await env.DB.prepare(
-    `SELECT COUNT(*) AS n FROM messages m ${whereSql}`
+    `SELECT COUNT(*) AS n FROM messages m ${where.length ? "WHERE " + where.join(" AND ") : ""}`
   ).bind(...params).first();
   const total = totalRow ? totalRow.n : 0;
 
+  /* 星标 ID 集合子查询：与分页数据在**同一条 SQL** 内读取 ⇒ 同一读快照，
+     避免「先取指纹、后取数据」之间发生星标修改导致页面与指纹不一致 */
+  const whereAny = where.length ? "WHERE " + where.join(" AND ") : "WHERE 1=1";
+  const whereAlias = whereAny.replace(/m\./g, "m2.");
+  const starSub = `(SELECT group_concat(x.id, ',') FROM (SELECT m2.id FROM messages m2 ${whereAlias} AND m2.starred = 1 ORDER BY m2.id) x)`;
+
+  const cols = "m.id, m.sender, m.content, m.received_at, m.device_id, m.source, m.starred, m.read_at, "
+    + "length(m.content) AS content_len, "
+    + "COALESCE(NULLIF(d.alias, ''), d.device) AS device_name, d.sim, d.device, "
+    + starSub + " AS _starids";
+  /* 多取 1 条用于判断是否还有下一页（不额外发 COUNT）
+     绑定顺序必须与 SQL 文本一致：先为 SELECT 列表中的星标集合子查询绑定基础筛选参数，
+     再为外层 WHERE 绑定分页参数，最后 LIMIT/OFFSET */
   const list = await env.DB.prepare(
-    `SELECT m.id, m.sender, m.content, m.received_at, m.device_id, m.source,
-            m.starred, m.read_at,
-            COALESCE(NULLIF(d.alias, ''), d.device) AS device_name, d.sim, d.device
+    `SELECT ${cols}
      FROM messages m JOIN devices d ON d.id = m.device_id
      ${whereSql}
      ORDER BY m.starred DESC, m.received_at DESC, m.id DESC
      LIMIT ? OFFSET ?`
-  ).bind(...params, limit, (page - 1) * limit).all();
+  ).bind(...params, ...pageParams, limit + 1, cursor ? 0 : (page - 1) * limit).all();
 
-  const rows = list.results || [];
-  for (const r of rows) r.sim_number = r.sim || "";
+  let rows = list.results || [];
+  const hasMore = rows.length > limit;
+  if (hasMore) rows = rows.slice(0, limit);
+
+  /* 星标集合指纹（与本页数据同一快照）：无数据行时补一条仅取集合的查询 */
+  let starIdsCsv = rows.length ? rows[0]._starids : null;
+  if (starIdsCsv === null || starIdsCsv === undefined) {
+    const fr = await env.DB.prepare(
+      `SELECT group_concat(x.id, ',') AS s FROM (SELECT m2.id FROM messages m2 ${whereAlias} AND m2.starred = 1 ORDER BY m2.id) x`
+    ).bind(...params).first();
+    starIdsCsv = (fr && fr.s) || "";
+  }
+  const fpHash = await starSetHash(starIdsCsv);
+  /* 集合指纹不一致 ⇒ 顺序已漂移，拒绝续页；前端回到首屏重载 */
+  if (cursor && cursor.hash && cursor.hash !== fpHash) {
+    return json({ success: false, error: "CURSOR_STALE" }, 409);
+  }
+
+  for (const r of rows) {
+    delete r._starids;
+    /* Unicode 安全摘要：按码位截取（emoji/中文不被切断），约 20 字 */
+    const chars = Array.from(String(r.content || ""));
+    r.summary = chars.slice(0, 20).join("");
+    r.summary_truncated = chars.length > 20;
+    r.code = extractCodeLite(r.content);
+    r.sim_number = r.sim || "";
+    /* slim：正文不回传前端（摘要/验证码/长度足够渲染卡片），详情按 id 单独取 */
+    if (slim) delete r.content;
+  }
+  const nextCursor = hasMore && rows.length ? encodeCursor(rows[rows.length - 1], fpHash) : null;
 
   return json({
     success: true,
@@ -1285,7 +1374,24 @@ async function handleListMessages(url, env) {
     limit,
     pages: Math.max(1, Math.ceil(total / limit)),
     list: rows,
+    has_more: hasMore,
+    next_cursor: nextCursor,
+    slim: slim,
   });
+}
+
+/* 单条完整消息（详情用）：列表 slim 模式下打开详情时调用 */
+async function handleGetMessage(id, env) {
+  const row = await env.DB.prepare(
+    `SELECT m.id, m.sender, m.content, m.received_at, m.device_id, m.source,
+            m.starred, m.read_at,
+            COALESCE(NULLIF(d.alias, ''), d.device) AS device_name, d.sim, d.device
+     FROM messages m JOIN devices d ON d.id = m.device_id
+     WHERE m.id = ?1 AND m.deleted_at IS NULL`
+  ).bind(id).first();
+  if (!row) return json({ success: false, error: "NOT_FOUND" }, 404);
+  row.sim_number = row.sim || "";
+  return json({ success: true, item: row });
 }
 
 /* ---------------- 导出（CSV / JSON） ----------------
@@ -1742,6 +1848,108 @@ async function handleWait(url, env) {
 /* ---------------- Web 管理界面（登录开关 ENABLE_AUTH 控制） ---------------- */
 
 /* String.raw：内嵌前端源码按原文下发，防止模板字面量把 \b \d \s \/ 当转义序列吃掉 */
+/* ===== DS TOKENS v1：全项目唯一设计令牌源 =====
+   管理页与登录页都通过 ${DS_TOKENS_CSS} 注入同一字符串；禁止各页面再复制一套变量。 */
+const DS_TOKENS_CSS = String.raw`
+  /* ===== DS TOKENS v1（全项目唯一设计令牌源；登录页与后台共用同一套语义变量） =====
+     命名规则：--ds-<类别>-<语义>；下方「兼容别名」把既有 --bg/--card/--accent 等映射到令牌，
+     旧选择器无需改动即自动继承新体系。新增颜色一律先在此定义语义令牌，不得在页面内写死色值。 */
+  :root {
+    /* 颜色 · 背景 */
+    --ds-color-bg-page: #f5f6f7;
+    --ds-color-bg-surface: #fff;
+    --ds-color-bg-subtle: #f5f6f7;
+    /* 颜色 · 文本 */
+    --ds-color-text: #20242a;
+    --ds-color-text-secondary: #6b7280;
+    --ds-color-text-tertiary: #9aa3ab;
+    /* 颜色 · 主色与状态 */
+    --ds-color-primary: #15803d;
+    --ds-color-primary-hover: #116632;
+    --ds-color-primary-subtle: #e7f4ec;
+    --ds-color-success: #15803d;
+    --ds-color-warning: #b45309;
+    --ds-color-danger: #b91c1c;
+    --ds-color-info: #2563eb;
+    --ds-color-unread: #15803d;
+    --ds-color-disabled: #c7ced4;
+    /* 颜色 · 边框与分割 */
+    --ds-color-border: #d8dce0;
+    --ds-color-border-subtle: #e3e6e9;
+    --ds-color-divider: #eef1f3;
+    --ds-color-link: #2563eb;
+    /* 字体 */
+    --ds-font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    --ds-font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    --ds-text-xs: 12px; --ds-text-sm: 13px; --ds-text-md: 14px;
+    --ds-text-lg: 16px; --ds-text-xl: 18px; --ds-text-2xl: 20px;
+    --ds-leading: 1.6; --ds-leading-tight: 1.3;
+    --ds-weight-normal: 400; --ds-weight-medium: 600; --ds-weight-bold: 700;
+    /* 尺寸与间距 */
+    --ds-space-1: 4px; --ds-space-2: 6px; --ds-space-3: 8px; --ds-space-4: 12px;
+    --ds-space-5: 16px; --ds-space-6: 24px; --ds-space-7: 32px;
+    --ds-content-max: 760px;
+    --ds-control-h: 36px; --ds-control-h-sm: 32px;
+    --ds-radius-sm: 6px; --ds-radius-md: 8px; --ds-radius-lg: 10px;
+    --ds-radius-xl: 14px; --ds-radius-pill: 999px;
+    --ds-border-w: 1px;
+    --ds-shadow-1: 0 1px 3px rgba(0,0,0,.12);
+    --ds-shadow-2: 0 8px 24px rgba(0,0,0,.14);
+    --ds-shadow-3: 0 10px 28px rgba(15,23,42,.16);
+    --ds-focus-ring: 0 0 0 2px var(--ds-color-link);
+    /* 组件令牌（保持原语义，供既有选择器直用） */
+    --ds-color-sender: #0f766e;
+    --ds-code-bg: #fef3c7; --ds-code-border: #fcd34d; --ds-code-text: #92400e; --ds-code-hover: #fde68a;
+    /* ---------- 兼容别名（旧变量 → 令牌；迁移期保留，全部走令牌取值） ---------- */
+    --bg: var(--ds-color-bg-page); --card: var(--ds-color-bg-surface);
+    --text: var(--ds-color-text); --muted: var(--ds-color-text-secondary); --faint: var(--ds-color-text-tertiary);
+    --border: var(--ds-color-border); --card-border: var(--ds-color-border-subtle); --row-border: var(--ds-color-divider);
+    --accent: var(--ds-color-primary); --accent-deep: var(--ds-color-primary-hover);
+    --accent-bg: var(--ds-color-primary-subtle); --badge-bg: var(--ds-color-primary-subtle);
+    --sender: var(--ds-color-sender); --link: var(--ds-color-link);
+    --code-bg: var(--ds-code-bg); --code-border: var(--ds-code-border); --code-text: var(--ds-code-text); --code-hover: var(--ds-code-hover);
+    --del: var(--ds-color-text-tertiary); --del-hover: var(--ds-color-danger);
+    --tabx: #e8b4b4; --sw-off: var(--ds-color-disabled);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ds-color-bg-page: #14171a; --ds-color-bg-surface: #1d2126; --ds-color-bg-subtle: #14171a;
+      --ds-color-text: #e6e9ec; --ds-color-text-secondary: #9aa3ab; --ds-color-text-tertiary: #6b7480;
+      --ds-color-primary: #22a04f; --ds-color-primary-hover: #1a8a41; --ds-color-primary-subtle: #12351f;
+      --ds-color-success: #22a04f; --ds-color-warning: #f59e0b; --ds-color-danger: #f87171;
+      --ds-color-info: #6ea8ff; --ds-color-unread: #22a04f; --ds-color-disabled: #3a424a;
+      --ds-color-border: #33393f; --ds-color-border-subtle: #2a3036; --ds-color-divider: #262c31;
+      --ds-color-link: #6ea8ff; --ds-color-sender: #4fd1a5;
+      --ds-code-bg: #3a2f14; --ds-code-border: #6b5518; --ds-code-text: #fbd46d; --ds-code-hover: #4a3c1a;
+      --tabx: #8a4a4a;
+    }
+  }
+  /* 主题三态（data-theme 覆盖系统偏好）：只覆盖 DS 令牌，兼容别名自动跟随 */
+  html[data-theme="dark"] {
+    --ds-color-bg-page: #14171a; --ds-color-bg-surface: #1d2126; --ds-color-bg-subtle: #14171a;
+    --ds-color-text: #e6e9ec; --ds-color-text-secondary: #9aa3ab; --ds-color-text-tertiary: #6b7480;
+    --ds-color-primary: #22a04f; --ds-color-primary-hover: #1a8a41; --ds-color-primary-subtle: #12351f;
+    --ds-color-success: #22a04f; --ds-color-warning: #f59e0b; --ds-color-danger: #f87171;
+    --ds-color-info: #6ea8ff; --ds-color-unread: #22a04f; --ds-color-disabled: #3a424a;
+    --ds-color-border: #33393f; --ds-color-border-subtle: #2a3036; --ds-color-divider: #262c31;
+    --ds-color-link: #6ea8ff; --ds-color-sender: #4fd1a5;
+    --ds-code-bg: #3a2f14; --ds-code-border: #6b5518; --ds-code-text: #fbd46d; --ds-code-hover: #4a3c1a;
+    --tabx: #8a4a4a;
+  }
+  html[data-theme="light"] {
+    --ds-color-bg-page: #f5f6f7; --ds-color-bg-surface: #fff; --ds-color-bg-subtle: #f5f6f7;
+    --ds-color-text: #20242a; --ds-color-text-secondary: #6b7280; --ds-color-text-tertiary: #9aa3ab;
+    --ds-color-primary: #15803d; --ds-color-primary-hover: #116632; --ds-color-primary-subtle: #e7f4ec;
+    --ds-color-success: #15803d; --ds-color-warning: #b45309; --ds-color-danger: #b91c1c;
+    --ds-color-info: #2563eb; --ds-color-unread: #15803d; --ds-color-disabled: #c7ced4;
+    --ds-color-border: #d8dce0; --ds-color-border-subtle: #e3e6e9; --ds-color-divider: #eef1f3;
+    --ds-color-link: #2563eb; --ds-color-sender: #0f766e;
+    --ds-code-bg: #fef3c7; --ds-code-border: #fcd34d; --ds-code-text: #92400e; --ds-code-hover: #fde68a;
+    --tabx: #e8b4b4;
+  }
+  :root { --input-border: var(--ds-color-border); }
+`;
+
 const PAGE_HTML = String.raw`<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -1759,24 +1967,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
 <meta name="theme-color" content="#14171a" media="(prefers-color-scheme: dark)">
 <title>__SITE_NAME__</title>
 <style>
-  :root {
-    --bg: #f5f6f7; --card: #fff; --text: #20242a; --muted: #6b7280; --faint: #9aa3ab;
-    --border: #d8dce0; --card-border: #e3e6e9; --row-border: #eef1f3;
-    --accent: #15803d; --accent-deep: #116632;
-    --badge-bg: #e7f4ec; --sender: #0f766e; --link: #2563eb;
-    --code-bg: #fef3c7; --code-border: #fcd34d; --code-text: #92400e; --code-hover: #fde68a;
-    --del: #9aa3ab; --del-hover: #b91c1c; --tabx: #e8b4b4; --sw-off: #c7ced4;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --bg: #14171a; --card: #1d2126; --text: #e6e9ec; --muted: #9aa3ab; --faint: #6b7480;
-      --border: #33393f; --card-border: #2a3036; --row-border: #262c31;
-      --accent: #22a04f; --accent-deep: #1a8a41;
-      --badge-bg: #12351f; --sender: #4fd1a5; --link: #6ea8ff;
-      --code-bg: #3a2f14; --code-border: #6b5518; --code-text: #fbd46d; --code-hover: #4a3c1a;
-      --del: #6b7480; --del-hover: #f87171; --tabx: #8a4a4a; --sw-off: #3a424a;
-    }
-  }
+  ${DS_TOKENS_CSS}
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font: 14px/1.6 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
          background: var(--bg); color: var(--text); padding: 0 0 40px; }
@@ -1841,13 +2032,17 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .del:hover { color: var(--del-hover); }
   .srctag { flex: none; font-size: 11px; font-weight: 700; color: var(--badge-bg); background: var(--accent);
             border-radius: 5px; padding: 1px 7px; }
-  .code-line { margin: 6px 0 2px; color: var(--code-text); }
-  .code-line b { font-size: 17px; letter-spacing: 1px; margin-right: 8px;
-                 font-family: ui-monospace, Consolas, monospace; background: var(--code-bg);
-                 padding: 0 6px; border-radius: 5px; }
-  .copy { border: 1px solid var(--code-border); background: var(--code-bg); color: var(--code-text);
-          border-radius: 6px; padding: 1px 10px; cursor: pointer; font-size: 12px; }
-  .copy:hover { background: var(--code-hover); }
+  /* 验证码：与 DS 统一（强调色块 + 等宽字体 + 足够对比度），不改变复制与识别逻辑 */
+  .code-line { margin: 6px 0 2px; color: var(--ds-color-text-secondary); font-size: var(--ds-text-xs); }
+  .code-line b { font-size: 18px; letter-spacing: 1.5px; margin-right: 8px; display: inline-block;
+                 font-family: var(--ds-font-mono); font-weight: var(--ds-weight-bold);
+                 color: var(--ds-code-text); background: var(--ds-code-bg);
+                 border: 1px solid var(--ds-code-border); padding: 1px 8px; border-radius: var(--ds-radius-sm); }
+  .copy { border: 1px solid var(--ds-color-border); background: var(--ds-color-bg-surface); color: var(--ds-color-text-secondary);
+          border-radius: var(--ds-radius-sm); padding: 2px 10px; cursor: pointer; font-size: var(--ds-text-xs);
+          min-height: 28px; }
+  .copy:hover { background: var(--ds-code-bg); border-color: var(--ds-code-border); color: var(--ds-code-text); }
+  .copy:focus-visible { outline: 2px solid var(--ds-color-link); outline-offset: 2px; }
   .line { margin-top: 4px; }
   .content { word-break: break-word; white-space: pre-wrap; }
   .content a { color: var(--link); word-break: break-all; }
@@ -1857,6 +2052,12 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .recv:hover { color: var(--text); }
   .empty { text-align: center; color: var(--faint); padding: 40px 0; }
   .pager { display: flex; gap: 8px; justify-content: center; align-items: center; margin-top: 16px; }
+  /* 渐进加载：加载更多 + 到底提示（复用 DS 按钮，不新造视觉） */
+  .morewrap { display: flex; justify-content: center; margin-top: 14px; }
+  .nomore { color: var(--ds-color-text-tertiary); font-size: var(--ds-text-xs); padding: var(--ds-space-3) 0; }
+  /* 未读入口：数量徽章 + 文字（不只靠颜色） */
+  .unreadpill { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; }
+  .unreadpill[data-on="1"] { border-color: var(--ds-color-primary); color: var(--ds-color-primary); background: var(--ds-color-primary-subtle); }
   .pager button { padding: 6px 14px; border: 1px solid var(--border); border-radius: 8px;
                   background: var(--card); color: var(--text); cursor: pointer; font-size: 13px; }
   .pager button:disabled { opacity: .4; cursor: default; }
@@ -1905,23 +2106,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .area { color: var(--faint); font-size: 12px; }
   .pager input, .pager select { padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px; font-size: 13px; background: var(--card); color: var(--text); }
   #jump { width: 64px; }
-  /* 主题三态（data-theme 覆盖系统偏好） */
-  html[data-theme="dark"] {
-    --bg: #14171a; --card: #1d2126; --text: #e6e9ec; --muted: #9aa3ab; --faint: #6b7480;
-    --border: #33393f; --card-border: #2a3036; --row-border: #262c31;
-    --accent: #22a04f; --accent-deep: #1a8a41;
-    --badge-bg: #12351f; --sender: #4fd1a5; --link: #6ea8ff;
-    --code-bg: #3a2f14; --code-border: #6b5518; --code-text: #fbd46d; --code-hover: #4a3c1a;
-    --del: #6b7480; --del-hover: #f87171; --tabx: #8a4a4a; --sw-off: #3a424a;
-  }
-  html[data-theme="light"] {
-    --bg: #f5f6f7; --card: #fff; --text: #20242a; --muted: #6b7280; --faint: #9aa3ab;
-    --border: #d8dce0; --card-border: #e3e6e9; --row-border: #eef1f3;
-    --accent: #15803d; --accent-deep: #116632;
-    --badge-bg: #e7f4ec; --sender: #0f766e; --link: #2563eb;
-    --code-bg: #fef3c7; --code-border: #fcd34d; --code-text: #92400e; --code-hover: #fde68a;
-    --del: #9aa3ab; --del-hover: #b91c1c; --tabx: #e8b4b4; --sw-off: #c7ced4;
-  }
+  /* 主题三态已并入 DS_TOKENS_CSS（见文件顶部 const） */
   /* 头部 */
   .head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 8px 0 12px; }
   .head h1 { margin: 0; }
@@ -2056,6 +2241,91 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     .opt .switch::after { width: 20px; height: 20px; }
     .opt input:checked + .switch::after { transform: translateX(18px); }
   }
+  /* ===== DS COMPONENTS v1（可复用组件层：新页面用 .ds-*，旧页面继续用既有类名，两者同源同视觉） ===== */
+  /* 焦点可见：键盘操作统一焦点环，不因视觉简洁而删除 */
+  :where(button, .tbtn, .tab, .ds-btn, a, input, select, textarea):focus-visible {
+    outline: 2px solid var(--ds-color-link); outline-offset: 2px;
+  }
+  .ds-btn { border: var(--ds-border-w) solid var(--ds-color-border); background: var(--ds-color-bg-surface);
+            color: var(--ds-color-text); border-radius: var(--ds-radius-md); padding: 5px 10px;
+            font-size: var(--ds-text-sm); cursor: pointer; min-height: var(--ds-control-h-sm);
+            transition: border-color .15s ease, color .15s ease, background .15s ease; }
+  .ds-btn:hover:not(:disabled) { border-color: var(--ds-color-primary); color: var(--ds-color-primary); }
+  .ds-btn:disabled { opacity: .5; cursor: not-allowed; }
+  .ds-btn--primary { background: var(--ds-color-primary); border-color: var(--ds-color-primary); color: #fff; font-weight: var(--ds-weight-medium); }
+  .ds-btn--primary:hover:not(:disabled) { background: var(--ds-color-primary-hover); border-color: var(--ds-color-primary-hover); color: #fff; }
+  .ds-btn--danger { border-color: var(--ds-color-danger); color: var(--ds-color-danger); }
+  .ds-btn--danger:hover:not(:disabled) { background: var(--ds-color-danger); color: #fff; }
+  .ds-btn--block { width: 100%; }
+  .ds-btn[data-loading="1"] { opacity: .7; cursor: progress; }
+  .ds-btn[data-loading="1"]::after { content: ""; display: inline-block; width: 10px; height: 10px;
+    margin-left: 6px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+    animation: dsspin .7s linear infinite; vertical-align: -1px; }
+  @keyframes dsspin { to { transform: rotate(360deg); } }
+  .ds-input, .ds-select { min-height: var(--ds-control-h-sm); padding: 6px 8px;
+    border: var(--ds-border-w) solid var(--ds-color-border); border-radius: var(--ds-radius-md);
+    background: var(--ds-color-bg-surface); color: var(--ds-color-text); font-size: var(--ds-text-sm); }
+  .ds-input::placeholder { color: var(--ds-color-text-tertiary); }
+  .ds-input[aria-invalid="true"], .ds-input:invalid { border-color: var(--ds-color-danger); }
+  .ds-field { display: flex; flex-direction: column; gap: var(--ds-space-1); margin: var(--ds-space-3) 0; }
+  .ds-field > label { font-size: var(--ds-text-sm); font-weight: var(--ds-weight-medium); color: var(--ds-color-text); }
+  .ds-help { font-size: var(--ds-text-xs); line-height: var(--ds-leading); color: var(--ds-color-text-secondary); }
+  .ds-error-text { font-size: var(--ds-text-xs); color: var(--ds-color-danger); }
+  .ds-card { background: var(--ds-color-bg-surface); border: var(--ds-border-w) solid var(--ds-color-border-subtle);
+    border-radius: var(--ds-radius-lg); padding: var(--ds-space-4); }
+  .ds-group-title { display: flex; align-items: center; gap: var(--ds-space-2);
+    font-size: var(--ds-text-md); font-weight: var(--ds-weight-medium); color: var(--ds-color-text);
+    margin: var(--ds-space-4) 0 var(--ds-space-2); padding-top: var(--ds-space-3);
+    border-top: var(--ds-border-w) solid var(--ds-color-divider); }
+  .ds-group-title:first-child { border-top: 0; padding-top: 0; }
+  .ds-badge { display: inline-flex; align-items: center; gap: 4px; font-size: var(--ds-text-xs);
+    font-weight: var(--ds-weight-medium); padding: 1px 8px; border-radius: var(--ds-radius-pill);
+    background: var(--ds-color-bg-subtle); color: var(--ds-color-text-secondary); white-space: nowrap; }
+  .ds-badge--success { background: var(--ds-color-primary-subtle); color: var(--ds-color-success); }
+  .ds-badge--warning { background: rgba(180,83,9,.12); color: var(--ds-color-warning); }
+  .ds-badge--danger { background: rgba(185,28,28,.12); color: var(--ds-color-danger); }
+  .ds-badge--info { background: rgba(37,99,235,.12); color: var(--ds-color-info); }
+  /* 配置作用域徽章：全局 / 本浏览器（图标+文字，不只依赖颜色） */
+  .ds-scope { display: inline-flex; align-items: center; gap: 4px; font-size: var(--ds-text-xs);
+    padding: 1px 8px; border-radius: var(--ds-radius-pill); border: var(--ds-border-w) solid var(--ds-color-border); }
+  .ds-scope--global { color: var(--ds-color-info); }
+  .ds-scope--browser { color: var(--ds-color-warning); }
+  .ds-alert { display: flex; gap: var(--ds-space-2); align-items: flex-start; font-size: var(--ds-text-xs);
+    line-height: var(--ds-leading); padding: var(--ds-space-3) var(--ds-space-3);
+    border-radius: var(--ds-radius-md); border-left: 3px solid var(--ds-color-info);
+    background: var(--ds-color-bg-subtle); color: var(--ds-color-text-secondary); margin: var(--ds-space-3) 0; }
+  .ds-alert--warning { border-left-color: var(--ds-color-warning); }
+  .ds-alert--danger { border-left-color: var(--ds-color-danger); color: var(--ds-color-danger); }
+  .ds-empty { text-align: center; color: var(--ds-color-text-tertiary); padding: var(--ds-space-7) var(--ds-space-4);
+    font-size: var(--ds-text-sm); }
+  .ds-switch { position: relative; flex: none; width: 40px; height: 22px; border-radius: var(--ds-radius-pill);
+    background: var(--ds-color-disabled); border: var(--ds-border-w) solid var(--ds-color-border);
+    transition: background .2s ease, border-color .2s ease; }
+  .ds-switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px;
+    border-radius: 50%; background: #fff; box-shadow: var(--ds-shadow-1); transition: transform .2s ease; }
+  input:checked + .ds-switch { background: var(--ds-color-primary); border-color: var(--ds-color-primary); }
+  input:checked + .ds-switch::after { transform: translateX(18px); }
+  .ds-check, .ds-radio { width: 16px; height: 16px; accent-color: var(--ds-color-primary); cursor: pointer; }
+  .ds-modal { position: fixed; inset: 0; background: rgba(0,0,0,.42); display: flex; align-items: center;
+    justify-content: center; z-index: 100; padding: var(--ds-space-5); }
+  .ds-modal[hidden] { display: none; }
+  .ds-sheet { position: relative; background: var(--ds-color-bg-surface); color: var(--ds-color-text);
+    border-radius: var(--ds-radius-xl); width: 100%; max-width: 560px; max-height: 86vh; overflow: auto;
+    padding: var(--ds-space-5); border: var(--ds-border-w) solid var(--ds-color-border); }
+  .ds-dialog-actions { display: flex; flex-wrap: wrap; gap: var(--ds-space-3); justify-content: flex-end; margin-top: var(--ds-space-4); }
+  /* 设置中心：分组标签行与行内复选框（窄屏可横向滚动、不挤压） */
+  .ds-tabs { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 8px; margin-bottom: 8px;
+             -webkit-overflow-scrolling: touch; scrollbar-width: thin; }
+  .ds-tabs::-webkit-scrollbar { height: 3px; }
+  .ds-inline { display: inline-flex; align-items: center; gap: 4px; margin-right: 10px; font-size: var(--ds-text-sm); }
+  /* 设置表单：字段行统一走令牌（标签在上、说明在下，窄屏自动堆叠） */
+  .setrow > label { color: var(--ds-color-text-secondary); font-size: var(--ds-text-sm); }
+  .setnote, .tokmeta { color: var(--ds-color-text-secondary); }
+  .tokwarn { color: var(--ds-color-danger); }
+  .srctag.s-notify { background: var(--ds-color-info); }
+  .srctag.s-alert { background: var(--ds-color-warning); }
+  .srctag.s-other { background: var(--ds-color-text-secondary); }
+  .star.on { color: var(--ds-color-warning); }
 </style>
 </head>
 <body>
@@ -2095,12 +2365,11 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
             <button class="tbtn" id="exportcsv" data-i18n-title="exportCsvTip" data-i18n="exportCsv" title="按当前筛选导出 CSV">导出 CSV</button>
             <button class="tbtn" id="exportjson" data-i18n-title="exportJsonTip" data-i18n="exportJson" title="按当前筛选导出 JSON">导出 JSON</button>
           </div>
-          <div class="grp">接入令牌</div>
-          <button class="tbtn" id="mtokens" role="menuitem" title="创建 / 查看 / 吊销 / 轮换接入令牌">接入令牌</button>
-          <button class="tbtn" id="msesttl" role="menuitem" title="调整登录会话有效期（默认 30 分钟）">会话时长</button>
-          <div class="grp">通知与业务设置</div>
-          <button class="tbtn" id="mnotify" role="menuitem" title="通知渠道 / 开关 / 规则 / 重试 / 测试">通知设置</button>
-          <button class="tbtn" id="msysset" role="menuitem" title="数据保留天数 / 号码归属地查询">业务设置</button>
+          <div class="grp" data-i18n="settings">设置</div>
+          <button class="tbtn" id="msetcenter" role="menuitem" data-i18n="scMenuCenter" data-i18n-title="scMenuCenter">设置中心</button>
+          <button class="tbtn" id="msesttl" role="menuitem" data-i18n="scMenuTtl" data-i18n-title="scMenuTtl">登录有效期</button>
+          <div class="grp" data-i18n="scGrpAccess">接入</div>
+          <button class="tbtn" id="mtokens" role="menuitem" data-i18n="scMenuTokens" data-i18n-title="scMenuTokens">接入令牌</button>
         </div>
       </span>
       <button class="tbtn" id="themebtn" data-i18n-title="themeTip">自动</button>
@@ -2126,8 +2395,12 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       <option value="30d" data-i18n="d30">近 30 天</option>
     </select>
   </div>
-  <div class="meta"><span id="stat"></span><span id="pageinfo"></span></div>
+  <div class="meta"><span id="stat"></span><span id="pageinfo"></span><button class="tbtn unreadpill" id="unreadbtn" type="button" data-i18n-title="unreadTip"><span id="unreadcount">0</span> <span data-i18n="unread">未读</span></button></div>
   <div class="list" id="list"><div class="sk"><div class="skc"></div><div class="skc"></div><div class="skc"></div></div></div>
+  <div class="morewrap">
+    <button class="tbtn" id="loadmore" type="button" hidden data-i18n="loadMore">加载更多</button>
+    <div class="nomore" id="nomore" hidden data-i18n="noMore">没有更多了</div>
+  </div>
   <div class="pager">
     <button id="prev" data-i18n="prev">上一页</button>
     <span id="pagenum"></span>
@@ -2166,7 +2439,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   var state = {
     device: 0, src: "", q: "", page: 1, pages: 1, total: 0, lastId: 0, deb: null,
     lastIdByDev: {},
-    inited: false, unread: 0, limit: 20, range: "", notifiedId: 0,
+    inited: false, unread: 0, limit: 10, range: "", notifiedId: 0,
+    cursor: "", seen: {}, loadingMore: false, loadMoreDepth: 0,
     selectMode: false, selected: {}, lastQ: "", starOnly: false, unreadOnly: false, lastList: [],
     labels: (function () { try { return JSON.parse(localStorage.getItem("sms_labels") || "{}") || {}; } catch (e) { return {}; } })(),
     autoCopy: (function () { try { return localStorage.getItem("sms_autocopy") !== "0"; } catch (e) { return true; } })(),
@@ -2763,6 +3037,1158 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       unnamed: "Dispositivo sem nome"
     }
   };
+  /* 设置中心文案（九语种）。以独立表合并进 I18N，避免改动既有字典结构。 */
+  var SC_I18N = {
+    "zh-CN": {
+    scMenuCenter: "设置中心",
+    scMenuTtl: "登录有效期",
+    scGrpAccess: "接入",
+    scMenuTokens: "接入令牌",
+    scTitle: "设置中心",
+    scDirty: "未保存",
+    scTabSession: "登录与会话",
+    scTabNotify: "通知",
+    scTabBiz: "数据与业务",
+    scTabSec: "安全",
+    scReset: "恢复默认",
+    scScopeGlobal: "全局",
+    scScopeBrowser: "本浏览器",
+    scSessionBrowser: "登录有效期（本浏览器）",
+    scSessionGlobal: "登录有效期（全局默认）",
+    scTtl: "时长",
+    scTtlGlobal: "默认时长",
+    scFollowGlobal: "跟随全局默认（清除本浏览器设置）",
+    scCustom: "自定义分钟数…",
+    scEffLocal: "当前浏览器：{v}（已单独设置，不随全局变化）",
+    scEffGlobal: "当前浏览器：跟随全局默认（{v}）",
+    scHelpLocal: "只影响当前浏览器<b>之后的新登录</b>；不修改服务端全局默认值，不影响其他浏览器；已签发的会话过期时间不会因此延长或缩短。选择「跟随全局默认」可清除本浏览器设置。",
+    scHelpGlobal: "未单独设置浏览器时长时，按该值签发会话，同时作为旧客户端（不声明时长）的兼容回退。范围 5 ~ 43200 分钟；修改只影响之后的新登录，已签发会话不变。",
+    scMin30: "30 分钟",
+    scHour1: "1 小时",
+    scHour8: "8 小时",
+    scHour24: "24 小时",
+    scDay7: "7 天",
+    scDay30: "30 天",
+    scNotifyRules: "通知规则",
+    scNotifyHelp: "保存到数据库并立即生效。敏感字段只在服务端保存，页面只显示「是否已配置」；输入留空表示不修改，勾选「清除」才会删除已存值。",
+    scNotifyEnabled: "通知总开关",
+    scNotifyTypes: "转发类型",
+    scTypeVerify: "验证码",
+    scTypeSms: "短信",
+    scTypeNotify: "通知",
+    scRetry: "失败重试",
+    scNoRetry: "不重试",
+    scRetryN: "{n} 次",
+    scRetryHelp: "转发失败后的重试次数上限",
+    scLink: "跳转链接",
+    scLinkPh: "https://…（可选，附加到通知正文）",
+    scConfigured: "已配置",
+    scNotConfigured: "未配置",
+    scFromDb: "数据库",
+    scFromEnv: "环境变量",
+    scEnable: "启用",
+    scTest: "测试",
+    scSendTest: "发送测试通知",
+    scTestSaved: "测试通知使用<b>已保存</b>的配置：修改凭据后请先保存再测试。",
+    scTestOk: "测试通知已发送",
+    scTestNotCfg: "该渠道尚未配置，请先保存凭据",
+    scTestFail: "发送失败",
+    scTestFailMsg: "发送失败：{m}",
+    scImportEnv: "从环境变量导入",
+    scImported: "已导入 {n} 项环境变量配置",
+    scNoImport: "没有可导入的环境变量配置",
+    scImportFail: "导入失败",
+    scImportFailMsg: "导入失败：{e}",
+    scSensitivePhCfg: "已配置 {m}（留空不修改）",
+    scSensitivePhNew: "未配置，输入后保存",
+    scClear: "清除",
+    scRetention: "消息保留",
+    scDays: "保留天数",
+    scDaysHelp: "定时清理会删除超过该天数的消息，范围 1 ~ 3650 天。调小会加快清理，属不可逆操作。",
+    scArea: "号码归属地",
+    scAreaEnable: "启用查询",
+    scAreaApi: "接口地址",
+    scAreaApiPh: "留空使用内置免费接口",
+    scAreaHelp: "自定义接口需支持 {number} 占位（http/https）；关闭后列表不再显示归属地。留空表示使用内置免费接口。",
+    scTokenTitle: "接入令牌",
+    scTokenHelp: "推送端使用接入令牌鉴权。命名令牌可单独创建、轮换、吊销，便于按来源隔离与追责；吊销后该令牌立即失效。",
+    scManage: "管理",
+    scOpenTokens: "打开接入令牌管理",
+    scTokenAlert: "令牌明文只在创建时显示一次；本页不读取、不回显任何令牌值。",
+    scLoginGuard: "登录防护",
+    scLoginGuardHelp: "连续 5 次密码错误后锁定 10 分钟；会话为无状态签名 Token，退出仅清除浏览器 Cookie。相关策略由部署配置决定，本轮不在界面暴露。",
+    scResetSession: "清除本浏览器登录有效期，并把全局默认恢复为 30 分钟",
+    scResetNotify: "通知总开关恢复开启、转发类型全选、重试 0 次、跳转链接清空（渠道凭据不变）",
+    scResetBiz: "保留天数恢复 30 天、归属地查询开启、自定义接口清空",
+    scResetConfirm: "恢复默认：{what}。确认后需点击「保存」才会写入，是否继续？",
+    scResetNoDefault: "该分组无默认值可恢复",
+    scResetFilled: "已填入默认值，请点击保存生效",
+    scCancelDone: "已恢复为上次保存的设置",
+    scNoChanges: "没有需要保存的修改",
+    scNoSave: "该分组无需保存",
+    scReadFail: "读取设置失败",
+    scSaveFail: "保存失败",
+    scSaveFailMsg: "保存失败：{e}",
+    scRevisionConflict: "设置已被其他会话修改，请关闭后重新打开再保存",
+    scSavedTtl: "设置已保存（下次登录生效）",
+    scSavedTtlGlobal: "设置已保存（本浏览器时长下次登录生效）",
+    scKeepOneType: "至少保留一种转发类型",
+    scDaysInvalid: "保留天数须为 1 ~ 3650",
+    scApiInvalid: "接口地址须为 http/https 完整地址，或留空",
+    scTtlRange: "时长须为 5 ~ 43200 分钟（30 天）",
+    scCloseConfirm: "设置有未保存的修改，关闭后这些修改将丢弃。确定关闭？",
+    scSwitchConfirm: "当前分组有未保存的修改，切换后将丢弃，继续？",
+    nfWebhook: "Webhook 地址",
+    nfSecret: "签名密钥",
+    nfSendkey: "SendKey",
+    nfToken: "Token / 密钥",
+    nfBotToken: "Bot Token",
+    nfChatId: "Chat ID",
+    nfDeviceKey: "设备 Key",
+    nfUrl: "服务地址",
+    nfApiKey: "API Key",
+    nfMailTo: "收件人",
+    nfMailFrom: "发件人",
+    nfUrls: "Webhook 地址",
+    nfTemplate: "请求体模板",
+    nfHeaders: "自定义请求头"
+    },
+    "zh-TW": {
+    scMenuCenter: "設定中心",
+    scMenuTtl: "登入有效期",
+    scGrpAccess: "接入",
+    scMenuTokens: "接入權杖",
+    scTitle: "設定中心",
+    scDirty: "未儲存",
+    scTabSession: "登入與工作階段",
+    scTabNotify: "通知",
+    scTabBiz: "資料與業務",
+    scTabSec: "安全",
+    scReset: "恢復預設",
+    scScopeGlobal: "全域",
+    scScopeBrowser: "本瀏覽器",
+    scSessionBrowser: "登入有效期（本瀏覽器）",
+    scSessionGlobal: "登入有效期（全域預設）",
+    scTtl: "時長",
+    scTtlGlobal: "預設時長",
+    scFollowGlobal: "跟隨全域預設（清除本瀏覽器設定）",
+    scCustom: "自訂分鐘數…",
+    scEffLocal: "本瀏覽器：{v}（已單獨設定，不隨全域變化）",
+    scEffGlobal: "本瀏覽器：跟隨全域預設（{v}）",
+    scHelpLocal: "只影響目前瀏覽器<b>之後的新登入</b>；不修改伺服器全域預設值，不影響其他瀏覽器；已簽發的工作階段到期時間不會因此延長或縮短。選擇「跟隨全域預設」可清除本瀏覽器設定。",
+    scHelpGlobal: "未單獨設定瀏覽器時長時，依此值簽發工作階段，同時作為舊用戶端（未宣告時長）的相容回退。範圍 5 ~ 43200 分鐘；修改只影響之後的新登入，已簽發工作階段不變。",
+    scMin30: "30 分鐘",
+    scHour1: "1 小時",
+    scHour8: "8 小時",
+    scHour24: "24 小時",
+    scDay7: "7 天",
+    scDay30: "30 天",
+    scNotifyRules: "通知規則",
+    scNotifyHelp: "儲存到資料庫並立即生效。敏感欄位只在伺服器儲存，頁面只顯示「是否已設定」；輸入留空表示不修改，勾選「清除」才會刪除已存值。",
+    scNotifyEnabled: "通知總開關",
+    scNotifyTypes: "轉發類型",
+    scTypeVerify: "驗證碼",
+    scTypeSms: "簡訊",
+    scTypeNotify: "通知",
+    scRetry: "失敗重試",
+    scNoRetry: "不重試",
+    scRetryN: "{n} 次",
+    scRetryHelp: "轉發失敗後的重試次數上限",
+    scLink: "跳轉連結",
+    scLinkPh: "https://…（選填，附加到通知內容）",
+    scConfigured: "已設定",
+    scNotConfigured: "未設定",
+    scFromDb: "資料庫",
+    scFromEnv: "環境變數",
+    scEnable: "啟用",
+    scTest: "測試",
+    scSendTest: "傳送測試通知",
+    scTestSaved: "測試通知使用<b>已儲存</b>的設定：修改憑證後請先儲存再測試。",
+    scTestOk: "測試通知已傳送",
+    scTestNotCfg: "此管道尚未設定，請先儲存憑證",
+    scTestFail: "傳送失敗",
+    scTestFailMsg: "傳送失敗：{m}",
+    scImportEnv: "從環境變數匯入",
+    scImported: "已匯入 {n} 項環境變數設定",
+    scNoImport: "沒有可匯入的環境變數設定",
+    scImportFail: "匯入失敗",
+    scImportFailMsg: "匯入失敗：{e}",
+    scSensitivePhCfg: "已設定 {m}（留空不修改）",
+    scSensitivePhNew: "未設定，輸入後儲存",
+    scClear: "清除",
+    scRetention: "訊息保留",
+    scDays: "保留天數",
+    scDaysHelp: "定時清理會刪除超過此天數的訊息，範圍 1 ~ 3650 天。調小會加快清理，屬不可逆操作。",
+    scArea: "號碼歸屬地",
+    scAreaEnable: "啟用查詢",
+    scAreaApi: "介面位址",
+    scAreaApiPh: "留空使用內建免費介面",
+    scAreaHelp: "自訂介面需支援 {number} 佔位（http/https）；關閉後清單不再顯示歸屬地。留空表示使用內建免費介面。",
+    scTokenTitle: "接入權杖",
+    scTokenHelp: "推送端使用接入權杖驗證。命名權杖可單獨建立、輪換、撤銷，便於依來源隔離與追責；撤銷後該權杖立即失效。",
+    scManage: "管理",
+    scOpenTokens: "開啟接入權杖管理",
+    scTokenAlert: "權杖明文只在建立時顯示一次；本頁不讀取、不回顯任何權杖值。",
+    scLoginGuard: "登入防護",
+    scLoginGuardHelp: "連續 5 次密碼錯誤後鎖定 10 分鐘；工作階段為無狀態簽名權杖，登出僅清除瀏覽器 Cookie。相關策略由部署設定決定，本輪不在介面暴露。",
+    scResetSession: "清除本瀏覽器登入有效期，並把全域預設恢復為 30 分鐘",
+    scResetNotify: "通知總開關恢復開啟、轉發類型全選、重試 0 次、跳轉連結清空（管道憑證不變）",
+    scResetBiz: "保留天數恢復 30 天、歸屬地查詢開啟、自訂介面清空",
+    scResetConfirm: "恢復預設：{what}。確認後需點擊「儲存」才會寫入，是否繼續？",
+    scResetNoDefault: "此分組無預設值可恢復",
+    scResetFilled: "已填入預設值，請點擊儲存生效",
+    scCancelDone: "已恢復為上次儲存的設定",
+    scNoChanges: "沒有需要儲存的修改",
+    scNoSave: "此分組無需儲存",
+    scReadFail: "讀取設定失敗",
+    scSaveFail: "儲存失敗",
+    scSaveFailMsg: "儲存失敗：{e}",
+    scRevisionConflict: "設定已被其他工作階段修改，請關閉後重新開啟再儲存",
+    scSavedTtl: "設定已儲存（下次登入生效）",
+    scSavedTtlGlobal: "設定已儲存（本瀏覽器時長下次登入生效）",
+    scKeepOneType: "至少保留一種轉發類型",
+    scDaysInvalid: "保留天數須為 1 ~ 3650",
+    scApiInvalid: "介面位址須為 http/https 完整位址，或留空",
+    scTtlRange: "時長須為 5 ~ 43200 分鐘（30 天）",
+    scCloseConfirm: "設定有未儲存的修改，關閉後這些修改將捨棄。確定關閉？",
+    scSwitchConfirm: "目前分組有未儲存的修改，切換後將捨棄，繼續？",
+    nfWebhook: "Webhook 位址",
+    nfSecret: "簽名金鑰",
+    nfSendkey: "SendKey",
+    nfToken: "Token / 金鑰",
+    nfBotToken: "Bot Token",
+    nfChatId: "Chat ID",
+    nfDeviceKey: "裝置 Key",
+    nfUrl: "服務位址",
+    nfApiKey: "API Key",
+    nfMailTo: "收件人",
+    nfMailFrom: "寄件人",
+    nfUrls: "Webhook 位址",
+    nfTemplate: "請求內文範本",
+    nfHeaders: "自訂請求標頭"
+    },
+    "en": {
+    scMenuCenter: "Settings Center",
+    scMenuTtl: "Sign-in validity",
+    scGrpAccess: "Access",
+    scMenuTokens: "Access tokens",
+    scTitle: "Settings Center",
+    scDirty: "Unsaved",
+    scTabSession: "Sign-in & session",
+    scTabNotify: "Notifications",
+    scTabBiz: "Data & operations",
+    scTabSec: "Security",
+    scReset: "Restore defaults",
+    scScopeGlobal: "Global",
+    scScopeBrowser: "This browser",
+    scSessionBrowser: "Sign-in validity (this browser)",
+    scSessionGlobal: "Sign-in validity (global default)",
+    scTtl: "Duration",
+    scTtlGlobal: "Default duration",
+    scFollowGlobal: "Follow global default (clear this browser)",
+    scCustom: "Custom minutes…",
+    scEffLocal: "This browser: {v} (set separately, does not follow global)",
+    scEffGlobal: "This browser: following global default ({v})",
+    scHelpLocal: "Affects only <b>new sign-ins in this browser</b>. It does not change the server-side global default and does not affect other browsers. Already-issued sessions keep their expiry. Choose \"Follow global default\" to clear this browser setting.",
+    scHelpGlobal: "Used when a browser has no own setting, and as the fallback for old clients that send no duration. Range 5–43200 minutes; changes affect only new sign-ins, existing sessions stay unchanged.",
+    scMin30: "30 minutes",
+    scHour1: "1 hour",
+    scHour8: "8 hours",
+    scHour24: "24 hours",
+    scDay7: "7 days",
+    scDay30: "30 days",
+    scNotifyRules: "Notification rules",
+    scNotifyHelp: "Saved to the database and applied immediately. Sensitive fields are stored server-side only; the page shows configured or not. Leave a field empty to keep the current value; tick \"Clear\" to delete it.",
+    scNotifyEnabled: "Notifications enabled",
+    scNotifyTypes: "Forward types",
+    scTypeVerify: "Verification codes",
+    scTypeSms: "SMS",
+    scTypeNotify: "Notifications",
+    scRetry: "Retry on failure",
+    scNoRetry: "No retry",
+    scRetryN: "{n} times",
+    scRetryHelp: "Maximum retries after a failed forward",
+    scLink: "Action link",
+    scLinkPh: "https://… (optional, appended to notifications)",
+    scConfigured: "Configured",
+    scNotConfigured: "Not configured",
+    scFromDb: "Database",
+    scFromEnv: "Env var",
+    scEnable: "Enabled",
+    scTest: "Test",
+    scSendTest: "Send test notification",
+    scTestSaved: "Test notifications use the <b>saved</b> configuration: save new credentials before testing.",
+    scTestOk: "Test notification sent",
+    scTestNotCfg: "This channel is not configured yet — save its credentials first",
+    scTestFail: "Send failed",
+    scTestFailMsg: "Send failed: {m}",
+    scImportEnv: "Import from env vars",
+    scImported: "Imported {n} settings",
+    scNoImport: "No importable settings",
+    scImportFail: "Import failed",
+    scImportFailMsg: "Import failed: {e}",
+    scSensitivePhCfg: "Configured {m} (leave empty to keep)",
+    scSensitivePhNew: "Not configured — enter a value and save",
+    scClear: "Clear",
+    scRetention: "Message retention",
+    scDays: "Retention days",
+    scDaysHelp: "Scheduled cleanup deletes messages older than this, range 1–3650 days. Lowering it cleans faster and cannot be undone.",
+    scArea: "Number location",
+    scAreaEnable: "Enable lookup",
+    scAreaApi: "API endpoint",
+    scAreaApiPh: "Leave empty for the built-in free API",
+    scAreaHelp: "A custom endpoint must support the {number} placeholder (http/https). When disabled, the list hides locations. Empty means the built-in free API.",
+    scTokenTitle: "Access tokens",
+    scTokenHelp: "Ingestion clients authenticate with access tokens. Named tokens can be created, rotated and revoked per source; a revoked token stops working immediately.",
+    scManage: "Manage",
+    scOpenTokens: "Open token manager",
+    scTokenAlert: "A token's plaintext is shown only once at creation; this page never reads or echoes token values.",
+    scLoginGuard: "Sign-in protection",
+    scLoginGuardHelp: "Locked for 10 minutes after 5 wrong passwords. Sessions are stateless signed tokens; signing out only clears the browser cookie. These policies come from deployment config and are not exposed here.",
+    scResetSession: "clear this browser's setting and reset the global default to 30 minutes",
+    scResetNotify: "re-enable notifications, select all types, retry 0, clear the link (channel credentials unchanged)",
+    scResetBiz: "retention 30 days, location lookup on, custom endpoint cleared",
+    scResetConfirm: "Restore defaults: {what}. Nothing is written until you click Save. Continue?",
+    scResetNoDefault: "This group has no defaults to restore",
+    scResetFilled: "Defaults filled in — click Save to apply",
+    scCancelDone: "Restored to the last saved values",
+    scNoChanges: "Nothing to save",
+    scNoSave: "This group needs no saving",
+    scReadFail: "Failed to load settings",
+    scSaveFail: "Save failed",
+    scSaveFailMsg: "Save failed: {e}",
+    scRevisionConflict: "Settings were changed in another session — close and reopen before saving",
+    scSavedTtl: "Saved (applies to your next sign-in)",
+    scSavedTtlGlobal: "Saved (this browser's duration applies to your next sign-in)",
+    scKeepOneType: "Keep at least one forward type",
+    scDaysInvalid: "Retention must be 1–3650 days",
+    scApiInvalid: "The endpoint must be a full http/https URL, or empty",
+    scTtlRange: "Duration must be 5–43200 minutes (30 days)",
+    scCloseConfirm: "Settings have unsaved changes that will be lost. Close anyway?",
+    scSwitchConfirm: "This group has unsaved changes that will be discarded. Continue?",
+    nfWebhook: "Webhook URL",
+    nfSecret: "Signing secret",
+    nfSendkey: "SendKey",
+    nfToken: "Token / key",
+    nfBotToken: "Bot token",
+    nfChatId: "Chat ID",
+    nfDeviceKey: "Device key",
+    nfUrl: "Service URL",
+    nfApiKey: "API key",
+    nfMailTo: "Recipient",
+    nfMailFrom: "Sender",
+    nfUrls: "Webhook URL",
+    nfTemplate: "Request body template",
+    nfHeaders: "Custom headers"
+    },
+    "ja": {
+    scMenuCenter: "設定センター",
+    scMenuTtl: "ログイン有効期間",
+    scGrpAccess: "接続",
+    scMenuTokens: "接続トークン",
+    scTitle: "設定センター",
+    scDirty: "未保存",
+    scTabSession: "ログインとセッション",
+    scTabNotify: "通知",
+    scTabBiz: "データと運用",
+    scTabSec: "セキュリティ",
+    scReset: "既定値に戻す",
+    scScopeGlobal: "全体",
+    scScopeBrowser: "このブラウザー",
+    scSessionBrowser: "ログイン有効期間（このブラウザー）",
+    scSessionGlobal: "ログイン有効期間（全体の既定値）",
+    scTtl: "期間",
+    scTtlGlobal: "既定の期間",
+    scFollowGlobal: "全体の既定値に従う（このブラウザーの設定を消去）",
+    scCustom: "任意の分数…",
+    scEffLocal: "このブラウザー：{v}（個別設定、全体の値には従いません）",
+    scEffGlobal: "このブラウザー：全体の既定値に従う（{v}）",
+    scHelpLocal: "このブラウザーの<b>今後のログイン</b>にのみ影響します。サーバー側の全体既定値は変更されず、他のブラウザーにも影響しません。発行済みセッションの有効期限は変わりません。「全体の既定値に従う」でこのブラウザーの設定を消去できます。",
+    scHelpGlobal: "このブラウザーに個別設定がない場合、および期間を送らない旧クライアントのフォールバックとして使用します。範囲は 5～43200 分。変更は今後のログインにのみ影響し、発行済みセッションは変わりません。",
+    scMin30: "30 分",
+    scHour1: "1 時間",
+    scHour8: "8 時間",
+    scHour24: "24 時間",
+    scDay7: "7 日",
+    scDay30: "30 日",
+    scNotifyRules: "通知ルール",
+    scNotifyHelp: "データベースに保存され即時反映されます。機密項目はサーバー側のみに保存され、画面には設定済みかどうかだけを表示します。空欄のままは変更なし、「清除」を選ぶと保存値が削除されます。",
+    scNotifyEnabled: "通知の有効化",
+    scNotifyTypes: "転送する種類",
+    scTypeVerify: "認証コード",
+    scTypeSms: "SMS",
+    scTypeNotify: "通知",
+    scRetry: "失敗時の再試行",
+    scNoRetry: "再試行しない",
+    scRetryN: "{n} 回",
+    scRetryHelp: "転送失敗後の最大再試行回数",
+    scLink: "遷移リンク",
+    scLinkPh: "https://…（任意、通知本文に付加）",
+    scConfigured: "設定済み",
+    scNotConfigured: "未設定",
+    scFromDb: "データベース",
+    scFromEnv: "環境変数",
+    scEnable: "有効",
+    scTest: "テスト",
+    scSendTest: "テスト通知を送信",
+    scTestSaved: "テスト通知は<b>保存済み</b>の設定を使います。認証情報を変更したら先に保存してください。",
+    scTestOk: "テスト通知を送信しました",
+    scTestNotCfg: "このチャネルは未設定です。先に認証情報を保存してください",
+    scTestFail: "送信に失敗しました",
+    scTestFailMsg: "送信に失敗しました：{m}",
+    scImportEnv: "環境変数から取り込む",
+    scImported: "{n} 件の設定を取り込みました",
+    scNoImport: "取り込める設定はありません",
+    scImportFail: "取り込みに失敗しました",
+    scImportFailMsg: "取り込みに失敗しました：{e}",
+    scSensitivePhCfg: "設定済み {m}（空欄なら変更なし）",
+    scSensitivePhNew: "未設定（入力後に保存）",
+    scClear: "消去",
+    scRetention: "メッセージ保持",
+    scDays: "保持日数",
+    scDaysHelp: "定期削除はこの日数を超えたメッセージを削除します（1～3650 日）。短くすると削除が早まり、元に戻せません。",
+    scArea: "番号の地域情報",
+    scAreaEnable: "照会を有効化",
+    scAreaApi: "API エンドポイント",
+    scAreaApiPh: "空欄なら内蔵の無料 API を使用",
+    scAreaHelp: "独自のエンドポイントは {number} プレースホルダーに対応している必要があります（http/https）。無効にすると一覧に地域情報は表示されません。空欄は内蔵の無料 API です。",
+    scTokenTitle: "接続トークン",
+    scTokenHelp: "取り込み側は接続トークンで認証します。名前付きトークンは作成・更新・失効が個別にでき、失効後は即座に無効になります。",
+    scManage: "管理",
+    scOpenTokens: "接続トークン管理を開く",
+    scTokenAlert: "トークンの平文は作成時に一度だけ表示されます。このページは値を読み取り・表示しません。",
+    scLoginGuard: "ログイン保護",
+    scLoginGuardHelp: "パスワードを 5 回間違えると 10 分間ロックされます。セッションは署名付きステートレストークンで、ログアウトは Cookie を消すだけです。ポリシーはデプロイ設定で決まります。",
+    scResetSession: "このブラウザーの設定を消去し、全体の既定値を 30 分に戻す",
+    scResetNotify: "通知を有効化、全種類を選択、再試行 0、リンクを消去（チャネルの認証情報は変更なし）",
+    scResetBiz: "保持 30 日、地域照会を有効、独自エンドポイントを消去",
+    scResetConfirm: "既定値に戻します：{what}。「保存」を押すまで書き込みは行われません。続行しますか？",
+    scResetNoDefault: "このグループに既定値はありません",
+    scResetFilled: "既定値を入力しました。「保存」で反映されます",
+    scCancelDone: "最後に保存した値に戻しました",
+    scNoChanges: "保存する変更はありません",
+    scNoSave: "このグループは保存不要です",
+    scReadFail: "設定の読み込みに失敗しました",
+    scSaveFail: "保存に失敗しました",
+    scSaveFailMsg: "保存に失敗しました：{e}",
+    scRevisionConflict: "別のセッションで設定が変更されました。閉じて開き直してから保存してください",
+    scSavedTtl: "保存しました（次回ログインから有効）",
+    scSavedTtlGlobal: "保存しました（このブラウザーの期間は次回ログインから有効）",
+    scKeepOneType: "転送する種類を 1 つ以上選んでください",
+    scDaysInvalid: "保持日数は 1～3650 です",
+    scApiInvalid: "エンドポイントは http/https の完全な URL か空欄にしてください",
+    scTtlRange: "期間は 5～43200 分（30 日）です",
+    scCloseConfirm: "未保存の変更があります。閉じると失われます。閉じますか？",
+    scSwitchConfirm: "このグループに未保存の変更があり、破棄されます。続行しますか？",
+    nfWebhook: "Webhook URL",
+    nfSecret: "署名シークレット",
+    nfSendkey: "SendKey",
+    nfToken: "トークン / キー",
+    nfBotToken: "Bot トークン",
+    nfChatId: "チャット ID",
+    nfDeviceKey: "デバイスキー",
+    nfUrl: "サービス URL",
+    nfApiKey: "API キー",
+    nfMailTo: "宛先",
+    nfMailFrom: "差出人",
+    nfUrls: "Webhook URL",
+    nfTemplate: "リクエスト本文テンプレート",
+    nfHeaders: "カスタムヘッダー"
+    },
+    "ko": {
+    scMenuCenter: "설정 센터",
+    scMenuTtl: "로그인 유효기간",
+    scGrpAccess: "연결",
+    scMenuTokens: "접속 토큰",
+    scTitle: "설정 센터",
+    scDirty: "저장 안 됨",
+    scTabSession: "로그인 및 세션",
+    scTabNotify: "알림",
+    scTabBiz: "데이터 및 운영",
+    scTabSec: "보안",
+    scReset: "기본값 복원",
+    scScopeGlobal: "전역",
+    scScopeBrowser: "이 브라우저",
+    scSessionBrowser: "로그인 유효기간(이 브라우저)",
+    scSessionGlobal: "로그인 유효기간(전역 기본값)",
+    scTtl: "기간",
+    scTtlGlobal: "기본 기간",
+    scFollowGlobal: "전역 기본값 따르기(이 브라우저 설정 지우기)",
+    scCustom: "사용자 지정 분…",
+    scEffLocal: "이 브라우저: {v}(별도 설정, 전역 값을 따르지 않음)",
+    scEffGlobal: "이 브라우저: 전역 기본값 따르는 중({v})",
+    scHelpLocal: "이 브라우저의 <b>이후 새 로그인</b>에만 적용됩니다. 서버 전역 기본값을 바꾸지 않으며 다른 브라우저에 영향이 없습니다. 이미 발급된 세션의 만료 시각은 그대로입니다. \"전역 기본값 따르기\"를 선택하면 이 브라우저 설정이 지워집니다.",
+    scHelpGlobal: "이 브라우저에 별도 설정이 없을 때, 그리고 기간을 보내지 않는 구형 클라이언트의 대체값으로 사용됩니다. 범위 5~43200분. 변경은 이후 새 로그인에만 적용되며 이미 발급된 세션은 그대로입니다.",
+    scMin30: "30분",
+    scHour1: "1시간",
+    scHour8: "8시간",
+    scHour24: "24시간",
+    scDay7: "7일",
+    scDay30: "30일",
+    scNotifyRules: "알림 규칙",
+    scNotifyHelp: "데이터베이스에 저장되어 즉시 적용됩니다. 민감 항목은 서버에만 저장되고 화면에는 설정 여부만 표시됩니다. 빈 값은 변경 없음, \"지우기\"를 선택하면 저장값이 삭제됩니다.",
+    scNotifyEnabled: "알림 사용",
+    scNotifyTypes: "전달 유형",
+    scTypeVerify: "인증번호",
+    scTypeSms: "SMS",
+    scTypeNotify: "알림",
+    scRetry: "실패 시 재시도",
+    scNoRetry: "재시도 안 함",
+    scRetryN: "{n}회",
+    scRetryHelp: "전달 실패 후 최대 재시도 횟수",
+    scLink: "이동 링크",
+    scLinkPh: "https://…(선택, 알림 본문에 추가)",
+    scConfigured: "설정됨",
+    scNotConfigured: "설정 안 됨",
+    scFromDb: "데이터베이스",
+    scFromEnv: "환경 변수",
+    scEnable: "사용",
+    scTest: "테스트",
+    scSendTest: "테스트 알림 보내기",
+    scTestSaved: "테스트 알림은 <b>저장된</b> 설정을 사용합니다. 자격 증명을 바꾼 뒤 먼저 저장하세요.",
+    scTestOk: "테스트 알림을 보냈습니다",
+    scTestNotCfg: "이 채널은 아직 설정되지 않았습니다. 먼저 자격 증명을 저장하세요",
+    scTestFail: "전송 실패",
+    scTestFailMsg: "전송 실패: {m}",
+    scImportEnv: "환경 변수에서 가져오기",
+    scImported: "설정 {n}개를 가져왔습니다",
+    scNoImport: "가져올 설정이 없습니다",
+    scImportFail: "가져오기 실패",
+    scImportFailMsg: "가져오기 실패: {e}",
+    scSensitivePhCfg: "설정됨 {m}(빈 값이면 유지)",
+    scSensitivePhNew: "설정 안 됨 — 값을 입력하고 저장",
+    scClear: "지우기",
+    scRetention: "메시지 보관",
+    scDays: "보관 일수",
+    scDaysHelp: "예약 정리는 이 일수를 초과한 메시지를 삭제합니다(1~3650일). 줄이면 정리가 빨라지며 되돌릴 수 없습니다.",
+    scArea: "번호 지역 정보",
+    scAreaEnable: "조회 사용",
+    scAreaApi: "API 엔드포인트",
+    scAreaApiPh: "빈 값이면 내장 무료 API 사용",
+    scAreaHelp: "사용자 지정 엔드포인트는 {number} 자리표시자를 지원해야 합니다(http/https). 끄면 목록에 지역 정보가 표시되지 않습니다. 빈 값은 내장 무료 API입니다.",
+    scTokenTitle: "접속 토큰",
+    scTokenHelp: "수집 측은 접속 토큰으로 인증합니다. 이름 있는 토큰은 생성·갱신·해지가 가능하며 해지 즉시 무효가 됩니다.",
+    scManage: "관리",
+    scOpenTokens: "접속 토큰 관리 열기",
+    scTokenAlert: "토큰 평문은 생성 시 한 번만 표시됩니다. 이 페이지는 값을 읽거나 표시하지 않습니다.",
+    scLoginGuard: "로그인 보호",
+    scLoginGuardHelp: "비밀번호를 5회 틀리면 10분간 잠깁니다. 세션은 서명된 무상태 토큰이며 로그아웃은 브라우저 쿠키만 지웁니다. 정책은 배포 설정을 따릅니다.",
+    scResetSession: "이 브라우저 설정을 지우고 전역 기본값을 30분으로 되돌립니다",
+    scResetNotify: "알림 사용, 모든 유형 선택, 재시도 0, 링크 지우기(채널 자격 증명은 유지)",
+    scResetBiz: "보관 30일, 지역 조회 사용, 사용자 지정 엔드포인트 지우기",
+    scResetConfirm: "기본값 복원: {what}. \"저장\"을 눌러야 반영됩니다. 계속할까요?",
+    scResetNoDefault: "이 그룹은 복원할 기본값이 없습니다",
+    scResetFilled: "기본값을 채웠습니다. 저장을 눌러 적용하세요",
+    scCancelDone: "마지막으로 저장한 값으로 되돌렸습니다",
+    scNoChanges: "저장할 변경이 없습니다",
+    scNoSave: "이 그룹은 저장이 필요 없습니다",
+    scReadFail: "설정을 불러오지 못했습니다",
+    scSaveFail: "저장 실패",
+    scSaveFailMsg: "저장 실패: {e}",
+    scRevisionConflict: "다른 세션에서 설정이 변경되었습니다. 닫았다가 다시 열고 저장하세요",
+    scSavedTtl: "저장했습니다(다음 로그인부터 적용)",
+    scSavedTtlGlobal: "저장했습니다(이 브라우저 기간은 다음 로그인부터 적용)",
+    scKeepOneType: "전달 유형을 하나 이상 선택하세요",
+    scDaysInvalid: "보관 일수는 1~3650입니다",
+    scApiInvalid: "엔드포인트는 http/https 전체 URL 또는 빈 값이어야 합니다",
+    scTtlRange: "기간은 5~43200분(30일)입니다",
+    scCloseConfirm: "저장되지 않은 변경이 있습니다. 닫으면 사라집니다. 닫을까요?",
+    scSwitchConfirm: "이 그룹에 저장되지 않은 변경이 있으며 사라집니다. 계속할까요?",
+    nfWebhook: "Webhook URL",
+    nfSecret: "서명 비밀 키",
+    nfSendkey: "SendKey",
+    nfToken: "토큰 / 키",
+    nfBotToken: "Bot 토큰",
+    nfChatId: "채팅 ID",
+    nfDeviceKey: "기기 키",
+    nfUrl: "서비스 URL",
+    nfApiKey: "API 키",
+    nfMailTo: "수신자",
+    nfMailFrom: "발신자",
+    nfUrls: "Webhook URL",
+    nfTemplate: "요청 본문 템플릿",
+    nfHeaders: "사용자 지정 헤더"
+    },
+    "es": {
+    scMenuCenter: "Centro de ajustes",
+    scMenuTtl: "Validez de sesión",
+    scGrpAccess: "Acceso",
+    scMenuTokens: "Tokens de acceso",
+    scTitle: "Centro de ajustes",
+    scDirty: "Sin guardar",
+    scTabSession: "Acceso y sesión",
+    scTabNotify: "Notificaciones",
+    scTabBiz: "Datos y operación",
+    scTabSec: "Seguridad",
+    scReset: "Restaurar valores",
+    scScopeGlobal: "Global",
+    scScopeBrowser: "Este navegador",
+    scSessionBrowser: "Validez de sesión (este navegador)",
+    scSessionGlobal: "Validez de sesión (predeterminado global)",
+    scTtl: "Duración",
+    scTtlGlobal: "Duración predeterminada",
+    scFollowGlobal: "Seguir el valor global (borrar ajuste de este navegador)",
+    scCustom: "Minutos personalizados…",
+    scEffLocal: "Este navegador: {v} (ajuste propio, no sigue el global)",
+    scEffGlobal: "Este navegador: sigue el valor global ({v})",
+    scHelpLocal: "Solo afecta a <b>nuevos inicios de sesión en este navegador</b>. No cambia el valor global del servidor ni afecta a otros navegadores; las sesiones ya emitidas conservan su caducidad. Elija \"Seguir el valor global\" para borrar este ajuste.",
+    scHelpGlobal: "Se usa cuando un navegador no tiene ajuste propio y como respaldo para clientes antiguos que no envían duración. Rango 5–43200 minutos; los cambios solo afectan nuevos inicios de sesión.",
+    scMin30: "30 minutos",
+    scHour1: "1 hora",
+    scHour8: "8 horas",
+    scHour24: "24 horas",
+    scDay7: "7 días",
+    scDay30: "30 días",
+    scNotifyRules: "Reglas de notificación",
+    scNotifyHelp: "Se guarda en la base de datos y se aplica al instante. Los campos sensibles se guardan solo en el servidor; la página muestra si están configurados. Dejar vacío no cambia nada; marque \"Borrar\" para eliminarlo.",
+    scNotifyEnabled: "Notificaciones activas",
+    scNotifyTypes: "Tipos reenviados",
+    scTypeVerify: "Códigos",
+    scTypeSms: "SMS",
+    scTypeNotify: "Notificaciones",
+    scRetry: "Reintentos",
+    scNoRetry: "Sin reintentos",
+    scRetryN: "{n} veces",
+    scRetryHelp: "Máximo de reintentos tras un fallo",
+    scLink: "Enlace de acción",
+    scLinkPh: "https://… (opcional, se añade al aviso)",
+    scConfigured: "Configurado",
+    scNotConfigured: "Sin configurar",
+    scFromDb: "Base de datos",
+    scFromEnv: "Variable de entorno",
+    scEnable: "Activo",
+    scTest: "Probar",
+    scSendTest: "Enviar aviso de prueba",
+    scTestSaved: "El aviso de prueba usa la configuración <b>guardada</b>: guarde antes de probar.",
+    scTestOk: "Aviso de prueba enviado",
+    scTestNotCfg: "Este canal aún no está configurado: guarde sus credenciales",
+    scTestFail: "Error al enviar",
+    scTestFailMsg: "Error al enviar: {m}",
+    scImportEnv: "Importar desde variables de entorno",
+    scImported: "Se importaron {n} ajustes",
+    scNoImport: "No hay ajustes importables",
+    scImportFail: "Error al importar",
+    scImportFailMsg: "Error al importar: {e}",
+    scSensitivePhCfg: "Configurado {m} (vacío no cambia)",
+    scSensitivePhNew: "Sin configurar: introduzca y guarde",
+    scClear: "Borrar",
+    scRetention: "Retención de mensajes",
+    scDays: "Días de retención",
+    scDaysHelp: "La limpieza programada borra mensajes más antiguos, rango 1–3650 días. Reducirlo acelera el borrado y no se puede deshacer.",
+    scArea: "Ubicación del número",
+    scAreaEnable: "Activar consulta",
+    scAreaApi: "Dirección de API",
+    scAreaApiPh: "Vacío = API gratuita integrada",
+    scAreaHelp: "Un endpoint propio debe admitir el marcador {number} (http/https). Si se desactiva, la lista no muestra ubicaciones. Vacío = API gratuita integrada.",
+    scTokenTitle: "Tokens de acceso",
+    scTokenHelp: "Los clientes se autentican con tokens. Los tokens con nombre se crean, rotan y revocan por origen; al revocar, dejan de funcionar.",
+    scManage: "Gestionar",
+    scOpenTokens: "Abrir gestor de tokens",
+    scTokenAlert: "El texto del token se muestra solo al crearlo; esta página no lee ni muestra tokens.",
+    scLoginGuard: "Protección de acceso",
+    scLoginGuardHelp: "Bloqueo de 10 minutos tras 5 contraseñas erróneas. Las sesiones son tokens firmados sin estado; salir solo borra la cookie. Estas políticas vienen de la configuración de despliegue.",
+    scResetSession: "borrar el ajuste de este navegador y volver el global a 30 minutos",
+    scResetNotify: "reactivar avisos, todos los tipos, 0 reintentos, enlace vacío (credenciales intactas)",
+    scResetBiz: "retención 30 días, consulta activada, endpoint vacío",
+    scResetConfirm: "Restaurar valores: {what}. No se guarda hasta pulsar Guardar. ¿Continuar?",
+    scResetNoDefault: "Este grupo no tiene valores por defecto",
+    scResetFilled: "Valores por defecto listos: pulse Guardar",
+    scCancelDone: "Restaurado a lo último guardado",
+    scNoChanges: "Nada que guardar",
+    scNoSave: "Este grupo no requiere guardar",
+    scReadFail: "No se pudieron cargar los ajustes",
+    scSaveFail: "Error al guardar",
+    scSaveFailMsg: "Error al guardar: {e}",
+    scRevisionConflict: "Los ajustes cambiaron en otra sesión: cierre y reabra antes de guardar",
+    scSavedTtl: "Guardado (se aplica al próximo inicio de sesión)",
+    scSavedTtlGlobal: "Guardado (la duración de este navegador se aplica al próximo inicio)",
+    scKeepOneType: "Mantenga al menos un tipo",
+    scDaysInvalid: "La retención debe ser 1–3650",
+    scApiInvalid: "El endpoint debe ser una URL http/https completa o vacío",
+    scTtlRange: "La duración debe ser 5–43200 minutos (30 días)",
+    scCloseConfirm: "Hay cambios sin guardar que se perderán. ¿Cerrar de todos modos?",
+    scSwitchConfirm: "Este grupo tiene cambios sin guardar que se descartarán. ¿Continuar?",
+    nfWebhook: "URL de webhook",
+    nfSecret: "Secreto de firma",
+    nfSendkey: "SendKey",
+    nfToken: "Token / clave",
+    nfBotToken: "Token del bot",
+    nfChatId: "ID de chat",
+    nfDeviceKey: "Clave del dispositivo",
+    nfUrl: "URL del servicio",
+    nfApiKey: "Clave de API",
+    nfMailTo: "Destinatario",
+    nfMailFrom: "Remitente",
+    nfUrls: "URL de webhook",
+    nfTemplate: "Plantilla del cuerpo",
+    nfHeaders: "Cabeceras personalizadas"
+    },
+    "fr": {
+    scMenuCenter: "Centre de réglages",
+    scMenuTtl: "Durée de session",
+    scGrpAccess: "Accès",
+    scMenuTokens: "Jetons d'accès",
+    scTitle: "Centre de réglages",
+    scDirty: "Non enregistré",
+    scTabSession: "Connexion et session",
+    scTabNotify: "Notifications",
+    scTabBiz: "Données et exploitation",
+    scTabSec: "Sécurité",
+    scReset: "Rétablir les valeurs",
+    scScopeGlobal: "Global",
+    scScopeBrowser: "Ce navigateur",
+    scSessionBrowser: "Durée de session (ce navigateur)",
+    scSessionGlobal: "Durée de session (valeur globale)",
+    scTtl: "Durée",
+    scTtlGlobal: "Durée par défaut",
+    scFollowGlobal: "Suivre la valeur globale (effacer ce navigateur)",
+    scCustom: "Minutes personnalisées…",
+    scEffLocal: "Ce navigateur : {v} (valeur propre, ne suit pas le global)",
+    scEffGlobal: "Ce navigateur : suit la valeur globale ({v})",
+    scHelpLocal: "Ne concerne que les <b>nouvelles connexions de ce navigateur</b>. La valeur globale du serveur n'est pas modifiée et les autres navigateurs ne sont pas affectés ; les sessions déjà émises gardent leur expiration. Choisissez « Suivre la valeur globale » pour effacer ce réglage.",
+    scHelpGlobal: "Utilisée si un navigateur n'a pas de valeur propre, et comme repli pour les anciens clients sans durée. Plage 5–43200 minutes ; les changements ne touchent que les nouvelles connexions.",
+    scMin30: "30 minutes",
+    scHour1: "1 heure",
+    scHour8: "8 heures",
+    scHour24: "24 heures",
+    scDay7: "7 jours",
+    scDay30: "30 jours",
+    scNotifyRules: "Règles de notification",
+    scNotifyHelp: "Enregistré en base et appliqué immédiatement. Les champs sensibles restent côté serveur ; la page indique seulement s'ils sont configurés. Laisser vide ne change rien ; cochez « Effacer » pour supprimer.",
+    scNotifyEnabled: "Notifications activées",
+    scNotifyTypes: "Types transférés",
+    scTypeVerify: "Codes de vérification",
+    scTypeSms: "SMS",
+    scTypeNotify: "Notifications",
+    scRetry: "Nouvelles tentatives",
+    scNoRetry: "Aucune",
+    scRetryN: "{n} fois",
+    scRetryHelp: "Nombre maximal de tentatives après échec",
+    scLink: "Lien d'action",
+    scLinkPh: "https://… (facultatif, ajouté au message)",
+    scConfigured: "Configuré",
+    scNotConfigured: "Non configuré",
+    scFromDb: "Base de données",
+    scFromEnv: "Variable d'environnement",
+    scEnable: "Activer",
+    scTest: "Tester",
+    scSendTest: "Envoyer un test",
+    scTestSaved: "Le test utilise la configuration <b>enregistrée</b> : enregistrez avant de tester.",
+    scTestOk: "Test envoyé",
+    scTestNotCfg: "Ce canal n'est pas encore configuré : enregistrez ses identifiants",
+    scTestFail: "Échec de l'envoi",
+    scTestFailMsg: "Échec de l'envoi : {m}",
+    scImportEnv: "Importer depuis les variables d'environnement",
+    scImported: "{n} réglages importés",
+    scNoImport: "Aucun réglage à importer",
+    scImportFail: "Échec de l'import",
+    scImportFailMsg: "Échec de l'import : {e}",
+    scSensitivePhCfg: "Configuré {m} (vide = inchangé)",
+    scSensitivePhNew: "Non configuré : saisissez puis enregistrez",
+    scClear: "Effacer",
+    scRetention: "Conservation des messages",
+    scDays: "Jours de conservation",
+    scDaysHelp: "Le nettoyage planifié supprime les messages plus anciens, plage 1–3650 jours. Réduire accélère la suppression, sans retour possible.",
+    scArea: "Localisation du numéro",
+    scAreaEnable: "Activer la recherche",
+    scAreaApi: "Adresse d'API",
+    scAreaApiPh: "Vide = API gratuite intégrée",
+    scAreaHelp: "Un point d'accès personnalisé doit gérer le paramètre {number} (http/https). Désactivé, la liste n'affiche plus la localisation. Vide = API gratuite intégrée.",
+    scTokenTitle: "Jetons d'accès",
+    scTokenHelp: "Les clients s'authentifient par jetons. Les jetons nommés se créent, tournent et révoquent par source ; une révocation est immédiate.",
+    scManage: "Gérer",
+    scOpenTokens: "Ouvrir la gestion des jetons",
+    scTokenAlert: "Le jeton en clair n'est affiché qu'à la création ; cette page ne lit ni n'affiche aucun jeton.",
+    scLoginGuard: "Protection de la connexion",
+    scLoginGuardHelp: "Verrouillage 10 minutes après 5 mots de passe erronés. Les sessions sont des jetons signés sans état ; la déconnexion ne vide que le cookie. Ces règles viennent du déploiement.",
+    scResetSession: "effacer ce navigateur et remettre la valeur globale à 30 minutes",
+    scResetNotify: "réactiver les notifications, tous les types, 0 tentative, lien vide (identifiants inchangés)",
+    scResetBiz: "conservation 30 jours, localisation activée, endpoint effacé",
+    scResetConfirm: "Rétablir les valeurs : {what}. Rien n'est écrit avant « Enregistrer ». Continuer ?",
+    scResetNoDefault: "Aucune valeur par défaut dans ce groupe",
+    scResetFilled: "Valeurs par défaut remplies : cliquez sur Enregistrer",
+    scCancelDone: "Valeurs enregistrées rétablies",
+    scNoChanges: "Aucune modification à enregistrer",
+    scNoSave: "Ce groupe ne nécessite aucun enregistrement",
+    scReadFail: "Échec du chargement des réglages",
+    scSaveFail: "Échec de l'enregistrement",
+    scSaveFailMsg: "Échec de l'enregistrement : {e}",
+    scRevisionConflict: "Réglages modifiés dans une autre session : rouvrez avant d'enregistrer",
+    scSavedTtl: "Enregistré (applicable à la prochaine connexion)",
+    scSavedTtlGlobal: "Enregistré (la durée de ce navigateur s'applique à la prochaine connexion)",
+    scKeepOneType: "Conservez au moins un type",
+    scDaysInvalid: "La conservation doit être 1–3650",
+    scApiInvalid: "L'adresse doit être une URL http/https complète, ou vide",
+    scTtlRange: "La durée doit être 5–43200 minutes (30 jours)",
+    scCloseConfirm: "Des modifications non enregistrées seront perdues. Fermer quand même ?",
+    scSwitchConfirm: "Des modifications non enregistrées seront abandonnées. Continuer ?",
+    nfWebhook: "URL du webhook",
+    nfSecret: "Secret de signature",
+    nfSendkey: "SendKey",
+    nfToken: "Jeton / clé",
+    nfBotToken: "Jeton du bot",
+    nfChatId: "ID de discussion",
+    nfDeviceKey: "Clé de l'appareil",
+    nfUrl: "URL du service",
+    nfApiKey: "Clé d'API",
+    nfMailTo: "Destinataire",
+    nfMailFrom: "Expéditeur",
+    nfUrls: "URL du webhook",
+    nfTemplate: "Modèle de corps",
+    nfHeaders: "En-têtes personnalisés"
+    },
+    "de": {
+    scMenuCenter: "Einstellungszentrum",
+    scMenuTtl: "Anmeldedauer",
+    scGrpAccess: "Zugriff",
+    scMenuTokens: "Zugriffstoken",
+    scTitle: "Einstellungszentrum",
+    scDirty: "Ungespeichert",
+    scTabSession: "Anmeldung & Sitzung",
+    scTabNotify: "Benachrichtigungen",
+    scTabBiz: "Daten & Betrieb",
+    scTabSec: "Sicherheit",
+    scReset: "Standard wiederherstellen",
+    scScopeGlobal: "Global",
+    scScopeBrowser: "Dieser Browser",
+    scSessionBrowser: "Anmeldedauer (dieser Browser)",
+    scSessionGlobal: "Anmeldedauer (globaler Standard)",
+    scTtl: "Dauer",
+    scTtlGlobal: "Standarddauer",
+    scFollowGlobal: "Globalem Standard folgen (diesen Browser zurücksetzen)",
+    scCustom: "Individuelle Minuten…",
+    scEffLocal: "Dieser Browser: {v} (eigener Wert, folgt nicht global)",
+    scEffGlobal: "Dieser Browser: folgt globalem Standard ({v})",
+    scHelpLocal: "Wirkt nur auf <b>neue Anmeldungen in diesem Browser</b>. Der serverseitige globale Standard bleibt unverändert, andere Browser sind nicht betroffen; bereits ausgestellte Sitzungen behalten ihr Ablaufdatum. Mit \"Globalem Standard folgen\" wird diese Browsereinstellung gelöscht.",
+    scHelpGlobal: "Wird verwendet, wenn ein Browser keinen eigenen Wert hat, und als Rückfall für alte Clients ohne Dauerangabe. Bereich 5–43200 Minuten; Änderungen gelten nur für neue Anmeldungen.",
+    scMin30: "30 Minuten",
+    scHour1: "1 Stunde",
+    scHour8: "8 Stunden",
+    scHour24: "24 Stunden",
+    scDay7: "7 Tage",
+    scDay30: "30 Tage",
+    scNotifyRules: "Benachrichtigungsregeln",
+    scNotifyHelp: "Wird in der Datenbank gespeichert und sofort wirksam. Sensible Felder liegen nur serverseitig; die Seite zeigt nur, ob sie konfiguriert sind. Leer lassen ändert nichts; \"Löschen\" entfernt den Wert.",
+    scNotifyEnabled: "Benachrichtigungen aktiv",
+    scNotifyTypes: "Weitergeleitete Typen",
+    scTypeVerify: "Bestätigungscodes",
+    scTypeSms: "SMS",
+    scTypeNotify: "Benachrichtigungen",
+    scRetry: "Wiederholen bei Fehler",
+    scNoRetry: "Kein Wiederholen",
+    scRetryN: "{n} Mal",
+    scRetryHelp: "Maximale Wiederholungen nach Fehlschlag",
+    scLink: "Aktionslink",
+    scLinkPh: "https://… (optional, an Benachrichtigung angehängt)",
+    scConfigured: "Konfiguriert",
+    scNotConfigured: "Nicht konfiguriert",
+    scFromDb: "Datenbank",
+    scFromEnv: "Umgebungsvariable",
+    scEnable: "Aktiv",
+    scTest: "Testen",
+    scSendTest: "Testbenachrichtigung senden",
+    scTestSaved: "Testbenachrichtigungen nutzen die <b>gespeicherte</b> Konfiguration: erst speichern, dann testen.",
+    scTestOk: "Testbenachrichtigung gesendet",
+    scTestNotCfg: "Dieser Kanal ist noch nicht konfiguriert – zuerst Zugangsdaten speichern",
+    scTestFail: "Senden fehlgeschlagen",
+    scTestFailMsg: "Senden fehlgeschlagen: {m}",
+    scImportEnv: "Aus Umgebungsvariablen importieren",
+    scImported: "{n} Einstellungen importiert",
+    scNoImport: "Keine importierbaren Einstellungen",
+    scImportFail: "Import fehlgeschlagen",
+    scImportFailMsg: "Import fehlgeschlagen: {e}",
+    scSensitivePhCfg: "Konfiguriert {m} (leer lassen = unverändert)",
+    scSensitivePhNew: "Nicht konfiguriert – eingeben und speichern",
+    scClear: "Löschen",
+    scRetention: "Nachrichtenaufbewahrung",
+    scDays: "Aufbewahrungstage",
+    scDaysHelp: "Die geplante Bereinigung löscht ältere Nachrichten, Bereich 1–3650 Tage. Verringern beschleunigt das Löschen und ist nicht umkehrbar.",
+    scArea: "Nummernstandort",
+    scAreaEnable: "Abfrage aktivieren",
+    scAreaApi: "API-Adresse",
+    scAreaApiPh: "Leer = integrierte kostenlose API",
+    scAreaHelp: "Ein eigener Endpunkt muss den Platzhalter {number} unterstützen (http/https). Deaktiviert zeigt die Liste keinen Standort. Leer = integrierte kostenlose API.",
+    scTokenTitle: "Zugriffstoken",
+    scTokenHelp: "Aufnahme-Clients authentifizieren sich per Token. Benannte Tokens lassen sich je Quelle anlegen, rotieren und widerrufen; ein Widerruf wirkt sofort.",
+    scManage: "Verwalten",
+    scOpenTokens: "Token-Verwaltung öffnen",
+    scTokenAlert: "Der Token im Klartext wird nur beim Anlegen einmal angezeigt; diese Seite liest oder zeigt keine Tokenwerte.",
+    scLoginGuard: "Anmeldeschutz",
+    scLoginGuardHelp: "10 Minuten gesperrt nach 5 falschen Passwörtern. Sitzungen sind signierte zustandslose Token; Abmelden löscht nur das Browser-Cookie. Diese Regeln kommen aus der Deployment-Konfiguration.",
+    scResetSession: "diesen Browser zurücksetzen und global auf 30 Minuten stellen",
+    scResetNotify: "Benachrichtigungen aktiv, alle Typen, 0 Wiederholungen, Link leeren (Zugangsdaten unverändert)",
+    scResetBiz: "Aufbewahrung 30 Tage, Standortabfrage an, Endpunkt leeren",
+    scResetConfirm: "Standard wiederherstellen: {what}. Erst mit Speichern wird geschrieben. Fortfahren?",
+    scResetNoDefault: "Diese Gruppe hat keine Standardwerte",
+    scResetFilled: "Standardwerte gesetzt – mit Speichern übernehmen",
+    scCancelDone: "Auf zuletzt gespeicherte Werte zurückgesetzt",
+    scNoChanges: "Keine Änderungen zu speichern",
+    scNoSave: "Diese Gruppe muss nicht gespeichert werden",
+    scReadFail: "Einstellungen konnten nicht geladen werden",
+    scSaveFail: "Speichern fehlgeschlagen",
+    scSaveFailMsg: "Speichern fehlgeschlagen: {e}",
+    scRevisionConflict: "Einstellungen wurden in einer anderen Sitzung geändert – schließen und neu öffnen",
+    scSavedTtl: "Gespeichert (gilt ab der nächsten Anmeldung)",
+    scSavedTtlGlobal: "Gespeichert (Browsergauer gilt ab der nächsten Anmeldung)",
+    scKeepOneType: "Mindestens einen Typ behalten",
+    scDaysInvalid: "Aufbewahrung muss 1–3650 sein",
+    scApiInvalid: "Die Adresse muss eine vollständige http/https-URL sein oder leer bleiben",
+    scTtlRange: "Dauer muss 5–43200 Minuten sein (30 Tage)",
+    scCloseConfirm: "Ungespeicherte Änderungen gehen verloren. Trotzdem schließen?",
+    scSwitchConfirm: "Nicht gespeicherte Änderungen werden verworfen. Fortfahren?",
+    nfWebhook: "Webhook-URL",
+    nfSecret: "Signaturgeheimnis",
+    nfSendkey: "SendKey",
+    nfToken: "Token / Schlüssel",
+    nfBotToken: "Bot-Token",
+    nfChatId: "Chat-ID",
+    nfDeviceKey: "Geräteschlüssel",
+    nfUrl: "Dienst-URL",
+    nfApiKey: "API-Schlüssel",
+    nfMailTo: "Empfänger",
+    nfMailFrom: "Absender",
+    nfUrls: "Webhook-URL",
+    nfTemplate: "Anfrage-Body-Vorlage",
+    nfHeaders: "Eigene Header"
+    },
+    "pt-BR": {
+    scMenuCenter: "Central de configurações",
+    scMenuTtl: "Validade da sessão",
+    scGrpAccess: "Acesso",
+    scMenuTokens: "Tokens de acesso",
+    scTitle: "Central de configurações",
+    scDirty: "Não salvo",
+    scTabSession: "Login e sessão",
+    scTabNotify: "Notificações",
+    scTabBiz: "Dados e operação",
+    scTabSec: "Segurança",
+    scReset: "Restaurar padrões",
+    scScopeGlobal: "Global",
+    scScopeBrowser: "Este navegador",
+    scSessionBrowser: "Validade da sessão (este navegador)",
+    scSessionGlobal: "Validade da sessão (padrão global)",
+    scTtl: "Duração",
+    scTtlGlobal: "Duração padrão",
+    scFollowGlobal: "Seguir o padrão global (limpar este navegador)",
+    scCustom: "Minutos personalizados…",
+    scEffLocal: "Este navegador: {v} (ajuste próprio, não segue o global)",
+    scEffGlobal: "Este navegador: seguindo o padrão global ({v})",
+    scHelpLocal: "Afeta apenas <b>novos logins neste navegador</b>. Não altera o padrão global do servidor nem afeta outros navegadores; sessões já emitidas mantêm a expiração. Escolha \"Seguir o padrão global\" para limpar este ajuste.",
+    scHelpGlobal: "Usado quando um navegador não tem ajuste próprio e como fallback para clientes antigos sem duração. Faixa 5–43200 minutos; mudanças afetam apenas novos logins.",
+    scMin30: "30 minutos",
+    scHour1: "1 hora",
+    scHour8: "8 horas",
+    scHour24: "24 horas",
+    scDay7: "7 dias",
+    scDay30: "30 dias",
+    scNotifyRules: "Regras de notificação",
+    scNotifyHelp: "Salvo no banco e aplicado na hora. Campos sensíveis ficam só no servidor; a página mostra apenas se estão configurados. Deixar vazio não altera; marque \"Limpar\" para excluir.",
+    scNotifyEnabled: "Notificações ativas",
+    scNotifyTypes: "Tipos encaminhados",
+    scTypeVerify: "Códigos de verificação",
+    scTypeSms: "SMS",
+    scTypeNotify: "Notificações",
+    scRetry: "Repetir em falha",
+    scNoRetry: "Sem repetição",
+    scRetryN: "{n} vezes",
+    scRetryHelp: "Máximo de repetições após falha",
+    scLink: "Link de ação",
+    scLinkPh: "https://… (opcional, anexado à notificação)",
+    scConfigured: "Configurado",
+    scNotConfigured: "Não configurado",
+    scFromDb: "Banco de dados",
+    scFromEnv: "Variável de ambiente",
+    scEnable: "Ativo",
+    scTest: "Testar",
+    scSendTest: "Enviar notificação de teste",
+    scTestSaved: "O teste usa a configuração <b>salva</b>: salve antes de testar.",
+    scTestOk: "Notificação de teste enviada",
+    scTestNotCfg: "Este canal ainda não está configurado: salve as credenciais",
+    scTestFail: "Falha ao enviar",
+    scTestFailMsg: "Falha ao enviar: {m}",
+    scImportEnv: "Importar das variáveis de ambiente",
+    scImported: "{n} ajustes importados",
+    scNoImport: "Nenhum ajuste importável",
+    scImportFail: "Falha ao importar",
+    scImportFailMsg: "Falha ao importar: {e}",
+    scSensitivePhCfg: "Configurado {m} (vazio mantém)",
+    scSensitivePhNew: "Não configurado — insira e salve",
+    scClear: "Limpar",
+    scRetention: "Retenção de mensagens",
+    scDays: "Dias de retenção",
+    scDaysHelp: "A limpeza agendada apaga mensagens mais antigas, faixa 1–3650 dias. Reduzir acelera e não pode ser desfeito.",
+    scArea: "Localização do número",
+    scAreaEnable: "Ativar consulta",
+    scAreaApi: "Endereço da API",
+    scAreaApiPh: "Vazio = API gratuita integrada",
+    scAreaHelp: "Um endpoint próprio deve aceitar o marcador {number} (http/https). Desativado, a lista não mostra localização. Vazio = API gratuita integrada.",
+    scTokenTitle: "Tokens de acesso",
+    scTokenHelp: "Clientes de ingestão autenticam por token. Tokens nomeados podem ser criados, rotacionados e revogados por origem; a revogação é imediata.",
+    scManage: "Gerenciar",
+    scOpenTokens: "Abrir gerenciador de tokens",
+    scTokenAlert: "O token em texto claro aparece só na criação; esta página não lê nem exibe tokens.",
+    scLoginGuard: "Proteção de login",
+    scLoginGuardHelp: "Bloqueio de 10 minutos após 5 senhas erradas. Sessões são tokens assinados sem estado; sair apenas limpa o cookie. Essas regras vêm da configuração de implantação.",
+    scResetSession: "limpar este navegador e redefinir o global para 30 minutos",
+    scResetNotify: "reativar notificações, todos os tipos, 0 repetição, link vazio (credenciais intactas)",
+    scResetBiz: "retenção 30 dias, consulta ativa, endpoint limpo",
+    scResetConfirm: "Restaurar padrões: {what}. Nada é gravado até salvar. Continuar?",
+    scResetNoDefault: "Este grupo não tem padrões",
+    scResetFilled: "Padrões preenchidos — clique em Salvar",
+    scCancelDone: "Restaurado para os últimos valores salvos",
+    scNoChanges: "Nada a salvar",
+    scNoSave: "Este grupo não precisa salvar",
+    scReadFail: "Falha ao carregar ajustes",
+    scSaveFail: "Falha ao salvar",
+    scSaveFailMsg: "Falha ao salvar: {e}",
+    scRevisionConflict: "Ajustes alterados em outra sessão: feche e reabra antes de salvar",
+    scSavedTtl: "Salvo (vale no próximo login)",
+    scSavedTtlGlobal: "Salvo (a duração deste navegador vale no próximo login)",
+    scKeepOneType: "Mantenha ao menos um tipo",
+    scDaysInvalid: "A retenção deve ser 1–3650",
+    scApiInvalid: "O endpoint deve ser uma URL http/https completa ou vazio",
+    scTtlRange: "A duração deve ser 5–43200 minutos (30 dias)",
+    scCloseConfirm: "Há alterações não salvas que serão perdidas. Fechar mesmo assim?",
+    scSwitchConfirm: "Este grupo tem alterações não salvas que serão descartadas. Continuar?",
+    nfWebhook: "URL do webhook",
+    nfSecret: "Segredo de assinatura",
+    nfSendkey: "SendKey",
+    nfToken: "Token / chave",
+    nfBotToken: "Token do bot",
+    nfChatId: "ID do chat",
+    nfDeviceKey: "Chave do dispositivo",
+    nfUrl: "URL do serviço",
+    nfApiKey: "Chave de API",
+    nfMailTo: "Destinatário",
+    nfMailFrom: "Remetente",
+    nfUrls: "URL do webhook",
+    nfTemplate: "Modelo do corpo",
+    nfHeaders: "Cabeçalhos personalizados"
+    }
+  };
+  (function () {
+    for (var _l in SC_I18N) {
+      if (!I18N[_l]) I18N[_l] = {};
+      for (var _k in SC_I18N[_l]) I18N[_l][_k] = SC_I18N[_l][_k];
+    }
+  })();
+  /* 消息列表新增文案（九语种）；与 SC_I18N 同样以独立表合并，不改既有字典结构 */
+  var MSG_I18N = {
+    "zh-CN": {
+    loadMore: "加载更多",
+    loadingMore: "加载中…",
+    noMore: "没有更多了",
+    loadMoreFail: "加载更多失败，请重试",
+    detailBtn: "查看详情",
+    detailTip: "点击查看完整内容",
+    detailFail: "无法打开消息详情",
+    readFail: "标记已读失败"
+    },
+    "zh-TW": {
+    loadMore: "載入更多",
+    loadingMore: "載入中…",
+    noMore: "沒有更多了",
+    loadMoreFail: "載入更多失敗，請重試",
+    detailBtn: "查看詳情",
+    detailTip: "點擊查看完整內容",
+    detailFail: "無法開啟訊息詳情",
+    readFail: "標記已讀失敗"
+    },
+    "en": {
+    loadMore: "Load more",
+    loadingMore: "Loading…",
+    noMore: "No more messages",
+    loadMoreFail: "Failed to load more — retry",
+    detailBtn: "Details",
+    detailTip: "Tap to view the full message",
+    detailFail: "Could not open the message",
+    readFail: "Failed to mark as read"
+    },
+    "ja": {
+    loadMore: "さらに読み込む",
+    loadingMore: "読み込み中…",
+    noMore: "これ以上ありません",
+    loadMoreFail: "追加の読み込みに失敗しました。再試行してください",
+    detailBtn: "詳細",
+    detailTip: "タップして全文を表示",
+    detailFail: "メッセージを開けませんでした",
+    readFail: "既読の更新に失敗しました"
+    },
+    "ko": {
+    loadMore: "더 불러오기",
+    loadingMore: "불러오는 중…",
+    noMore: "더 이상 없습니다",
+    loadMoreFail: "더 불러오기 실패 — 다시 시도하세요",
+    detailBtn: "상세 보기",
+    detailTip: "탭하여 전체 보기",
+    detailFail: "메시지를 열 수 없습니다",
+    readFail: "읽음 표시 실패"
+    },
+    "es": {
+    loadMore: "Cargar más",
+    loadingMore: "Cargando…",
+    noMore: "No hay más",
+    loadMoreFail: "Error al cargar más — reintentar",
+    detailBtn: "Ver detalles",
+    detailTip: "Toca para ver el mensaje completo",
+    detailFail: "No se pudo abrir el mensaje",
+    readFail: "No se pudo marcar como leído"
+    },
+    "fr": {
+    loadMore: "Charger plus",
+    loadingMore: "Chargement…",
+    noMore: "Plus rien",
+    loadMoreFail: "Échec du chargement — réessayer",
+    detailBtn: "Voir le détail",
+    detailTip: "Touchez pour voir le message complet",
+    detailFail: "Impossible d'ouvrir le message",
+    readFail: "Échec du marquage comme lu"
+    },
+    "de": {
+    loadMore: "Mehr laden",
+    loadingMore: "Wird geladen…",
+    noMore: "Keine weiteren",
+    loadMoreFail: "Mehr laden fehlgeschlagen – erneut versuchen",
+    detailBtn: "Details",
+    detailTip: "Tippen für die vollständige Nachricht",
+    detailFail: "Nachricht konnte nicht geöffnet werden",
+    readFail: "Als gelesen markieren fehlgeschlagen"
+    },
+    "pt-BR": {
+    loadMore: "Carregar mais",
+    loadingMore: "Carregando…",
+    noMore: "Não há mais",
+    loadMoreFail: "Falha ao carregar mais — tentar novamente",
+    detailBtn: "Ver detalhes",
+    detailTip: "Toque para ver a mensagem completa",
+    detailFail: "Não foi possível abrir a mensagem",
+    readFail: "Falha ao marcar como lida"
+    }
+  };
+  (function () {
+    for (var _ml in MSG_I18N) {
+      if (!I18N[_ml]) I18N[_ml] = {};
+      for (var _mk in MSG_I18N[_ml]) I18N[_ml][_mk] = MSG_I18N[_ml][_mk];
+    }
+  })();
+  /* 分页会话失效提示（九语种） */
+  var MISC_I18N = {
+    "zh-CN": { cursorStale: "列表已更新（星标变化），已回到顶部重新加载" },
+    "zh-TW": { cursorStale: "清單已更新（星標變化），已回到頂端重新載入" },
+    "en": { cursorStale: "The list changed (star update) — reloaded from the top" },
+    "ja": { cursorStale: "スター変更のため一覧を更新し、先頭から再読み込みしました" },
+    "ko": { cursorStale: "별표 변경으로 목록이 갱신되어 맨 위에서 다시 불러왔습니다" },
+    "es": { cursorStale: "La lista cambió (favoritos); se recargó desde el inicio" },
+    "fr": { cursorStale: "La liste a changé (favoris) ; rechargée depuis le début" },
+    "de": { cursorStale: "Liste geändert (Markierung) – von oben neu geladen" },
+    "pt-BR": { cursorStale: "A lista mudou (favoritos) — recarregada do topo" }
+  };
+  (function () {
+    for (var _ql in MISC_I18N) {
+      if (!I18N[_ql]) I18N[_ql] = {};
+      for (var _qk in MISC_I18N[_ql]) I18N[_ql][_qk] = MISC_I18N[_ql][_qk];
+    }
+  })();
   function T(key, vars) {
     var m = I18N[LANG] || I18N.en;
     var s = m[key];
@@ -2795,7 +4221,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   function buildPerPage() {
     var sel = $("perpage");
     if (!sel) return;
-    var nums = [20, 50, 100], html = "";
+    var nums = [10, 20, 50, 100], html = "";
     for (var i = 0; i < nums.length; i++) html += '<option value="' + nums[i] + '">' + esc(T("perPage", { n: nums[i] })) + '</option>';
     sel.innerHTML = html;
   }
@@ -3185,7 +4611,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       if (window.scrollY > 260) showNewPill(fresh.length);
     }
   }
-  function qs() {
+  function qs(cur) {
     var p = new URLSearchParams();
     if (state.device) p.set("device_id", state.device);
     if (state.src) p.set("source", state.src);
@@ -3193,8 +4619,11 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (state.q) p.set("q", state.q);
     if (state.starOnly) p.set("starred", "1");
     if (state.unreadOnly) p.set("unread", "1");
-    p.set("page", state.page);
+    /* 游标仅用于“加载更多”；首屏/刷新一律按 page，避免历史游标污染筛选条件 */
+    if (cur) p.set("cursor", cur); else p.set("page", state.page);
     p.set("limit", state.limit);
+    /* 列表只取摘要（约 20 字），完整正文由详情接口按需取 */
+    p.set("slim", "1");
     return p.toString();
   }
   function loadDevices() {
@@ -3310,10 +4739,11 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     return "s-other";
   }
   function cardHtml(m, isFresh) {
-    var code = extractCode(m.content);
+    var text = (m.summary !== undefined ? m.summary : m.content) || "";
+    var code = m.code !== undefined ? m.code : extractCode(m.content || "");
     var isSms = (m.source || "sms") === "sms";
     var recv = m.sim_number || m.sim || "";
-    var needFold = String(m.content || "").length > 220;
+    var truncated = !!m.summary_truncated || !!(m.content_len && m.content_len > 20);
     var lbl = isSms ? numLabel(m.sender) : "";
     var snum = isSms ? normalizeNum(m.sender) : "";
     var undot = m.read_at ? "" : '<span class="undot" title="' + esc(T("unread")) + '"></span>';
@@ -3329,8 +4759,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         '<button class="del" data-id="' + m.id + '">' + esc(T("del")) + '</button>' +
       '</div>' +
       (code ? '<div class="code-line">' + esc(T("codeLabel")) + ' <b>' + esc(code) + '</b><button class="copy" data-code="' + esc(code) + '">' + esc(T("copy")) + '</button></div>' : '') +
-      '<div class="line"><span class="content' + (needFold ? " fold" : "") + '">' + linkify(highlight(esc(m.content), state.q)) + '</span>' +
-        (needFold ? '<button class="more" type="button">' + esc(T("more")) + '</button>' : '') + '</div>' +
+      '<div class="line"><span class="content summary" data-id="' + m.id + '" title="' + esc(T("detailTip")) + '">' + linkify(highlight(esc(text), state.q)) + '</span>' +
+        (truncated ? ' <button class="more" type="button" data-id="' + m.id + '">' + esc(T("detailBtn")) + '</button>' : '') + '</div>' +
       '<div class="line foot-line"><span class="time-line" title="' + esc(fmtTime(m.received_at)) + '">' + esc(relTime(m.received_at)) + '</span>' +
         (isSms && recv ? '<span class="recv" title="' + esc(T("recvTip")) + '">' + esc(recv) + '</span>' : '') +
       '</div>' +
@@ -3375,7 +4805,81 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       if (prev && prev.classList && prev.classList.contains("daysep") && !prev.nextElementSibling) prev.parentNode.removeChild(prev);
     }
   }
-  /* 增量：仅同日新消息时 prepend，避免整页重绘导致滚动跳动；跨天/异常回退全量 */
+  /* 仅单页模式（未加载历史）时裁剪轮询新增，避免列表无限增长；
+     一旦用过游标加载历史，则保留已加载内容，避免丢弃历史后游标错位 */
+  function trimToLimitIfSinglePage(listEl) { if (!state.cursor) trimToLimit(listEl); }
+  /* 加载更多：只取下一批（游标），追加而非覆盖；同一 id 去重 */
+  function updateLoadMore(hasMore) {
+    var b = $("loadmore"), end = $("nomore");
+    if (b) {
+      b.hidden = !hasMore;
+      b.disabled = !!state.loadingMore;
+      b.setAttribute("data-loading", state.loadingMore ? "1" : "0");
+      b.textContent = state.loadingMore ? T("loadingMore") : T("loadMore");
+    }
+    if (end) end.hidden = !!hasMore;
+  }
+  function appendCards(items) {
+    var listEl = $("list");
+    if (!listEl) return;
+    var prevDay = "";
+    var cards = listEl.querySelectorAll(".card");
+    if (cards.length) {
+      var last = cards[cards.length - 1];
+      var lb = last.querySelector(".time-line");
+      prevDay = last.getAttribute("data-day") || "";
+    }
+    var html = "", day = prevDay;
+    items.forEach(function (m) {
+      var d = dayLabel(m.received_at);
+      if (d !== day) { html += '<div class="daysep">' + esc(d) + '</div>'; day = d; }
+      html += cardHtml(m, false);
+    });
+    listEl.insertAdjacentHTML("beforeend", html);
+    fillAreas();
+    syncSelBoxes();
+  }
+  function loadMore() {
+    if (state.loadingMore || !state.cursor) return;
+    state.loadingMore = true;
+    updateLoadMore(true);
+    fetch("/api/messages?" + qs(state.cursor))
+      .then(function (r) {
+        if (r.status === 401) { location.reload(); return new Promise(function () {}); }
+        return r.json();
+      })
+      .then(function (res) {
+        if (!res || !res.success) {
+          if (res && res.error === "CURSOR_STALE") {
+            /* 分页会话期间星标集合变化：后台已拒绝续页，回到首屏重载，保证不漏不重 */
+            state.loadingMore = false;
+            state.cursor = "";
+            state.loadMoreDepth = 0;
+            toast(T("cursorStale"));
+            load();
+            return;
+          }
+          throw new Error((res && res.error) || "load failed");
+        }
+        var added = [];
+        (res.list || []).forEach(function (m) {
+          if (state.seen[m.id]) return;
+          state.seen[m.id] = true;
+          state.lastList.push(m);
+          added.push(m);
+        });
+        if (added.length) appendCards(added);
+        state.loadingMore = false;
+        state.cursor = res.next_cursor || "";
+        state.loadMoreDepth += 1;
+        updateLoadMore(!!res.next_cursor);
+      })
+      .catch(function () {
+        state.loadingMore = false;
+        updateLoadMore(true);
+        toast(T("loadMoreFail"));
+      });
+  }
   function prependFresh(fresh, res) {
     var listEl = $("list");
     var top = listEl.querySelector(".card");
@@ -3386,6 +4890,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (newestDay !== oldestDay) return false;
     var block = "", lastDay = null;
     fresh.forEach(function (m) {
+      state.seen[m.id] = true;
       var d = dayLabel(m.received_at);
       if (d !== lastDay) { block += '<div class="daysep">' + esc(d) + '</div>'; lastDay = d; }
       block += cardHtml(m, true);
@@ -3398,7 +4903,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     } else {
       listEl.insertAdjacentHTML("afterbegin", block);
     }
-    trimToLimit(listEl);
+    trimToLimitIfSinglePage(listEl);
     updateMeta(res);
     fillAreas();
     syncSelBoxes();
@@ -3434,7 +4939,14 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   /* 通用弹层 */
   var tokenSecret = null; /* 接入令牌一次性明文：仅存内存变量，closeModal 时置 null 清引用；不落 localStorage/URL/console */
   function openModal(html) { $("modalbody").innerHTML = html; $("modal").hidden = false; }
-  function closeModal() { $("modal").hidden = true; $("modalbody").innerHTML = ""; tokenSecret = null; }
+  function closeModal() {
+    /* 设置中心存在未保存修改时先确认，避免静默丢失；其它弹层（SC.dirty 为 false）行为不变 */
+    if (typeof SC !== "undefined" && SC && SC.dirty) {
+      if (!window.confirm("设置有未保存的修改，关闭后这些修改将丢弃。确定关闭？")) return;
+      SC.dirty = false;
+    }
+    $("modal").hidden = true; $("modalbody").innerHTML = ""; tokenSecret = null;
+  }
   function drow(label, val) {
     return '<div class="drow"><span>' + esc(label) + '</span><span>' + esc(val == null ? "" : val) + '</span></div>';
   }
@@ -3463,8 +4975,19 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     try { localStorage.setItem("sms_labels", JSON.stringify(state.labels)); } catch (e) {}
   }
   function openDetail(id) {
-    var m = msgById(id);
-    if (!m) return;
+    /* slim 列表不含正文：统一按 id 取完整消息，保证详情/复制与摘要一致 */
+    fetch("/api/messages/" + id)
+      .then(function (r) {
+        if (r.status === 401) { location.reload(); return new Promise(function () {}); }
+        return r.json();
+      })
+      .then(function (res) {
+        if (!res || !res.success || !res.item) { toast(T("detailFail")); return; }
+        renderDetail(res.item);
+      })
+      .catch(function () { toast(T("detailFail")); });
+  }
+  function renderDetail(m) {
     var isSms = (m.source || "sms") === "sms";
     var code = extractCode(m.content);
     var snum = normalizeNum(m.sender);
@@ -3490,10 +5013,21 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       '</div>';
     openModal(html);
     if (!wasRead) {
+      /* 现有语义：打开详情自动标记已读；失败则回滚本地状态并提示，不做“假成功” */
       m.read_at = "now";
-      fetch("/api/messages/read", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: m.id, read: true }) }).catch(function () {});
-      var card = $("list").querySelector('.card[data-id="' + m.id + '"]');
-      if (card) { var dot = card.querySelector(".undot"); if (dot) dot.parentNode.removeChild(dot); }
+      fetch("/api/messages/read", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: m.id, read: true }) })
+        .then(function (r) { return r.json(); })
+        .then(function (res) {
+          if (res && res.success) {
+            var card = $("list").querySelector('.card[data-id="' + m.id + '"]');
+            if (card) { var dot = card.querySelector(".undot"); if (dot) dot.parentNode.removeChild(dot); }
+            refreshUnreadCount();
+          } else {
+            m.read_at = null;
+            toast(T("readFail"));
+          }
+        })
+        .catch(function () { m.read_at = null; toast(T("readFail")); });
     }
     $("dstar").onclick = function () { toggleStar(m.id, !m.starred).then(closeModal); };
     $("dread").onclick = function () { toggleRead(m.id, false).then(closeModal); };
@@ -3507,6 +5041,16 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       saveLabel(snum, String(nm).trim());
       closeModal(); load();
     };
+  }
+  /* 未读数以服务端为准（避免只改前端数字） */
+  function refreshUnreadCount() {
+    return fetch("/api/stats").then(function (r) { return r.json(); }).then(function (res) {
+      if (res && res.success && typeof res.unread === "number") {
+        state.unread = res.unread;
+        var el = $("unreadcount");
+        if (el) { el.textContent = state.unread; el.hidden = state.unread <= 0; }
+      }
+    }).catch(function () {});
   }
   /* 免打扰：sms_dnd = {on,start,end}（小时，支持跨夜） */
   function getDND() {
@@ -3677,6 +5221,9 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     try { if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(function () {}); } catch (e) {}
   }
   function load(incremental) {
+    /* 非增量加载（首屏/筛选/分页/刷新）一律重置分页会话：清游标与已加载深度，
+       避免 page 与 cursor 两种模型共享状态互相污染 */
+    if (!incremental) { state.cursor = ""; state.loadMoreDepth = 0; }
     var q = qs();
     return fetch("/api/messages?" + q)
       .then(function (r) {
@@ -3689,7 +5236,21 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         if (!res.success) throw new Error(res.error || "load failed");
         state.total = res.total; state.pages = res.pages;
         var list = res.list || [];
+        /* 已加载历史时：轮询无新消息 → 保持当前列表与游标不变（不破坏历史分页位置） */
+        var preFresh = state.inited ? list.filter(function (m) { return m.id > state.notifiedId; }) : [];
+        if (incremental && state.loadMoreDepth > 0 && !preFresh.length) {
+          if (typeof res.unread === "number") { state.unread = res.unread; }
+          refreshUnreadCount();
+          return;
+        }
         state.lastList = list;
+        state.seen = {};
+        list.forEach(function (m) { state.seen[m.id] = true; });
+        state.cursor = res.next_cursor || "";
+        state.loadMoreDepth = 0;
+        updateLoadMore(!!res.next_cursor);
+        if (typeof res.unread === "number") { state.unread = res.unread; }
+        refreshUnreadCount();
         var freshSet = {};
         /* 新消息识别：lastId 为轮询游标（防忙循环），notifiedId 为已通知基线 */
         if (!state.inited) {
@@ -3755,7 +5316,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   $("next").onclick = function () { if (state.page < state.pages) { state.page++; load(); } };
   $("src").onchange = function () { state.src = $("src").value; state.page = 1; load(); };
   $("range").onchange = function () { state.range = $("range").value; state.page = 1; load(); };
-  $("perpage").onchange = function () { state.limit = parseInt($("perpage").value, 10) || 20; state.page = 1; load(); };
+  $("perpage").onchange = function () { state.limit = parseInt($("perpage").value, 10) || 10; state.page = 1; state.cursor = ""; load(); };
   function doJump() {
     var n = parseInt($("jump").value, 10);
     if (!Number.isInteger(n)) return;
@@ -3765,7 +5326,15 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   $("gojump").onclick = doJump;
   $("jump").addEventListener("keydown", function (e) { if (e.key === "Enter") doJump(); });
   state.range = $("range").value = "";
-  state.limit = parseInt($("perpage").value, 10) || 20;
+  state.limit = parseInt($("perpage").value, 10) || 10;
+  if ($("loadmore")) $("loadmore").onclick = loadMore;
+  if ($("unreadbtn")) $("unreadbtn").onclick = function () {
+    state.unreadOnly = !state.unreadOnly;
+    $("unreadbtn").setAttribute("data-on", state.unreadOnly ? "1" : "0");
+    var ub = $("unreadonly");
+    if (ub) ub.classList.toggle("on", state.unreadOnly);
+    state.page = 1; state.cursor = ""; load();
+  };
   /* 导出：按当前筛选条件下载 CSV / JSON（附件下载，不跳转页面） */
   function exportUrl(fmt) {
     var p = new URLSearchParams();
@@ -3853,247 +5422,413 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (state.sound) beep();
     toast(state.sound ? T("soundOnMsg") : T("soundOffMsg"));
   };
-  /* ---------- 会话时长面板（本浏览器独立配置）：设置菜单入口，复用弹层 ----------
-     配置存浏览器 localStorage（键 sms_ttl_min），登录请求体随声明 session_ttl_minutes，
-     服务端校验 5~43200 后按其独立签发 exp（Cookie Max-Age 与 exp 同源）。不写服务端：
-     改一个浏览器不影响其他浏览器；「跟随全局默认」删除本地键，登录回退 settings 全局值（兼容旧客户端）。
-     每 Token exp 签发时确定、不可延长：修改配置只影响本浏览器之后的新登录。 */
-  var TTL_PRESETS = [["30", "30 分钟"], ["60", "1 小时"], ["480", "8 小时"], ["1440", "24 小时"], ["10080", "7 天"], ["43200", "30 天"]];
+  /* ---------- 设置中心（DS v1）：统一信息架构 / 作用域标识 / 渐进式说明 / 保存·取消·重置 ----------
+     作用域：全局（settings 表，影响所有浏览器）｜本浏览器（localStorage，仅当前浏览器）。
+     本项目不存在真实「平台级设置」，因此不虚构该分组。
+     后端契约不变：GET /api/settings 读取；PUT /api/settings 分组局部保存（revision 乐观锁）。
+     全部用户可见文案走 T(key)（九语种，键表见 SC_I18N）。 */
+  var TTL_PRESETS = [["30", "scMin30"], ["60", "scHour1"], ["480", "scHour8"], ["1440", "scHour24"], ["10080", "scDay7"], ["43200", "scDay30"]];
   var TTL_LOCAL_KEY = "sms_ttl_min";
-  function ttlOutOfRangeMsg() { return "时长须为 5 ~ 43200 分钟（30 天）"; }
-  function openSessTtl() {
-    openModal(
-      '<h3>会话时长（本浏览器）</h3>' +
-      '<div class="tokmeta">仅对当前浏览器生效：保存后，下次在本浏览器登录按此时长签发会话；其他浏览器不受影响，已登录的会话不变。选择「跟随全局默认」将清除本浏览器设置。</div>' +
-      '<div class="toknewrow"><select id="sessttl" aria-label="预设时长">' +
-        TTL_PRESETS.map(function (p) { return '<option value="' + p[0] + '">' + esc(p[1]) + '</option>'; }).join("") +
-        '<option value="global">跟随全局默认（清除本浏览器设置）</option>' +
-        '<option value="custom">自定义分钟数…</option></select>' +
-      '<input type="number" id="sessttlmin" min="5" max="43200" inputmode="numeric" hidden aria-label="自定义分钟数" placeholder="分钟数（5~43200）"></div>' +
-      '<div class="btnrow"><button class="tbtn" id="sessttlsave">保存</button></div>'
-    );
-    var sel = $("sessttl"), inp = $("sessttlmin");
-    var localVal = null;
-    try { localVal = parseInt(localStorage.getItem(TTL_LOCAL_KEY), 10); } catch (e) {}
-    if (Number.isInteger(localVal) && localVal >= 5 && localVal <= 43200) {
-      var m = String(localVal);
-      var hit = TTL_PRESETS.some(function (p) { return p[0] === m; });
-      if (hit) sel.value = m; else { sel.value = "custom"; inp.hidden = false; inp.value = m; }
-    } else {
-      sel.value = "global";
-      /* 未单独设置：回显全局默认值供参考（只读展示，不在本面板修改全局） */
-      fetch("/api/settings").then(function (r) { if (r.status === 401) { location.reload(); return null; } return r.json(); })
-        .then(function (d) {
-          if (d && d.success && sel.value === "global") {
-            var g = String(d.session_ttl_minutes || 30);
-            var opt = sel.querySelector('option[value="global"]');
-            if (opt) opt.textContent = "跟随全局默认（当前 " + g + " 分钟）";
-          }
-        }).catch(function () {});
-    }
-    sel.onchange = function () { inp.hidden = sel.value !== "custom"; };
-    $("sessttlsave").onclick = function () {
-      if (sel.value === "global") {
-        try { localStorage.removeItem(TTL_LOCAL_KEY); } catch (e) {}
-        closeModal(); toast(T("saved")); return;
-      }
-      var v = sel.value === "custom" ? parseInt(inp.value, 10) : parseInt(sel.value, 10);
-      if (!Number.isInteger(v) || v < 5 || v > 43200) { toast(ttlOutOfRangeMsg()); return; }
-      try { localStorage.setItem(TTL_LOCAL_KEY, String(v)); } catch (e) { toast("保存失败"); return; }
-      closeModal(); toast(T("saved") + "（下次登录生效）");
-    };
-  }
-  /* ---------- 通知设置：渠道配置 / 总开关 / 类型规则 / 重试 / 跳转链接 / 测试 ----------
-     数据来源 GET /api/settings（通知部分 + notify_schema 渲染元数据）；保存 PUT /api/settings。
-     敏感字段只显示「已配置 + 末 4 位」；输入留空 = 不修改，勾选「清除」才会删除数据库值。 */
+
   var NF_LABELS = {
-    webhook: "Webhook 地址", secret: "签名密钥", sendkey: "SendKey", token: "Token / 密钥",
-    bot_token: "Bot Token", chat_id: "Chat ID", device_key: "设备 Key", url: "服务地址",
-    api_key: "API Key", mail_to: "收件人", mail_from: "发件人", urls: "Webhook 地址",
-    template: "请求体模板", headers: "自定义请求头",
+    webhook: "nfWebhook", secret: "nfSecret", sendkey: "nfSendkey", token: "nfToken",
+    bot_token: "nfBotToken", chat_id: "nfChatId", device_key: "nfDeviceKey", url: "nfUrl",
+    api_key: "nfApiKey", mail_to: "nfMailTo", mail_from: "nfMailFrom", urls: "nfUrls",
+    template: "nfTemplate", headers: "nfHeaders",
   };
-  function nfLabel(f) { return NF_LABELS[f] || f; }
+  function nfLabel(f) { return NF_LABELS[f] ? T(NF_LABELS[f]) : f; }
   function nfFetchSettings() {
     return fetch("/api/settings").then(function (r) {
       if (r.status === 401) { location.reload(); return null; }
       return r.json();
     });
   }
-  function openNotifySettings() {
+
+  /* 渠道显示名：品牌固有名词，按语言给出（zh 用中文名，其余用品牌英文名；缺失回退英文） */
+  var SC_CH = {
+    "zh-CN": { feishu: "飞书", wecom: "企业微信", dingtalk: "钉钉", serverchan: "Server酱", resend: "邮件", generic: "通用 Webhook" },
+    "zh-TW": { feishu: "飛書", wecom: "企業微信", dingtalk: "釘釘", serverchan: "Server醬", resend: "郵件", generic: "通用 Webhook" }
+  };
+  var SC_CH_EN = {
+    feishu: "Feishu", wecom: "WeCom", dingtalk: "DingTalk", serverchan: "ServerChan",
+    pushplus: "PushPlus", telegram: "Telegram", bark: "Bark", ntfy: "ntfy",
+    gotify: "Gotify", resend: "Resend", generic: "Generic webhook"
+  };
+  function scChannelName(ch) {
+    var m = SC_CH[LANG];
+    return (m && m[ch.key]) || SC_CH_EN[ch.key] || ch.label || ch.key;
+  }
+  var SET_SECTIONS = [
+    { key: "session", label: "scTabSession" },
+    { key: "notify", label: "scTabNotify" },
+    { key: "biz", label: "scTabBiz" },
+    { key: "security", label: "scTabSec" }
+  ];
+  var SC = { d: null, section: "session", dirty: false };
+
+  function scBadge(kind) {
+    var k = kind === "global" ? "global" : "browser";
+    return '<span class="ds-scope ds-scope--' + k + '">' + T(k === "global" ? "scScopeGlobal" : "scScopeBrowser") + '</span>';
+  }
+  function scHelp(t) { return '<div class="ds-help">' + t + '</div>'; }
+  function scMarkDirty(on) {
+    SC.dirty = !!on;
+    var b = $("scdirty"), c = $("scrcancel");
+    if (b) b.hidden = !SC.dirty;
+    if (c) c.hidden = !SC.dirty;
+  }
+  function scBusy(btn, on) { if (btn) { btn.disabled = !!on; btn.setAttribute("data-loading", on ? "1" : "0"); } }
+
+  function openSettingsCenter(section) {
+    SC.section = section || "session";
+    SC.dirty = false;
     nfFetchSettings().then(function (d) {
-      if (!d || !d.success) { toast("读取设置失败"); return; }
-      var schema = d.notify_schema || { channels: [], types: [], retry_max: 3 };
-      var cfg = d.notify || { enabled: true, types: [], retry: 0, link: "", channels: {} };
-      var html = '<h3>通知设置</h3>'
-        + '<div class="setnote">配置保存到数据库并立即生效；敏感字段只在服务端保存，页面只显示「是否已配置」。'
-        + '输入留空表示不修改，勾选「清除」才会删除已存值。测试通知使用已保存的配置。</div>'
-        + '<div class="setform"><div class="setgrp"><h4>全局规则</h4>'
-        + '<div class="setrow"><label>通知总开关</label><input type="checkbox" id="nfen" ' + (cfg.enabled ? "checked" : "") + '></div>'
-        + '<div class="setrow"><label>转发类型</label>';
-      schema.types.forEach(function (t) {
-        var label = t === "verify" ? "验证码" : (t === "sms" ? "短信" : "通知");
-        html += '<label><input type="checkbox" data-nftype="' + esc(t) + '" '
-          + (cfg.types.indexOf(t) !== -1 ? "checked" : "") + '> ' + esc(label) + '</label>';
+      if (!d || !d.success) { toast(T("scReadFail")); return; }
+      SC.d = d;
+      scRenderShell();
+    }).catch(function () { toast(T("scReadFail")); });
+  }
+  function scRenderShell() {
+    var tabs = SET_SECTIONS.map(function (x) {
+      return '<button class="tab' + (x.key === SC.section ? " active" : "") + '" role="tab" data-sc-tab="' + x.key + '"'
+        + ' aria-selected="' + (x.key === SC.section ? "true" : "false") + '">' + T(x.label) + '</button>';
+    }).join("");
+    openModal('<h3>' + T("scTitle") + ' <span class="ds-badge ds-badge--warning" id="scdirty" hidden>' + T("scDirty") + '</span></h3>'
+      + '<div class="ds-tabs" id="sctabs" role="tablist">' + tabs + '</div>'
+      + '<div class="setform" id="scbody"></div>'
+      + '<div class="ds-dialog-actions">'
+      + '<button class="ds-btn" id="scrdefault" type="button">' + T("scReset") + '</button>'
+      + '<button class="ds-btn" id="scrcancel" type="button" hidden>' + T("cancel") + '</button>'
+      + '<button class="ds-btn ds-btn--primary" id="scrsave" type="button">' + T("save") + '</button></div>');
+    $("sctabs").onclick = function (ev) {
+      var t = ev.target && ev.target.closest ? ev.target.closest("[data-sc-tab]") : null;
+      if (!t) return;
+      var next = t.getAttribute("data-sc-tab");
+      if (next === SC.section) return;
+      if (SC.dirty && !window.confirm(T("scSwitchConfirm"))) return;
+      SC.section = next;
+      scRenderShell();
+    };
+    $("scbody").addEventListener("input", function () { scMarkDirty(true); });
+    $("scbody").addEventListener("change", function () { scMarkDirty(true); });
+    $("scrcancel").onclick = function () { scMarkDirty(false); scRenderBody(); toast(T("scCancelDone")); };
+    $("scrdefault").onclick = scReset;
+    $("scrsave").onclick = scSave;
+    scMarkDirty(false);
+    scRenderBody();
+  }
+  function scRenderBody() {
+    var body = $("scbody");
+    if (!body) return;
+    if (SC.section === "session") body.innerHTML = scBodySession();
+    else if (SC.section === "notify") body.innerHTML = scBodyNotify();
+    else if (SC.section === "biz") body.innerHTML = scBodyBiz();
+    else body.innerHTML = scBodySecurity();
+    if (SC.section === "session") {
+      var sel = $("scbttl"), inp = $("scbttlmin");
+      if (sel && inp) sel.onchange = function () { inp.hidden = sel.value !== "custom"; scMarkDirty(true); };
+    }
+    if (SC.section === "notify") scWireNotify();
+    if (SC.section === "security") {
+      var tok = $("sctokbtn");
+      if (tok) tok.onclick = function () { closeModal(); openTokens(); };
+    }
+  }
+
+  /* ---- 登录与会话：本浏览器（localStorage） + 全局默认（settings 表） ---- */
+  function scBodySession() {
+    var d = SC.d;
+    var localVal = null;
+    try { localVal = parseInt(localStorage.getItem(TTL_LOCAL_KEY), 10); } catch (e) {}
+    var localSet = Number.isInteger(localVal) && localVal >= 5 && localVal <= 43200;
+    var g = parseInt(d.session_ttl_minutes, 10); if (!(g >= 5 && g <= 43200)) g = 30;
+    var hit = false;
+    if (localSet) {
+      for (var i = 0; i < TTL_PRESETS.length; i++) if (TTL_PRESETS[i][0] === String(localVal)) hit = true;
+    }
+    var opts = TTL_PRESETS.map(function (x) {
+      var sel = localSet && x[0] === String(localVal) ? " selected" : "";
+      return '<option value="' + x[0] + '"' + sel + '>' + T(x[1]) + '</option>';
+    }).join("")
+      + '<option value="global"' + (localSet ? "" : " selected") + '>' + T("scFollowGlobal") + '</option>'
+      + '<option value="custom"' + (localSet && !hit ? " selected" : "") + '>' + T("scCustom") + '</option>';
+    var eff = localSet
+      ? T("scEffLocal", { v: localVal }) : T("scEffGlobal", { v: g });
+    return '<div class="setgrp"><h4>' + T("scSessionBrowser") + scBadge("browser") + '</h4>'
+      + '<div class="ds-alert">' + eff + '</div>'
+      + '<div class="setrow"><label for="scbttl">' + T("scTtl") + '</label>'
+      + '<select id="scbttl" class="ds-select">' + opts + '</select>'
+      + '<input type="number" id="scbttlmin" class="ds-input" min="5" max="43200" inputmode="numeric"'
+      + (localSet && !hit ? '' : ' hidden') + ' value="' + (localSet && !hit ? localVal : "") + '"'
+      + ' aria-label="' + T("scCustom") + '" placeholder="5~43200"></div>'
+      + scHelp(T("scHelpLocal"))
+      + '</div>'
+      + '<div class="setgrp"><h4>' + T("scSessionGlobal") + scBadge("global") + '</h4>'
+      + '<div class="setrow"><label for="scgttl">' + T("scTtlGlobal") + '</label>'
+      + '<input type="number" id="scgttl" class="ds-input" min="5" max="43200" inputmode="numeric" value="' + g + '"></div>'
+      + scHelp(T("scHelpGlobal"))
+      + '</div>';
+  }
+
+  /* ---- 通知：全局规则 + 各渠道 ---- */
+  function scBodyNotify() {
+    var d = SC.d;
+    var schema = d.notify_schema || { channels: [], types: [], retry_max: 3 };
+    var cfg = d.notify || { enabled: true, types: [], retry: 0, link: "", channels: {} };
+    var html = '<div class="setgrp"><h4>' + T("scNotifyRules") + scBadge("global") + '</h4>'
+      + scHelp(T("scNotifyHelp"))
+      + '<div class="setrow"><label for="nfen">' + T("scNotifyEnabled") + '</label><input type="checkbox" id="nfen" class="ds-check" ' + (cfg.enabled ? "checked" : "") + '></div>'
+      + '<div class="setrow"><label>' + T("scNotifyTypes") + '</label><span>';
+    (schema.types || []).forEach(function (t) {
+      var label = t === "verify" ? T("scTypeVerify") : (t === "sms" ? T("scTypeSms") : T("scTypeNotify"));
+      html += '<label class="ds-inline"><input type="checkbox" class="ds-check" data-nftype="' + esc(t) + '" '
+        + (cfg.types.indexOf(t) !== -1 ? "checked" : "") + '> ' + label + '</label>';
+    });
+    html += '</span></div><div class="setrow"><label for="nfretry">' + T("scRetry") + '</label><select id="nfretry" class="ds-select">';
+    for (var i = 0; i <= (schema.retry_max || 0); i++) {
+      html += '<option value="' + i + '" ' + (Number(cfg.retry) === i ? "selected" : "") + '>'
+        + (i === 0 ? T("scNoRetry") : T("scRetryN", { n: i })) + '</option>';
+    }
+    html += '</select><span class="ds-help">' + T("scRetryHelp") + '</span></div>'
+      + '<div class="setrow"><label for="nflink">' + T("scLink") + '</label>'
+      + '<input type="text" id="nflink" class="ds-input" placeholder="' + T("scLinkPh") + '" value="'
+      + esc(cfg.link || "") + '"></div></div>';
+
+    (schema.channels || []).forEach(function (ch) {
+      var state = cfg.channels[ch.key] || { enabled: true, configured: false, source: "env", fields: {} };
+      html += '<div class="setgrp"><h4>' + esc(scChannelName(ch)) + scBadge("global")
+        + '<span class="ds-badge ' + (state.configured ? "ds-badge--success" : "") + '">'
+        + (state.configured ? T("scConfigured") : T("scNotConfigured"))
+        + (state.configured ? " · " + (state.source === "db" ? T("scFromDb") : T("scFromEnv")) : "")
+        + '</span></h4>'
+        + '<div class="setrow"><label for="nf_' + ch.key + '_enabled">' + T("scEnable") + '</label>'
+        + '<input type="checkbox" id="nf_' + ch.key + '_enabled" class="ds-check" ' + (state.enabled ? "checked" : "") + '></div>';
+      ch.fields.forEach(function (f) {
+        var id = "nf_" + ch.key + "_" + f.key;
+        var val = state.fields[f.key] || {};
+        if (f.sensitive) {
+          var ph = val.configured ? T("scSensitivePhCfg", { m: val.masked || "••••" }) : T("scSensitivePhNew");
+          html += '<div class="setrow"><label for="' + id + '">' + esc(nfLabel(f.key)) + '</label>'
+            + '<input type="text" id="' + id + '" class="ds-input" autocomplete="off" spellcheck="false" placeholder="' + esc(ph) + '">'
+            + '<label class="clr"><input type="checkbox" class="ds-check" id="clr_' + ch.key + '_' + f.key + '"> ' + T("scClear") + '</label></div>';
+        } else {
+          html += '<div class="setrow"><label for="' + id + '">' + esc(nfLabel(f.key)) + '</label>'
+            + '<input type="text" id="' + id + '" class="ds-input" autocomplete="off" value="' + esc(val.value || "") + '"></div>';
+        }
       });
-      html += '</div><div class="setrow"><label>失败重试</label><select id="nfretry">';
-      for (var i = 0; i <= (schema.retry_max || 0); i++) {
-        html += '<option value="' + i + '" ' + (Number(cfg.retry) === i ? "selected" : "") + '>'
-          + (i === 0 ? "不重试" : i + " 次") + '</option>';
+      html += '<div class="setrow"><label>' + T("scTest") + '</label>'
+        + '<button class="ds-btn settest" id="nf_test_' + ch.key + '" type="button">' + T("scSendTest") + '</button></div></div>';
+    });
+    html += '<div class="ds-alert ds-alert--warning">' + T("scTestSaved") + '</div>'
+      + '<div class="setrow"><button class="ds-btn" id="nfimport" type="button">' + T("scImportEnv") + '</button></div>';
+    return html;
+  }
+  function scWireNotify() {
+    var schema = (SC.d.notify_schema) || { channels: [] };
+    (schema.channels || []).forEach(function (ch) {
+      var btn = $("nf_test_" + ch.key);
+      if (!btn) return;
+      btn.onclick = function () {
+        btn.disabled = true; btn.setAttribute("data-loading", "1");
+        fetch("/api/settings/notify/test", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ channel: ch.key }),
+        }).then(function (r) {
+          if (r.status === 401) { location.reload(); return null; }
+          return r.json();
+        }).then(function (res) {
+          btn.disabled = false; btn.setAttribute("data-loading", "0");
+          if (!res) return;
+          if (res.success) { toast(T("scTestOk")); return; }
+          if (res.error === "NOT_CONFIGURED") { toast(T("scTestNotCfg")); return; }
+          toast(res.message ? T("scTestFailMsg", { m: res.message }) : T("scTestFail"));
+        }).catch(function () { btn.disabled = false; btn.setAttribute("data-loading", "0"); toast(T("scTestFail")); });
+      };
+    });
+    var imp = $("nfimport");
+    if (imp) imp.onclick = function () {
+      imp.disabled = true; imp.setAttribute("data-loading", "1");
+      fetch("/api/settings/notify/import-env", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      }).then(function (r) {
+        if (r.status === 401) { location.reload(); return null; }
+        return r.json();
+      }).then(function (res) {
+        imp.disabled = false; imp.setAttribute("data-loading", "0");
+        if (!res) return;
+        if (!res.success) { toast(res.error ? T("scImportFailMsg", { e: res.error }) : T("scImportFail")); return; }
+        closeModal();
+        toast(res.imported ? T("scImported", { n: res.imported }) : T("scNoImport"));
+        openSettingsCenter("notify");
+      }).catch(function () { imp.disabled = false; imp.setAttribute("data-loading", "0"); toast(T("scImportFail")); });
+    };
+  }
+
+  /* ---- 数据与业务：保留天数 / 号码归属地 ---- */
+  function scBodyBiz() {
+    var d = SC.d;
+    return '<div class="setgrp"><h4>' + T("scRetention") + scBadge("global") + '</h4>'
+      + '<div class="setrow"><label for="sysdays">' + T("scDays") + '</label>'
+      + '<input type="number" id="sysdays" class="ds-input" min="1" max="3650" inputmode="numeric" value="'
+      + esc(String(d.retention_days || 30)) + '"></div>'
+      + scHelp(T("scDaysHelp"))
+      + '</div>'
+      + '<div class="setgrp"><h4>' + T("scArea") + scBadge("global") + '</h4>'
+      + '<div class="setrow"><label for="sysarea">' + T("scAreaEnable") + '</label>'
+      + '<input type="checkbox" id="sysarea" class="ds-check" ' + (d.phone_area_enabled ? "checked" : "") + '></div>'
+      + '<div class="setrow"><label for="sysareaapi">' + T("scAreaApi") + '</label>'
+      + '<input type="text" id="sysareaapi" class="ds-input" placeholder="' + T("scAreaApiPh") + '" value="'
+      + esc(d.phone_area_api || "") + '"></div>'
+      + scHelp(T("scAreaHelp"))
+      + '</div>';
+  }
+
+  /* ---- 安全：接入令牌（凭据加密属后续安全专项，本轮只做入口与说明） ---- */
+  function scBodySecurity() {
+    return '<div class="setgrp"><h4>' + T("scTokenTitle") + scBadge("global") + '</h4>'
+      + scHelp(T("scTokenHelp"))
+      + '<div class="setrow"><label>' + T("scManage") + '</label>'
+      + '<button class="ds-btn" id="sctokbtn" type="button">' + T("scOpenTokens") + '</button></div>'
+      + '<div class="ds-alert">' + T("scTokenAlert") + '</div>'
+      + '</div>'
+      + '<div class="setgrp"><h4>' + T("scLoginGuard") + scBadge("global") + '</h4>'
+      + scHelp(T("scLoginGuardHelp"))
+      + '</div>';
+  }
+
+  function scReset() {
+    var what = "";
+    if (SC.section === "session") what = T("scResetSession");
+    else if (SC.section === "notify") what = T("scResetNotify");
+    else if (SC.section === "biz") what = T("scResetBiz");
+    else { toast(T("scResetNoDefault")); return; }
+    if (!window.confirm(T("scResetConfirm", { what: what }))) return;
+    if (SC.section === "session") {
+      try { localStorage.removeItem(TTL_LOCAL_KEY); } catch (e) {}
+      SC.d.session_ttl_minutes = 30;
+    } else if (SC.section === "notify") {
+      var schema = SC.d.notify_schema || { types: [] };
+      SC.d.notify = SC.d.notify || {};
+      SC.d.notify.enabled = true;
+      SC.d.notify.types = (schema.types || []).slice();
+      SC.d.notify.retry = 0;
+      SC.d.notify.link = "";
+    } else if (SC.section === "biz") {
+      SC.d.retention_days = 30;
+      SC.d.phone_area_enabled = true;
+      SC.d.phone_area_api = "";
+    }
+    scRenderBody();
+    scMarkDirty(true);
+    toast(T("scResetFilled"));
+  }
+
+  function scSave() {
+    var btn = $("scrsave");
+    if (SC.section === "security") { toast(T("scNoSave")); return; }
+    if (SC.section === "session") return scSaveSession(btn);
+    if (SC.section === "notify") return scSaveNotify(btn);
+    return scSaveBiz(btn);
+  }
+  function scPut(body, btn, okMsg) {
+    scBusy(btn, true);
+    return fetch("/api/settings", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(function (r) {
+      if (r.status === 401) { location.reload(); return null; }
+      return r.json();
+    }).then(function (res) {
+      scBusy(btn, false);
+      if (!res) return false;
+      if (res.success) {
+        if (typeof res.revision === "number") SC.d.revision = res.revision;
+        scMarkDirty(false);
+        closeModal();
+        toast(okMsg || T("saved"));
+        return true;
       }
-      html += '</select></div><div class="setrow"><label>跳转链接</label>'
-        + '<input type="text" id="nflink" placeholder="https://…（可选，附加到通知正文）" value="'
-        + esc(cfg.link || "") + '"></div></div>';
-
-      (schema.channels || []).forEach(function (ch) {
-        var state = cfg.channels[ch.key] || { enabled: true, configured: false, source: "env", fields: {} };
-        html += '<div class="setgrp"><h4>' + esc(ch.label || ch.key)
-          + '<span class="tokbadge">' + (state.configured ? "已配置" : "未配置")
-          + (state.configured ? " · " + (state.source === "db" ? "数据库" : "环境变量") : "")
-          + '</span></h4>'
-          + '<div class="setrow"><label>启用</label><input type="checkbox" id="nf_' + ch.key + '_enabled" '
-          + (state.enabled ? "checked" : "") + '></div>';
-        ch.fields.forEach(function (f) {
-          var id = "nf_" + ch.key + "_" + f.key;
-          var val = state.fields[f.key] || {};
-          if (f.sensitive) {
-            var ph = val.configured ? "已配置 " + (val.masked || "••••") + "（留空不修改）" : "未配置，输入后保存";
-            html += '<div class="setrow"><label>' + esc(nfLabel(f.key)) + '</label>'
-              + '<input type="text" id="' + id + '" autocomplete="off" spellcheck="false" placeholder="' + esc(ph) + '">'
-              + '<label class="clr"><input type="checkbox" id="clr_' + ch.key + '_' + f.key + '"> 清除</label></div>';
-          } else {
-            html += '<div class="setrow"><label>' + esc(nfLabel(f.key)) + '</label>'
-              + '<input type="text" id="' + id + '" autocomplete="off" value="' + esc(val.value || "") + '"></div>';
-          }
-        });
-        html += '<div class="setrow"><label>测试</label><button class="tbtn settest" id="nf_test_' + ch.key + '">发送测试通知</button></div></div>';
-      });
-      html += '</div><div class="btnrow"><button class="tbtn" id="nfsave">保存</button>'
-        + '<button class="tbtn" id="nfimport">从环境变量导入</button></div>';
-      openModal(html);
-
-      (schema.channels || []).forEach(function (ch) {
-        var btn = $("nf_test_" + ch.key);
-        if (!btn) return;
-        btn.onclick = function () {
-          btn.disabled = true;
-          fetch("/api/settings/notify/test", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ channel: ch.key }),
-          }).then(function (r) {
-            if (r.status === 401) { location.reload(); return null; }
-            return r.json();
-          }).then(function (res) {
-            btn.disabled = false;
-            if (!res) return;
-            if (res.success) { toast("测试通知已发送"); return; }
-            if (res.error === "NOT_CONFIGURED") { toast("该渠道尚未配置，请先保存凭据"); return; }
-            toast("发送失败" + (res.message ? "：" + res.message : ""));
-          }).catch(function () { btn.disabled = false; toast("发送失败"); });
-        };
-      });
-
-      $("nfimport").onclick = function () {
-        fetch("/api/settings/notify/import-env", {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
-        }).then(function (r) {
-          if (r.status === 401) { location.reload(); return null; }
-          return r.json();
-        }).then(function (res) {
-          if (!res) return;
-          if (!res.success) { toast("导入失败" + (res.error ? "：" + res.error : "")); return; }
-          closeModal();
-          toast(res.imported ? ("已导入 " + res.imported + " 项环境变量配置") : "没有可导入的环境变量配置");
-          openNotifySettings();
-        }).catch(function () { toast("导入失败"); });
-      };
-
-      $("nfsave").onclick = function () {
-        var types = [];
-        document.querySelectorAll("[data-nftype]").forEach(function (el) {
-          if (el.checked) types.push(el.getAttribute("data-nftype"));
-        });
-        if (!types.length) { toast("至少保留一种转发类型"); return; }
-        var body = {
-          revision: d.revision,
-          notify: {
-            enabled: !!$("nfen").checked,
-            types: types,
-            retry: parseInt($("nfretry").value, 10),
-            link: $("nflink").value.trim(),
-            channels: {},
-          },
-          clear: [],
-        };
-        (schema.channels || []).forEach(function (ch) {
-          var c = { enabled: !!$("nf_" + ch.key + "_enabled").checked };
-          ch.fields.forEach(function (f) {
-            var el = $("nf_" + ch.key + "_" + f.key);
-            if (!el) return;
-            if (f.sensitive) {
-              var v = el.value.trim();
-              if (v) c[f.key] = v;
-              var ck = $("clr_" + ch.key + "_" + f.key);
-              if (ck && ck.checked) body.clear.push("notify." + ch.key + "." + f.key);
-            } else {
-              c[f.key] = el.value.trim();
-            }
-          });
-          body.notify.channels[ch.key] = c;
-        });
-        fetch("/api/settings", {
-          method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
-        }).then(function (r) {
-          if (r.status === 401) { location.reload(); return null; }
-          return r.json();
-        }).then(function (res) {
-          if (!res) return;
-          if (res.success) { closeModal(); toast(T("saved")); return; }
-          if (res.error === "REVISION_CONFLICT") { toast("设置已被其他会话修改，请重新打开后再保存"); return; }
-          toast("保存失败" + (res.error ? "：" + res.error : ""));
-        }).catch(function () { toast("保存失败"); });
-      };
-    }).catch(function () { toast("读取设置失败"); });
+      if (res.error === "REVISION_CONFLICT") { toast(T("scRevisionConflict")); return false; }
+      toast(res.error ? T("scSaveFailMsg", { e: res.error }) : T("scSaveFail"));
+      return false;
+    }).catch(function () { scBusy(btn, false); toast(T("scSaveFail")); return false; });
   }
-  /* ---------- 业务设置：数据保留天数 / 号码归属地 ---------- */
-  function openSystemSettings() {
-    nfFetchSettings().then(function (d) {
-      if (!d || !d.success) { toast("读取设置失败"); return; }
-      openModal('<h3>业务设置</h3>'
-        + '<div class="setnote">保存到数据库并立即生效；留空或非法值不会写入。</div>'
-        + '<div class="setform"><div class="setgrp"><h4>消息保留</h4>'
-        + '<div class="setrow"><label>保留天数</label><input type="number" id="sysdays" min="1" max="3650" '
-        + 'inputmode="numeric" value="' + esc(String(d.retention_days || 30)) + '"></div>'
-        + '<div class="setnote">定时清理会删除超过该天数的消息（1 ~ 3650 天）。</div></div>'
-        + '<div class="setgrp"><h4>号码归属地</h4>'
-        + '<div class="setrow"><label>启用查询</label><input type="checkbox" id="sysarea" '
-        + (d.phone_area_enabled ? "checked" : "") + '></div>'
-        + '<div class="setrow"><label>接口地址</label><input type="text" id="sysareaapi" '
-        + 'placeholder="留空使用内置免费接口" value="' + esc(d.phone_area_api || "") + '"></div>'
-        + '<div class="setnote">自定义接口需支持 {number} 占位（http/https）。关闭后列表不再显示归属地。</div></div>'
-        + '</div><div class="btnrow"><button class="tbtn" id="syssave">保存</button></div>');
-      $("syssave").onclick = function () {
-        var days = parseInt($("sysdays").value, 10);
-        if (!Number.isInteger(days) || days < 1 || days > 3650) { toast("保留天数须为 1 ~ 3650"); return; }
-        fetch("/api/settings", {
-          method: "PUT", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            revision: d.revision,
-            retention_days: days,
-            phone_area_enabled: !!$("sysarea").checked,
-            phone_area_api: $("sysareaapi").value.trim(),
-          }),
-        }).then(function (r) {
-          if (r.status === 401) { location.reload(); return null; }
-          return r.json();
-        }).then(function (res) {
-          if (!res) return;
-          if (res.success) { closeModal(); toast(T("saved")); return; }
-          if (res.error === "REVISION_CONFLICT") { toast("设置已被其他会话修改，请重新打开后再保存"); return; }
-          toast("保存失败" + (res.error ? "：" + res.error : ""));
-        }).catch(function () { toast("保存失败"); });
-      };
-    }).catch(function () { toast("读取设置失败"); });
+  function scSaveSession(btn) {
+    var sel = $("scbttl"), inp = $("scbttlmin"), gl = $("scgttl");
+    var localChanged = false;
+    if (sel) {
+      if (sel.value === "global") {
+        try { localStorage.removeItem(TTL_LOCAL_KEY); localChanged = true; } catch (e) {}
+      } else {
+        var v = sel.value === "custom" ? parseInt(inp && inp.value, 10) : parseInt(sel.value, 10);
+        if (!Number.isInteger(v) || v < 5 || v > 43200) { toast(T("scTtlRange")); return; }
+        try { localStorage.setItem(TTL_LOCAL_KEY, String(v)); localChanged = true; } catch (e) {}
+      }
+    }
+    var g = parseInt(gl && gl.value, 10);
+    if (!Number.isInteger(g) || g < 5 || g > 43200) { toast(T("scTtlRange")); return; }
+    if (g !== parseInt(SC.d.session_ttl_minutes, 10)) {
+      SC.d.session_ttl_minutes = g;
+      return scPut({ revision: SC.d.revision, session_ttl_minutes: g }, btn, T("scSavedTtlGlobal"));
+    }
+    if (localChanged) { scMarkDirty(false); closeModal(); toast(T("scSavedTtl")); return; }
+    toast(T("scNoChanges"));
   }
+  function scSaveNotify(btn) {
+    var types = [];
+    var nodes = document.querySelectorAll("[data-nftype]");
+    for (var i = 0; i < nodes.length; i++) if (nodes[i].checked) types.push(nodes[i].getAttribute("data-nftype"));
+    if (!types.length) { toast(T("scKeepOneType")); return; }
+    var schema = SC.d.notify_schema || { channels: [] };
+    var body = {
+      revision: SC.d.revision,
+      notify: {
+        enabled: !!$("nfen").checked,
+        types: types,
+        retry: parseInt($("nfretry").value, 10),
+        link: $("nflink").value.trim(),
+        channels: {},
+      },
+      clear: [],
+    };
+    (schema.channels || []).forEach(function (ch) {
+      var c = { enabled: !!$("nf_" + ch.key + "_enabled").checked };
+      ch.fields.forEach(function (f) {
+        var el = $("nf_" + ch.key + "_" + f.key);
+        if (!el) return;
+        if (f.sensitive) {
+          var v = el.value.trim();
+          if (v) c[f.key] = v;
+          var ck = $("clr_" + ch.key + "_" + f.key);
+          if (ck && ck.checked) body.clear.push("notify." + ch.key + "." + f.key);
+        } else {
+          c[f.key] = el.value.trim();
+        }
+      });
+      body.notify.channels[ch.key] = c;
+    });
+    return scPut(body, btn);
+  }
+  function scSaveBiz(btn) {
+    var days = parseInt($("sysdays").value, 10);
+    if (!Number.isInteger(days) || days < 1 || days > 3650) { toast(T("scDaysInvalid")); return; }
+    var api = $("sysareaapi").value.trim();
+    if (api && !/^(http|https):\/\/[^\s]+$/i.test(api)) { toast(T("scApiInvalid")); return; }
+    SC.d.retention_days = days;
+    SC.d.phone_area_enabled = !!$("sysarea").checked;
+    SC.d.phone_area_api = api;
+    return scPut({
+      revision: SC.d.revision,
+      retention_days: days,
+      phone_area_enabled: SC.d.phone_area_enabled,
+      phone_area_api: api,
+    }, btn);
+  }
+
+  /* 兼容既有入口：菜单/旧调用仍可用，统一落到设置中心对应分组 */
+  function openSessTtl() { openSettingsCenter("session"); }
+  function openNotifySettings() { openSettingsCenter("notify"); }
+  function openSystemSettings() { openSettingsCenter("biz"); }
   /* ---------- 设置下拉菜单：统计 / 消息开关 / 免打扰 / 筛选 / 操作 ---------- */
   var setBtn = $("setbtn"), setMenu = $("setmenu");
   function setSetOpen(on) {
@@ -4122,9 +5857,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   /* 统计：先关菜单，再开统计弹层 */
   $("mstats").onclick = function () { setSetOpen(false); openStats(); };
   $("mtokens").onclick = function () { setSetOpen(false); openTokens(); };
+  $("msetcenter").onclick = function () { setSetOpen(false); openSettingsCenter("session"); };
   $("msesttl").onclick = function () { setSetOpen(false); openSessTtl(); };
-  $("mnotify").onclick = function () { setSetOpen(false); openNotifySettings(); };
-  $("msysset").onclick = function () { setSetOpen(false); openSystemSettings(); };
   /* 免打扰：回填开关与时段；保存只写 dnd（提示音由 soundon 即时生效，不在此保存） */
   var dnd = getDND();
   $("stdnd").checked = !!dnd.on;
@@ -4160,12 +5894,9 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       if (sc) { openDetail(parseInt(sc.getAttribute("data-id"), 10)); return; }
     }
     var moreBtn = ev.target.closest ? ev.target.closest(".more") : null;
-    if (moreBtn) {
-      var card = moreBtn.closest(".card");
-      var c = card ? card.querySelector(".content") : null;
-      if (c) { var folded = c.classList.toggle("fold"); moreBtn.textContent = folded ? T("more") : T("less"); }
-      return;
-    }
+    if (moreBtn) { openDetail(parseInt(moreBtn.getAttribute("data-id"), 10)); return; }
+    var sumEl = ev.target.closest ? ev.target.closest(".summary") : null;
+    if (sumEl) { openDetail(parseInt(sumEl.getAttribute("data-id"), 10)); return; }
     var copyBtn = ev.target.closest ? ev.target.closest(".copy") : null;
     if (copyBtn) { doCopy(copyBtn.getAttribute("data-code"), copyBtn); return; }
     var btn = ev.target.closest ? ev.target.closest(".del") : null;
@@ -4258,7 +5989,12 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   });
   /* 收藏 / 未读筛选 + 头部按钮 + 弹层 + PWA + 搜索历史 */
   $("staronly").onclick = function () { state.starOnly = !state.starOnly; $("staronly").classList.toggle("on", state.starOnly); state.page = 1; load(); };
-  $("unreadonly").onclick = function () { state.unreadOnly = !state.unreadOnly; $("unreadonly").classList.toggle("on", state.unreadOnly); state.page = 1; load(); };
+  $("unreadonly").onclick = function () {
+    state.unreadOnly = !state.unreadOnly;
+    $("unreadonly").classList.toggle("on", state.unreadOnly);
+    if ($("unreadbtn")) $("unreadbtn").setAttribute("data-on", state.unreadOnly ? "1" : "0");
+    state.page = 1; state.cursor = ""; load();
+  };
   $("modalx").onclick = closeModal;
   $("modal").addEventListener("click", function (ev) { if (ev.target === $("modal")) closeModal(); });
   loadQHist();
@@ -4280,36 +6016,39 @@ const LOGIN_HTML = String.raw`<!DOCTYPE html>
 <link rel="icon" href="__SITE_ICON__">
 <title>__SITE_NAME__ - 登录</title>
 <style>
-  :root { --bg: #f5f6f7; --card: #fff; --text: #20242a; --border: #e3e6e9; --input-border: #d8dce0; }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg: #14171a; --card: #1d2126; --text: #e6e9ec; --border: #2a3036; --input-border: #33393f; }
-  }
+  ${DS_TOKENS_CSS}
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font: 14px/1.6 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
-         background: var(--bg); color: var(--text); display: flex; align-items: center;
+  body { font: var(--ds-text-md)/var(--ds-leading) var(--ds-font-family);
+         background: var(--ds-color-bg-page); color: var(--ds-color-text); display: flex; align-items: center;
          justify-content: center; min-height: 100vh; min-height: 100dvh;
          padding: calc(16px + env(safe-area-inset-top, 0px)) 16px calc(16px + env(safe-area-inset-bottom, 0px));
          -webkit-text-size-adjust: 100%; -webkit-tap-highlight-color: transparent; }
-  .box { background: var(--card); border: 1px solid var(--border); border-radius: 12px;
+  .box { background: var(--ds-color-bg-surface); border: 1px solid var(--ds-color-border);
+         border-radius: var(--ds-radius-xl); box-shadow: var(--ds-shadow-2);
          padding: 28px 24px; width: 100%; max-width: 320px; text-align: center; position: relative; }
-  h1 { font-size: 17px; margin-bottom: 16px; word-break: break-word; }
-  input { width: 100%; padding: 11px 12px; border: 1px solid var(--input-border); border-radius: 8px;
-          font-size: 16px; margin-bottom: 10px; background: var(--card); color: var(--text); }
-  button#go { width: 100%; padding: 11px 0; border: none; border-radius: 8px; background: #15803d;
-           color: #fff; font-size: 15px; cursor: pointer; touch-action: manipulation; }
-  button#go:hover { background: #116632; }
-  button#go:disabled { opacity: .6; }
-  .err { color: #b91c1c; font-size: 12px; min-height: 18px; margin-top: 8px; }
-  .langbtn { position: absolute; top: 8px; right: 10px; border: 1px solid var(--border); background: none;
-             color: var(--muted, #6b7280); border-radius: 6px; padding: 3px 8px; font-size: 11px; cursor: pointer; }
-  .langmenu { position: fixed; z-index: 200; background: var(--card, #fff); border: 1px solid var(--border, #e2e5e9);
-              border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.14); padding: 4px; min-width: 150px; }
-  .langitem { padding: 8px 14px; border-radius: 7px; cursor: pointer; font-size: 13px; white-space: nowrap;
-              color: var(--text, #1f2328); }
+  h1 { font-size: var(--ds-text-xl); font-weight: var(--ds-weight-medium); margin-bottom: 16px; word-break: break-word; }
+  input { width: 100%; padding: 11px 12px; border: 1px solid var(--ds-color-border);
+          border-radius: var(--ds-radius-md); font-size: 16px; margin-bottom: 10px;
+          background: var(--ds-color-bg-surface); color: var(--ds-color-text); }
+  input:focus-visible { outline: 2px solid var(--ds-color-link); outline-offset: 1px; border-color: var(--ds-color-primary); }
+  button#go { width: 100%; padding: 11px 0; border: none; border-radius: var(--ds-radius-md);
+           background: var(--ds-color-primary); color: #fff; font-size: 15px; font-weight: var(--ds-weight-medium);
+           cursor: pointer; touch-action: manipulation; min-height: 40px; }
+  button#go:hover { background: var(--ds-color-primary-hover); }
+  button#go:disabled { opacity: .6; cursor: not-allowed; }
+  button#go:focus-visible, .langbtn:focus-visible { outline: 2px solid var(--ds-color-link); outline-offset: 2px; }
+  .err { color: var(--ds-color-danger); font-size: var(--ds-text-xs); min-height: 18px; margin-top: 8px; }
+  .langbtn { position: absolute; top: 8px; right: 10px; border: 1px solid var(--ds-color-border); background: none;
+             color: var(--ds-color-text-secondary); border-radius: var(--ds-radius-sm); padding: 3px 8px;
+             font-size: 11px; cursor: pointer; }
+  .langmenu { position: fixed; z-index: 200; background: var(--ds-color-bg-surface); border: 1px solid var(--ds-color-border);
+              border-radius: var(--ds-radius-lg); box-shadow: var(--ds-shadow-2); padding: 4px; min-width: 150px; }
+  .langitem { padding: 8px 14px; border-radius: 7px; cursor: pointer; font-size: var(--ds-text-sm); white-space: nowrap;
+              color: var(--ds-color-text); }
   .langitem:hover { background: rgba(127,127,127,.12); }
-  .langitem.cur { color: #2f7cf6; font-weight: 600; }
-  .foot { color: var(--faint, #9aa3ab); font-size: 12px; margin-top: 14px; }
-  .foot a { color: var(--faint, #9aa3ab); }
+  .langitem.cur { color: var(--ds-color-link); font-weight: var(--ds-weight-medium); }
+  .foot { color: var(--ds-color-text-tertiary); font-size: var(--ds-text-xs); margin-top: 14px; }
+  .foot a { color: var(--ds-color-text-tertiary); }
 </style>
 </head>
 <body>
@@ -5617,6 +7356,9 @@ export default {
         return handleSW();
       }
       const msgMatch = path.match(/^\/api\/messages\/(\d+)$/);
+      if (msgMatch && request.method === "GET") {
+        return await handleGetMessage(msgMatch[1], env);
+      }
       if (msgMatch && request.method === "DELETE") {
         return await handleDeleteMessage(msgMatch[1], env);
       }
