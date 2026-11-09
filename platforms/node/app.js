@@ -5912,10 +5912,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     return fetch("/api/messages/star", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: id, starred: starred }) })
       .then(function (r) { return r.json(); }).then(function () { load(); });
   }
-  function toggleRead(id, read) {
-    return fetch("/api/messages/read", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: id, read: read }) })
-      .then(function (r) { return r.json(); }).then(function () { load(); });
-  }
   function doDelete(ids) {
     fetch("/api/messages/remove", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: ids }) })
       .then(function (r) { return r.json(); })
@@ -5968,7 +5964,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         '</div>' +
         '<div class="foot-right">' +
           '<button class="tbtn" id="dclose">' + esc(T("modalClose")) + '</button>' +
-          '<button class="tbtn" id="dread" style="border-color:var(--accent);color:var(--accent)">' + esc(wasRead ? T("markUnread") : T("markRead")) + '</button>' +
         '</div>' +
       '</div>';
     openModal(html);
@@ -5990,11 +5985,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
             }
             var st = $("dstate");
             if (st) st.textContent = T("read");
-            var rb = $("dread");
-            if (rb) {
-              rb.textContent = T("markUnread");
-              rb.onclick = function () { toggleRead(m.id, false).then(closeModal); };
-            }
             refreshUnreadCount();
           } else {
             m.read_at = null;
@@ -6004,7 +5994,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         .catch(function () { m.read_at = null; toast(T("readFail")); });
     }
     $("dstar").onclick = function () { toggleStar(m.id, !m.starred).then(closeModal); };
-    $("dread").onclick = function () { toggleRead(m.id, !wasRead).then(closeModal); };
     $("dcopy").onclick = function () { doCopy(m.content, $("dcopy")); };
     $("ddel").onclick = function () { closeModal(); doDelete([m.id]); };
     $("dclose").onclick = closeModal;
