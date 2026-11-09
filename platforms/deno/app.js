@@ -2570,26 +2570,29 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .wrap { max-width: 1180px; padding: 18px 20px 40px; }
   .gh { display: none; }
   .topbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 16px; }
-  .brand { display: flex; align-items: center; gap: 11px; }
+  .brand { display: flex; align-items: center; gap: 11px; min-width: 0; flex: 1; }
   .logo { width: 38px; height: 38px; border-radius: 11px; background: var(--accent); color: #fff;
-          display: grid; place-items: center; font-weight: 800; font-size: 15px; box-shadow: var(--ds-shadow-1); }
-  .top-actions { display: flex; gap: 8px; align-items: center; }
+          display: grid; place-items: center; font-weight: 800; font-size: 15px; box-shadow: var(--ds-shadow-1); flex: none; }
+  .brandtext { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+  .brandtext h1 { font-size: 19px; letter-spacing: -.3px; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .brandtext .subtitle { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .top-actions { display: flex; gap: 8px; align-items: center; flex: none; }
   .top-actions .tbtn { padding: 7px 12px; min-height: 34px; font-size: 13px; border-radius: 8px; }
-  .page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin: 0 0 14px; }
-  .page-head h1 { font-size: 22px; letter-spacing: -.4px; margin: 0 0 2px; }
-  .subtitle { color: var(--muted); font-size: 12px; }
   .layout { display: grid; grid-template-columns: minmax(0, 1fr) 268px; gap: 14px; align-items: start; }
   .panel { background: var(--card); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--ds-shadow-1); }
   .toolbar { display: block; padding: 12px 16px; margin: 0; border-bottom: 1px solid var(--row-border); }
   .toolbar-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
   .toolbar-title { font-size: 15px; font-weight: 700; }
   .toolbar-title #stat { font-size: 12px; color: var(--muted); font-weight: 400; margin-left: 6px; }
-  .filters { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .filters { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .filter-tabs { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .filter-row { display: flex; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0; flex-wrap: wrap; }
   .chip { border: 1px solid var(--border); background: var(--card); border-radius: 999px; padding: 5px 11px;
           color: var(--muted); font-size: 12px; min-height: 30px; cursor: pointer; }
   .chip:hover { border-color: var(--accent); color: var(--accent); }
   .chip.active { background: var(--accent-bg); border-color: var(--accent); color: var(--accent); font-weight: 600; }
   .filters .searchwrap { flex: 1; min-width: 170px; margin-left: auto; }
+  .filter-row .searchwrap { flex: 1 1 auto; min-width: 140px; margin-left: 0; }
   .filters .searchwrap input { min-height: 32px; padding: 6px 28px 6px 10px; border-radius: 8px; font-size: 13px; }
   .filters select { min-height: 32px; padding: 5px 8px; border-radius: 8px; font-size: 12px;
                     background: var(--card); color: var(--text); border: 1px solid var(--border); }
@@ -2742,7 +2745,10 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   @media (max-width: 960px) { .layout { grid-template-columns: 1fr; } .sidebar { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   @media (max-width: 660px) {
     .wrap { padding: 14px 12px 30px; }
-    .page-head h1 { font-size: 20px; }
+    .topbar { gap: 8px; margin-bottom: 12px; }
+    .logo { width: 34px; height: 34px; font-size: 13px; border-radius: 9px; }
+    .brandtext h1 { font-size: 16px; }
+    .brandtext .subtitle { display: none; }
     .sidebar { grid-template-columns: 1fr; }
     .list { padding: 0 12px; }
     .card { padding: 12px 0; }
@@ -2751,7 +2757,16 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     .msg-bottom { flex-direction: column; align-items: flex-start; gap: 6px; }
     .msg-actions { align-self: flex-end; }
     .code-chip .copy { min-height: 26px; padding: 3px 10px; }
-    .filters .searchwrap { width: 100%; margin-left: 0; }
+    /* 筛选区：视图标签一行，搜索与来源/时间并排一行，整体更紧凑 */
+    .toolbar { padding: 10px 12px; }
+    .toolbar-top { margin-bottom: 8px; }
+    .filters { flex-direction: column; align-items: stretch; flex-wrap: nowrap; gap: 8px; }
+    .filter-tabs { flex-wrap: nowrap; gap: 6px; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+    .filter-tabs::-webkit-scrollbar { display: none; }
+    .filter-tabs .chip { flex: 0 0 auto; min-height: 28px; padding: 4px 10px; }
+    .filter-row { flex-wrap: nowrap; width: 100%; }
+    .filter-row .searchwrap { flex: 1 1 auto; width: auto; min-width: 0; margin-left: 0; }
+    .filter-row select { flex: 0 0 auto; max-width: 96px; min-height: 30px; padding: 4px 6px; }
     /* 批量操作条：底部悬浮，单行左右滑，按钮不压缩 */
     .selbar { width: calc(100% - 16px); padding: 8px 10px; gap: 6px; justify-content: flex-start;
               bottom: calc(10px + env(safe-area-inset-bottom, 0px)); border-radius: 14px; }
@@ -2807,19 +2822,16 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   <header class="topbar">
     <div class="brand">
       <div class="logo">SMS</div>
+      <div class="brandtext">
+        <h1>__SITE_NAME__</h1>
+        <div class="subtitle" data-i18n="pageSub">集中查看设备短信，快速处理未读消息</div>
+      </div>
     </div>
     <div class="top-actions">
       <button class="tbtn" id="themebtn" data-i18n-title="themeTip">自动</button>
       <button class="tbtn" id="setbtn" data-i18n-title="settings" data-i18n="settings">⚙ 设置</button>
     </div>
   </header>
-
-  <section class="page-head">
-    <div>
-      <h1>__SITE_NAME__</h1>
-      <div class="subtitle" data-i18n="pageSub">集中查看设备短信，快速处理未读消息</div>
-    </div>
-  </section>
 
   <div class="layout">
     <main class="panel">
@@ -2829,26 +2841,30 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
           <button class="tbtn" id="refreshbtn" type="button" data-i18n-title="refresh" data-i18n="refresh" title="刷新">↻ 刷新</button>
         </div>
         <div class="filters">
-          <button class="chip active" id="fall" type="button" data-i18n="tabAll">全部</button>
-          <button class="chip" id="funread" type="button" data-i18n="unread">未读</button>
-          <button class="chip" id="fread" type="button" data-i18n="read">已读</button>
-          <button class="chip" id="fstar" type="button"><span data-i18n="starOnly">★ 收藏</span></button>
-          <div class="searchwrap">
-            <input type="search" id="q" list="qhist" data-i18n-ph="searchPh" placeholder="搜索发件人或内容…" autocomplete="off">
-            <button class="clr" id="clearq" hidden data-i18n-title="clearSearch" data-i18n-aria="clearSearch" title="清除搜索" aria-label="清除搜索">×</button>
+          <div class="filter-tabs">
+            <button class="chip active" id="fall" type="button" data-i18n="tabAll">全部</button>
+            <button class="chip" id="funread" type="button" data-i18n="unread">未读</button>
+            <button class="chip" id="fread" type="button" data-i18n="read">已读</button>
+            <button class="chip" id="fstar" type="button"><span data-i18n="starOnly">★ 收藏</span></button>
           </div>
-          <datalist id="qhist"></datalist>
-          <select id="src" data-i18n-title="srcTip" title="按来源筛选">
-            <option value="" data-i18n="allSources">全部来源</option>
-            <option value="sms" data-i18n="srcSms">短信</option>
-            <option value="notify" data-i18n="srcNotify">通知</option>
-          </select>
-          <select id="range" data-i18n-title="rangeTip" title="按时间筛选">
-            <option value="" data-i18n="allTime">全部时间</option>
-            <option value="1d" data-i18n="today">今天</option>
-            <option value="7d" data-i18n="d7">近 7 天</option>
-            <option value="30d" data-i18n="d30">近 30 天</option>
-          </select>
+          <div class="filter-row">
+            <div class="searchwrap">
+              <input type="search" id="q" list="qhist" data-i18n-ph="searchPh" placeholder="搜索发件人或内容…" autocomplete="off">
+              <button class="clr" id="clearq" hidden data-i18n-title="clearSearch" data-i18n-aria="clearSearch" title="清除搜索" aria-label="清除搜索">×</button>
+            </div>
+            <datalist id="qhist"></datalist>
+            <select id="src" data-i18n-title="srcTip" title="按来源筛选">
+              <option value="" data-i18n="allSources">来源</option>
+              <option value="sms" data-i18n="srcSms">短信</option>
+              <option value="notify" data-i18n="srcNotify">通知</option>
+            </select>
+            <select id="range" data-i18n-title="rangeTip" title="按时间筛选">
+              <option value="" data-i18n="allTime">时间</option>
+              <option value="1d" data-i18n="today">今天</option>
+              <option value="7d" data-i18n="d7">近 7 天</option>
+              <option value="30d" data-i18n="d30">近 30 天</option>
+            </select>
+          </div>
         </div>
       </div>
 
@@ -3001,8 +3017,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       themeTip: "切换主题（自动 / 浅色 / 深色）",
       tabAll: "全部", tabRename: "重命名设备标签", tabMerge: "合并到其他设备", tabDel: "删除该设备标签",
       searchPh: "搜索发件人或内容…", clearSearch: "清除搜索",
-      srcTip: "按来源筛选", allSources: "全部来源", srcSms: "短信", srcNotify: "通知",
-      rangeTip: "按时间筛选", allTime: "全部时间", d7: "近 7 天", d30: "近 30 天",
+      srcTip: "按来源筛选", allSources: "来源", srcSms: "短信", srcNotify: "通知",
+      rangeTip: "按时间筛选", allTime: "时间", d7: "近 7 天", d30: "近 30 天",
       autoCopy: "自动复制验证码", codeCopyBtn: "验证码复制按钮", notifyOn: "后台通知", soundOn: "提示音",
       starOnly: "★ 收藏", unreadOnly: "● 未读", starTip: "只看收藏", unreadTip: "只看未读",
       select: "选择", selectTip: "进入批量选择", done: "完成",
@@ -3069,8 +3085,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       themeTip: "Theme: auto / light / dark",
       tabAll: "All", tabRename: "Rename device tag", tabMerge: "Merge into another device", tabDel: "Delete this device tag",
       searchPh: "Search sender or content…", clearSearch: "Clear search",
-      srcTip: "Filter by source", allSources: "All sources", srcSms: "SMS", srcNotify: "Notification",
-      rangeTip: "Filter by time", allTime: "All time", d7: "Last 7 days", d30: "Last 30 days",
+      srcTip: "Filter by source", allSources: "Source", srcSms: "SMS", srcNotify: "Notification",
+      rangeTip: "Filter by time", allTime: "Time", d7: "Last 7 days", d30: "Last 30 days",
       autoCopy: "Auto-copy codes", codeCopyBtn: "Code copy button", notifyOn: "Background alerts", soundOn: "Sound",
       starOnly: "★ Starred", unreadOnly: "● Unread", starTip: "Starred only", unreadTip: "Unread only",
       select: "Select", selectTip: "Enter multi-select", done: "Done",
@@ -3137,8 +3153,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       themeTip: "切換主題（自動 / 淺色 / 深色）",
       tabAll: "全部", tabRename: "重新命名裝置標籤", tabMerge: "合併到其他裝置", tabDel: "刪除此裝置標籤",
       searchPh: "搜尋寄件人或內容…", clearSearch: "清除搜尋",
-      srcTip: "依來源篩選", allSources: "全部來源", srcSms: "簡訊", srcNotify: "通知",
-      rangeTip: "依時間篩選", allTime: "全部時間", d7: "近 7 天", d30: "近 30 天",
+      srcTip: "依來源篩選", allSources: "來源", srcSms: "簡訊", srcNotify: "通知",
+      rangeTip: "依時間篩選", allTime: "時間", d7: "近 7 天", d30: "近 30 天",
       autoCopy: "自動複製驗證碼", codeCopyBtn: "驗證碼複製按鈕", notifyOn: "背景通知", soundOn: "提示音",
       starOnly: "★ 收藏", unreadOnly: "● 未讀", starTip: "只看收藏", unreadTip: "只看未讀",
       select: "選擇", selectTip: "進入批次選擇", done: "完成",
@@ -3205,8 +3221,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       themeTip: "テーマ切り替え（自動 / ライト / ダーク）",
       tabAll: "すべて", tabRename: "デバイスラベルを変更", tabMerge: "別のデバイスへ統合", tabDel: "このデバイスラベルを削除",
       searchPh: "送信者や本文を検索…", clearSearch: "検索をクリア",
-      srcTip: "送信元で絞り込み", allSources: "すべての送信元", srcSms: "SMS", srcNotify: "通知",
-      rangeTip: "期間で絞り込み", allTime: "全期間", d7: "過去 7 日", d30: "過去 30 日",
+      srcTip: "送信元で絞り込み", allSources: "送信元", srcSms: "SMS", srcNotify: "通知",
+      rangeTip: "期間で絞り込み", allTime: "期間", d7: "過去 7 日", d30: "過去 30 日",
       autoCopy: "認証コード自動コピー", codeCopyBtn: "コードのコピーボタン", notifyOn: "バックグラウンド通知", soundOn: "通知音",
       starOnly: "★ スター", unreadOnly: "● 未読", starTip: "スターのみ表示", unreadTip: "未読のみ表示",
       select: "選択", selectTip: "一括選択を開始", done: "完了",
@@ -3273,8 +3289,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       themeTip: "테마 전환(자동 / 라이트 / 다크)",
       tabAll: "전체", tabRename: "기기 라벨 이름 변경", tabMerge: "다른 기기로 병합", tabDel: "이 기기 라벨 삭제",
       searchPh: "발신자 또는 내용 검색…", clearSearch: "검색 지우기",
-      srcTip: "발신원별 필터", allSources: "전체 발신원", srcSms: "SMS", srcNotify: "알림",
-      rangeTip: "기간별 필터", allTime: "전체 기간", d7: "최근 7일", d30: "최근 30일",
+      srcTip: "발신원별 필터", allSources: "발신원", srcSms: "SMS", srcNotify: "알림",
+      rangeTip: "기간별 필터", allTime: "기간", d7: "최근 7일", d30: "최근 30일",
       autoCopy: "인증번호 자동 복사", codeCopyBtn: "인증번호 복사 버튼", notifyOn: "백그라운드 알림", soundOn: "알림음",
       starOnly: "★ 즐겨찾기", unreadOnly: "● 읽지 않음", starTip: "즐겨찾기만 보기", unreadTip: "읽지 않은 것만 보기",
       select: "선택", selectTip: "일괄 선택 시작", done: "완료",
@@ -3341,8 +3357,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       themeTip: "Cambiar tema (automático / claro / oscuro)",
       tabAll: "Todo", tabRename: "Renombrar etiqueta de dispositivo", tabMerge: "Fusionar en otro dispositivo", tabDel: "Eliminar esta etiqueta",
       searchPh: "Buscar remitente o contenido…", clearSearch: "Borrar búsqueda",
-      srcTip: "Filtrar por origen", allSources: "Todos los orígenes", srcSms: "SMS", srcNotify: "Notificación",
-      rangeTip: "Filtrar por fecha", allTime: "Todo el tiempo", d7: "Últimos 7 días", d30: "Últimos 30 días",
+      srcTip: "Filtrar por origen", allSources: "Origen", srcSms: "SMS", srcNotify: "Notificación",
+      rangeTip: "Filtrar por fecha", allTime: "Fecha", d7: "Últimos 7 días", d30: "Últimos 30 días",
       autoCopy: "Copiar códigos automáticamente", codeCopyBtn: "Botón copiar código", notifyOn: "Alertas en segundo plano", soundOn: "Sonido",
       starOnly: "★ Favoritos", unreadOnly: "● No leídos", starTip: "Solo favoritos", unreadTip: "Solo no leídos",
       select: "Seleccionar", selectTip: "Entrar en selección múltiple", done: "Listo",
@@ -3409,8 +3425,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       themeTip: "Changer de thème (auto / clair / sombre)",
       tabAll: "Tout", tabRename: "Renommer l'étiquette d'appareil", tabMerge: "Fusionner dans un autre appareil", tabDel: "Supprimer cette étiquette",
       searchPh: "Rechercher expéditeur ou contenu…", clearSearch: "Effacer la recherche",
-      srcTip: "Filtrer par source", allSources: "Toutes les sources", srcSms: "SMS", srcNotify: "Notification",
-      rangeTip: "Filtrer par période", allTime: "Tout", d7: "7 derniers jours", d30: "30 derniers jours",
+      srcTip: "Filtrer par source", allSources: "Source", srcSms: "SMS", srcNotify: "Notification",
+      rangeTip: "Filtrer par période", allTime: "Période", d7: "7 derniers jours", d30: "30 derniers jours",
       autoCopy: "Copie auto des codes", codeCopyBtn: "Bouton copier le code", notifyOn: "Alertes en arrière-plan", soundOn: "Son",
       starOnly: "★ Favoris", unreadOnly: "● Non lus", starTip: "Favoris uniquement", unreadTip: "Non lus uniquement",
       select: "Sélectionner", selectTip: "Activer la sélection multiple", done: "Terminé",
@@ -3477,8 +3493,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       themeTip: "Design wechseln (auto / hell / dunkel)",
       tabAll: "Alle", tabRename: "Geräte-Label umbenennen", tabMerge: "In anderes Gerät zusammenführen", tabDel: "Dieses Geräte-Label löschen",
       searchPh: "Absender oder Inhalt suchen…", clearSearch: "Suche löschen",
-      srcTip: "Nach Quelle filtern", allSources: "Alle Quellen", srcSms: "SMS", srcNotify: "Benachrichtigung",
-      rangeTip: "Nach Zeit filtern", allTime: "Gesamter Zeitraum", d7: "Letzte 7 Tage", d30: "Letzte 30 Tage",
+      srcTip: "Nach Quelle filtern", allSources: "Quelle", srcSms: "SMS", srcNotify: "Benachrichtigung",
+      rangeTip: "Nach Zeit filtern", allTime: "Zeitraum", d7: "Letzte 7 Tage", d30: "Letzte 30 Tage",
       autoCopy: "Codes automatisch kopieren", codeCopyBtn: "Code kopieren", notifyOn: "Hintergrund-Benachrichtigungen", soundOn: "Ton",
       starOnly: "★ Favoriten", unreadOnly: "● Ungelesen", starTip: "Nur Favoriten", unreadTip: "Nur Ungelesene",
       select: "Auswählen", selectTip: "Mehrfachauswahl starten", done: "Fertig",
@@ -3545,8 +3561,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       themeTip: "Alternar tema (automático / claro / escuro)",
       tabAll: "Tudo", tabRename: "Renomear etiqueta do dispositivo", tabMerge: "Mesclar em outro dispositivo", tabDel: "Excluir esta etiqueta",
       searchPh: "Pesquisar remetente ou conteúdo…", clearSearch: "Limpar pesquisa",
-      srcTip: "Filtrar por origem", allSources: "Todas as origens", srcSms: "SMS", srcNotify: "Notificação",
-      rangeTip: "Filtrar por período", allTime: "Todo o período", d7: "Últimos 7 dias", d30: "Últimos 30 dias",
+      srcTip: "Filtrar por origem", allSources: "Origem", srcSms: "SMS", srcNotify: "Notificação",
+      rangeTip: "Filtrar por período", allTime: "Período", d7: "Últimos 7 dias", d30: "Últimos 30 dias",
       autoCopy: "Copiar códigos automaticamente", codeCopyBtn: "Botão copiar código", notifyOn: "Alertas em segundo plano", soundOn: "Som",
       starOnly: "★ Favoritos", unreadOnly: "● Não lidas", starTip: "Somente favoritas", unreadTip: "Somente não lidas",
       select: "Selecionar", selectTip: "Entrar na seleção múltipla", done: "Concluído",
