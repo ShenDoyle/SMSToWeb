@@ -2662,7 +2662,11 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .code-chip .copy:active { background: var(--accent-deep); filter: brightness(.94); }
   .code-chip .copy:disabled { opacity: .75; cursor: default; }
   .code-chip .copy:focus-visible { outline: 2px solid var(--ds-color-link); outline-offset: -2px; }
-  .msg-top .code-chip { margin-left: 6px; }
+  /* 关闭复制按钮后，验证码本身可点按/双击直接复制 */
+  .code-chip.tapcopy { cursor: pointer; user-select: none; -webkit-user-select: none; touch-action: manipulation; }
+  .code-chip.tapcopy:active { filter: brightness(.94); }
+  .code-chip .code-copied { display: inline-flex; align-items: center; justify-content: center; padding: 2px 8px; color: var(--accent); font-family: inherit; letter-spacing: 0; }
+  .msg-top .code-chip { margin-left: 0; }
   .plan-hint { color: var(--faint); font-size: 11px; }
   /* 右侧栏 */
   .sidebar { display: flex; flex-direction: column; gap: 12px; }
@@ -2754,8 +2758,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     .sidebar { grid-template-columns: 1fr; }
     .list { padding: 0 12px; }
     .card { padding: 12px 0; }
-    .msg-time { margin-left: 0; }
-    .msg-top .code-chip { margin-left: auto; }
     .msg-bottom { flex-direction: column; align-items: flex-start; gap: 6px; }
     .msg-actions { align-self: flex-end; }
     .code-chip .copy { min-height: 26px; padding: 3px 10px; }
@@ -5444,6 +5446,29 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       navigator.clipboard.writeText(text).then(function () { rely(true); }, function () { rely(fallbackCopy(text)); });
     } else { rely(fallbackCopy(text)); }
   }
+  /* 未显示复制按钮时：点按/双击验证码直接复制，并在原位置短暂提示「已复制」 */
+  function copyCodeChip(chip) {
+    if (chip.getAttribute("data-busy")) return;
+    var val = chip.querySelector(".code-val");
+    var code = val ? val.textContent : "";
+    if (!code) return;
+    var orig = chip.innerHTML;
+    var width = chip.offsetWidth;
+    chip.style.minWidth = width + "px";
+    chip.setAttribute("data-busy", "1");
+    chip.innerHTML = '<span class="code-copied">' + esc(T("copied")) + '</span>';
+    var done = function (ok) {
+      if (!ok) { toast(T("copyFail")); }
+      setTimeout(function () {
+        chip.innerHTML = orig;
+        chip.style.minWidth = "";
+        chip.removeAttribute("data-busy");
+      }, 500);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(code).then(function () { done(true); }, function () { done(fallbackCopy(code)); });
+    } else { done(fallbackCopy(code)); }
+  }
   /* 轻提示：统一放进堆叠容器，多条不重叠；2.6s 自动消失 */
   function toastRoot() {
     var r = document.getElementById("toastroot");
@@ -5698,8 +5723,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
           (isSms && lbl ? '<span class="phone">' + esc(m.sender || "") + '</span>' : '') +
           '<span class="tag type">' + esc(typeTag) + '</span>' +
           (m.read_at ? "" : '<span class="tag unread-tag">' + esc(T("unread")) + '</span>') +
+          (code ? '<span class="code-chip' + (state.codeCopy ? '' : ' tapcopy') + '"><span class="code-val">' + esc(code) + '</span>' + (state.codeCopy ? '<button class="copy" type="button" data-code="' + esc(code) + '">' + esc(T("copy")) + '</button>' : '') + '</span>' : '') +
           '<span class="msg-time" title="' + esc(fmtTime(m.received_at)) + '">' + esc(relTime(m.received_at)) + '</span>' +
-          (code ? '<span class="code-chip"><span class="code-val">' + esc(code) + '</span>' + (state.codeCopy ? '<button class="copy" type="button" data-code="' + esc(code) + '">' + esc(T("copy")) + '</button>' : '') + '</span>' : '') +
         '</div>' +
         '<p class="content summary" data-id="' + m.id + '" title="' + esc(T("detailTip")) + '">' + linkify(highlight(esc(text), state.q)) + '</p>' +
         '<div class="msg-bottom">' +
@@ -7213,6 +7238,12 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (moreBtn) { openDetail(parseInt(moreBtn.getAttribute("data-id"), 10)); return; }
     var sumEl = ev.target.closest ? ev.target.closest(".summary") : null;
     if (sumEl) { openDetail(parseInt(sumEl.getAttribute("data-id"), 10)); return; }
+    var tapChip = ev.target.closest ? ev.target.closest(".code-chip.tapcopy") : null;
+    if (tapChip) {
+      /* 触屏单击直接复制；鼠标使用双击（见下方 dblclick），避免单击误触 */
+      if (ev.pointerType !== "mouse") copyCodeChip(tapChip);
+      return;
+    }
     var copyBtn = ev.target.closest ? ev.target.closest(".copy") : null;
     if (copyBtn) { doCopy(copyBtn.getAttribute("data-code"), copyBtn); return; }
     var btn = ev.target.closest ? ev.target.closest(".del") : null;
@@ -7222,8 +7253,10 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       .then(function (r) { return r.json(); })
       .then(function (d) { if (d && d.success) { undoToast([parseInt(id, 10)]); load(); } });
   });
-  /* 双击收件号直接复制 */
+  /* 双击收件号直接复制；双击验证码同样直接复制 */
   $("list").addEventListener("dblclick", function (ev) {
+    var chip = ev.target.closest ? ev.target.closest(".code-chip.tapcopy") : null;
+    if (chip) { ev.preventDefault(); copyCodeChip(chip); return; }
     var el = ev.target.closest ? ev.target.closest(".recv") : null;
     if (!el) return;
     var text = el.textContent;

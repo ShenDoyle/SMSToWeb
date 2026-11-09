@@ -887,6 +887,8 @@ async function main() {
     check(!pgHtml.includes("class=\"rbtn\"") && !pgHtml.includes("function readOne") && !pgHtml.includes("function toggleRead"), "列表不再显示手动标记已读按钮");
     check(pgHtml.includes('id="scodecopy"') && pgHtml.includes("state.codeCopy") && (pgHtml.match(/codeCopyBtn:/g) || []).length >= 9, "验证码复制按钮可在设置中开关（九语种）");
     check(pgHtml.includes("code-chip") && pgHtml.includes('data-code="') && pgHtml.includes("copyBtn"), "卡片含验证码复制入口（data-code + 复制分支）");
+    check(pgHtml.indexOf('class="code-chip') < pgHtml.indexOf('class="msg-time" title="'), "验证码位于时间之前，时间固定在卡片尾部");
+    check(pgHtml.includes("code-chip.tapcopy") && pgHtml.includes("function copyCodeChip") && pgHtml.includes("ev.pointerType"), "关闭复制按钮后验证码可触屏点按/鼠标双击复制并短暂提示已复制");
     check(/\.msg-actions \.del \{[^}]*display: none/.test(pgHtml) && /body\.selecting \.msg-actions \.del \{ display: inline-flex/.test(pgHtml), "卡片删除按钮默认隐藏，仅多选时显示（详情删除不受影响）");
     check(pgHtml.includes('data-i18n="exportHint"') && (pgHtml.match(/exportHint:/g) || []).length >= 9, "多选栏可见提示“导出当前筛选结果”（九语种）");
     const exportFn = pgHtml.slice(pgHtml.indexOf("function exportUrl"), pgHtml.indexOf("function download"));
