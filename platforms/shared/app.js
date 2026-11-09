@@ -2635,6 +2635,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .tag.star-tag { color: var(--ds-color-warning); background: transparent; }
   .msg-time { margin-left: auto; color: var(--faint); font-size: 11px; white-space: nowrap; font-variant-numeric: tabular-nums; }
   .content.summary { margin: 0 0 7px; font-size: 13px; line-height: 1.6; color: var(--muted); white-space: pre-wrap; }
+  /* 未读正文加粗加深，已读保持当前浅色，便于一眼区分 */
+  .card.unread .content.summary { font-weight: 600; color: var(--text); }
   .msg-bottom { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .msg-meta { font-size: 11px; color: var(--faint); }
   .msg-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; flex-wrap: wrap; }
@@ -5687,7 +5689,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var who = isSms ? (lbl || m.sender || T("unknownNum")) : (m.sender || m.device_name || T("srcNotify"));
     var typeTag = code ? T("tagVerify") : (isSms ? T("srcSms") : srcLabel(m.source));
     var initial = String(who || "?").slice(0, 1);
-    return '<div class="card msg' + (isFresh ? " flash" : "") + '" data-id="' + m.id + '" data-day="' + esc(dayLabel(m.received_at)) + '">' +
+    return '<div class="card msg' + (isFresh ? " flash" : "") + (m.read_at ? "" : " unread") + '" data-id="' + m.id + '" data-day="' + esc(dayLabel(m.received_at)) + '">' +
       '<label class="selwrap" title="' + esc(T("selTip")) + '"><input type="checkbox" class="selbox" data-id="' + m.id + '"></label>' +
       '<div class="msg-main">' +
         '<div class="msg-top">' +
