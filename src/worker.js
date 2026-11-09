@@ -5953,7 +5953,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (!isSms) parts.push('<span>' + esc(m.source || T("srcNotify")) + '</span>');
     parts.push('<span class="m-num">' + esc(fmtTime(m.received_at)) + '</span>');
     if (m.device_name) parts.push('<span>' + esc(m.device_name) + '</span>');
-    parts.push('<span>' + esc(wasRead ? T("read") : T("unread")) + '</span>');
+    parts.push('<span id="dstate">' + esc(wasRead ? T("read") : T("unread")) + '</span>');
     if (m.starred) parts.push('<span class="m-star">★</span>');
     var html = '<h3>' + esc(isSms ? (numLabel(m.sender) || m.sender || T("unknownNum")) : (m.sender || m.device_name || T("srcNotify"))) + '</h3>' +
       '<div class="detail-metarow">' + parts.join('<span class="sep">·</span>') + '</div>' +
@@ -5979,8 +5979,22 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         .then(function (r) { return r.json(); })
         .then(function (res) {
           if (res && res.success) {
+            /* 列表卡片同步切换为已读样式：去掉加粗、未读标签，并更新详情里的状态与按钮 */
             var card = $("list").querySelector('.card[data-id="' + m.id + '"]');
-            if (card) { var dot = card.querySelector(".undot"); if (dot) dot.parentNode.removeChild(dot); }
+            if (card) {
+              card.classList.remove("unread");
+              var dot = card.querySelector(".undot");
+              if (dot) dot.remove();
+              var utag = card.querySelector(".unread-tag");
+              if (utag) utag.remove();
+            }
+            var st = $("dstate");
+            if (st) st.textContent = T("read");
+            var rb = $("dread");
+            if (rb) {
+              rb.textContent = T("markUnread");
+              rb.onclick = function () { toggleRead(m.id, false).then(closeModal); };
+            }
             refreshUnreadCount();
           } else {
             m.read_at = null;

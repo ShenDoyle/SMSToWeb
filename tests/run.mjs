@@ -882,6 +882,7 @@ async function main() {
     check(pgHtml.includes(".selbar { position: fixed;") && pgHtml.includes("body.selecting .wrap { padding-bottom: 96px; }"), "批量操作条底部悬浮固定，并为内容预留底部空间");
     check(pgHtml.includes('class="filter-tabs"') && pgHtml.includes('class="filter-row"') && !pgHtml.includes('class="page-head"'), "站点名并入顶栏，筛选区按视图标签与搜索筛选分行");
     check(pgHtml.includes('" unread"') && pgHtml.includes(".card.unread .content.summary"), "未读卡片正文加粗，已读保持当前浅色");
+    check(pgHtml.includes('classList.remove("unread")') && pgHtml.includes('id="dstate"') && pgHtml.includes('T("markUnread")'), "打开未读详情后卡片与详情状态自动切为已读");
     check(!pgHtml.includes("全部来源") && !pgHtml.includes("全部时间") && pgHtml.includes('allSources: "来源"') && pgHtml.includes('allTime: "时间"'), "来源/时间筛选按钮不再显示「全部」字样");
     check(!pgHtml.includes("class=\"rbtn\"") && !pgHtml.includes("function readOne") && pgHtml.includes("function toggleRead"), "卡片不再显示单条「标记已读」按钮，详情仍可切换已读");
     check(pgHtml.includes('id="scodecopy"') && pgHtml.includes("state.codeCopy") && (pgHtml.match(/codeCopyBtn:/g) || []).length >= 9, "验证码复制按钮可在设置中开关（九语种）");
