@@ -528,6 +528,15 @@ async function main() {
     check(rm.status === 404 && rm.data.error === "NOT_FOUND", "吊销不存在 id → 404 NOT_FOUND");
     rm = await call("POST", "/api/tokens/rotate", eM, { headers: H(), body: { id: "nonexistent" }, cookie: ckM });
     check(rm.status === 404 && rm.data.error === "NOT_FOUND", "轮换不存在 id → 404 NOT_FOUND");
+    /* 重命名：仅活跃令牌、名称规则复用创建校验、不改哈希/有效期 */
+    rm = await call("POST", "/api/tokens/rename", eM, { headers: H(), body: { id: mid1, name: "ui-phone-2" }, cookie: ckM });
+    check(rm.status === 200 && rm.data.success && rm.data.name === "ui-phone-2" && rm.data.changed === true, "重命名活跃令牌 → 200 且名称更新");
+    rm = await call("GET", "/api/tokens", eM, { headers: H(), cookie: ckM });
+    check(rm.data.list.some(t => t.id === mid1 && t.name === "ui-phone-2"), "重命名后列表返回新名称");
+    rm = await call("POST", "/api/tokens/rename", eM, { headers: H(), body: { id: mid1, name: "bad name!" }, cookie: ckM });
+    check(rm.status === 400 && rm.data.error === "INVALID_NAME", "重命名非法名 → 400 INVALID_NAME");
+    rm = await call("POST", "/api/tokens/rename", eM, { headers: H(), body: { id: "nonexistent", name: "ghost" }, cookie: ckM });
+    check(rm.status === 404 && rm.data.error === "NOT_FOUND", "重命名不存在 id → 404 NOT_FOUND");
     rm = await call("POST", "/api/tokens", eM, { headers: H(), body: "not json", cookie: ckM });
     check(rm.status === 400, "创建坏 JSON → 400 invalid json");
 
@@ -553,6 +562,36 @@ async function main() {
     check(rm.data.list.length === 2 && rm.data.list.every(t => t.revoked_at !== null), "列表 2 条且均已吊销（审计行保留，活跃在前排序反转）");
     const listStr2 = JSON.stringify(rm.data);
     check(listStr2.indexOf(mtok1) === -1 && listStr2.indexOf(mtok2) === -1 && listStr2.indexOf("token_hash") === -1, "吊销后列表仍无明文无哈希");
+
+    /* 7) 重命名：鉴权 / CSRF / 仅活跃 / 并发唯一 / 只改名称 */
+    rm = await call("POST", "/api/tokens/rename", eM, { headers: H(), body: { id: mid2, name: "x" } });
+    check(rm.status === 401, "未登录重命名 → 401");
+    rm = await call("POST", "/api/tokens/rename", eM, { headers: H({ "Content-Type": "text/plain" }), body: JSON.stringify({ id: mid2, name: "x" }), cookie: ckM });
+    check(rm.status === 400 && rm.data.error === "invalid content type", "重命名非 application/json → 400（CSRF 闸门）");
+    rm = await call("POST", "/api/tokens/rename", eM, { headers: H(), body: { id: mid2, name: "revoked-renamed" }, cookie: ckM });
+    check(rm.status === 404 && rm.data.error === "NOT_FOUND", "已吊销令牌不可重命名 → 404");
+    const rc1 = await call("POST", "/api/tokens", eM, { headers: H(), body: { name: "race-1" }, cookie: ckM });
+    const rc2 = await call("POST", "/api/tokens", eM, { headers: H(), body: { name: "race-2" }, cookie: ckM });
+    check(rc1.status === 200 && rc2.status === 200, "并发重命名前置：两个活跃令牌创建成功");
+    const race = await Promise.all([
+      call("POST", "/api/tokens/rename", eM, { headers: H(), body: { id: rc1.data.id, name: "race-x" }, cookie: ckM }),
+      call("POST", "/api/tokens/rename", eM, { headers: H(), body: { id: rc2.data.id, name: "race-x" }, cookie: ckM }),
+    ]);
+    const raceOk = race.filter(x => x.status === 200 && x.data && x.data.success).length;
+    const raceTaken = race.filter(x => x.status === 400 && x.data && x.data.error === "NAME_TAKEN").length;
+    check(raceOk === 1 && raceTaken === 1, "并发重命名同名 → 恰好 1 成功 + 1 NAME_TAKEN");
+    const raceList = await call("GET", "/api/tokens", eM, { headers: H(), cookie: ckM });
+    check(raceList.data.list.filter(t => t.revoked_at === null && t.name === "race-x").length === 1, "并发后活跃名称 race-x 仅一条");
+    const imm = await call("POST", "/api/tokens", eM, { headers: H(), body: { name: "imm-token", note: "不可变字段", expires_in_days: 30 }, cookie: ckM });
+    check(imm.status === 200, "重命名不可变性前置：创建带备注/有效期令牌");
+    const immBefore = rawM.prepare("SELECT id,name,token_hash,expires_at,note,token_prefix,created_at,last_used_at FROM tokens WHERE id=?").get(imm.data.id);
+    rm = await call("POST", "/api/tokens/rename", eM, { headers: H(), body: { id: imm.data.id, name: "imm-token-new" }, cookie: ckM });
+    check(rm.status === 200 && rm.data.name === "imm-token-new", "活跃令牌重命名成功");
+    const immAfter = rawM.prepare("SELECT id,name,token_hash,expires_at,note,token_prefix,created_at,last_used_at FROM tokens WHERE id=?").get(imm.data.id);
+    check(immAfter.name === "imm-token-new" && immAfter.token_hash === immBefore.token_hash
+      && immAfter.expires_at === immBefore.expires_at && immAfter.note === immBefore.note
+      && immAfter.token_prefix === immBefore.token_prefix && immAfter.created_at === immBefore.created_at
+      && immAfter.last_used_at === immBefore.last_used_at, "重命名只改名称（哈希/有效期/备注/前缀/创建/最近使用不变）");
 
     rawM.close();
     cleanupPath(mtPath);
@@ -779,7 +818,7 @@ async function main() {
     const lg = await fetchApp(R("GET", "/", {}), eE);
     const lgHtml = await lg.text();
     check(lg.status === 200 && lgHtml.includes('<span class="ver">v1.0.4</span>'), "登录页页脚含版本号 v1.0.4");
-    check(pgHtml.includes('id="msesttl"') && pgHtml.includes('id="msetcenter"') && pgHtml.includes("登录有效期"), "设置菜单含设置中心与登录有效期入口");
+    check(pgHtml.includes('id="setbtn"') && pgHtml.includes('openSettingsCenter("session")') && pgHtml.includes("登录有效期（本浏览器）"), "设置入口直连设置中心（登录有效期等分组在设置中心内）");
     check(pgHtml.includes("sms_ttl_min") && pgHtml.includes("登录有效期（本浏览器）"), "设置中心登录有效期分组为本浏览器独立配置（localStorage 键 sms_ttl_min）");
     check(pgHtml.includes("登录有效期（全局默认）") && pgHtml.includes("ds-scope--global") && pgHtml.includes("ds-scope--browser"), "设置中心区分全局与本浏览器作用域（作用域徽章）");
     check(lgHtml.includes("sms_ttl_min"), "登录页随请求声明本地会话时长（localStorage 键 sms_ttl_min）");
@@ -826,13 +865,29 @@ async function main() {
     const scLogic = stripComments(pgHtml.slice(pgHtml.indexOf("var SET_SECTIONS"), pgHtml.indexOf("function openSessTtl")));
     check(!/[\u4e00-\u9fff]/.test(scLogic), "设置中心逻辑区无硬编码中文文案（全部走 T() 键）");
     /* 消息列表第二阶段：渐进加载 / 未读入口 / 摘要详情 结构存在 */
-    check(pgHtml.includes('id="loadmore"') && pgHtml.includes('id="nomore"') && pgHtml.includes('id="unreadbtn"'), "列表含加载更多、到底提示与未读入口");
+    check(pgHtml.includes('id="loadmore"') && pgHtml.includes('id="nomore"') && pgHtml.includes('id="unreadcount"'), "列表含加载更多、到底提示与未读入口");
     const msgKeys = ["loadMore", "loadingMore", "noMore", "detailBtn", "detailTip", "detailFail", "readFail", "loadMoreFail"];
     const msgMissing = msgKeys.filter((k) => (pgHtml.match(new RegExp("\\b" + k + ":", "g")) || []).length < 9);
     check(msgMissing.length === 0, "列表新增文案九语种全覆盖（8 键各 9 处）" + (msgMissing.length ? "，缺：" + msgMissing.join(",") : ""));
     check(pgHtml.includes("p.set(\"slim\", \"1\")") && pgHtml.includes("m.summary"), "列表请求 slim=1 且卡片使用摘要字段");
     check(pgHtml.includes("state.loadMoreDepth") && pgHtml.includes("state.seen[m.id]"), "前端具备分页去重与历史位置保护");
     check((pgHtml.match(/cursorStale:/g) || []).length >= 9 && pgHtml.includes("CURSOR_STALE"), "游标失效提示九语种齐备且前端处理 409");
+    /* 本轮体验优化：两行摘要 / 单条已读 / 独立批量区 / 详情重构 */
+    check(pgHtml.includes(".content.summary") && pgHtml.includes("-webkit-line-clamp: 2") && pgHtml.includes("markClipped"), "摘要按 CSS 两行截断并由 JS 实测溢出决定按钮");
+    check(pgHtml.includes('id="selbar"') && pgHtml.includes('id="selread"') && pgHtml.includes("contextmenu") && pgHtml.includes("长按"), "多选默认隐藏，右键/长按进入批量操作");
+    check(pgHtml.includes('id="selread"') && pgHtml.includes("bulkOk") && pgHtml.includes("bulkPartial"), "批量已读按钮与部分失败反馈存在");
+    check(pgHtml.includes("class=\"rbtn\"") && pgHtml.includes("readOne"), "卡片含单条已读按钮且走单条 API");
+    check(pgHtml.includes("code-chip") && pgHtml.includes('data-code="') && pgHtml.includes("copyBtn"), "卡片含验证码复制入口（data-code + 复制分支）");
+    check(/\.msg-actions \.del \{[^}]*display: none/.test(pgHtml) && /body\.selecting \.msg-actions \.del \{ display: inline-flex/.test(pgHtml), "卡片删除按钮默认隐藏，仅多选时显示（详情删除不受影响）");
+    check(pgHtml.includes('data-i18n="exportHint"') && (pgHtml.match(/exportHint:/g) || []).length >= 9, "多选栏可见提示“导出当前筛选结果”（九语种）");
+    const exportFn = pgHtml.slice(pgHtml.indexOf("function exportUrl"), pgHtml.indexOf("function download"));
+    check(exportFn.length > 0 && !/state\.selected/.test(exportFn), "导出范围是当前筛选结果，不含已选 ID");
+    const srcForTimeout = readFileSync(new URL("../src/worker.js", import.meta.url), "utf8");
+    check(/timeoutSignal\(10000\)/.test(srcForTimeout) && /new AbortController/.test(srcForTimeout), "单渠道请求有 10s 超时与 AbortController 回退");
+    check(pgHtml.includes("detail-body") && pgHtml.includes("detail-metarow") && pgHtml.includes("ddel"), "详情弹窗：正文主体 + 单行信息 + 底部操作");
+    const ui2Keys = ["markRead", "markReadSelected", "bulkHint", "bulkOk", "bulkPartial", "bulkFail", "dType", "dCarrier", "dSender", "detailInfo", "detailActions", "copyBody", "emptyBody"];
+    const ui2Missing = ui2Keys.filter((k) => (pgHtml.match(new RegExp("\\b" + k + ":", "g")) || []).length < 9);
+    check(ui2Missing.length === 0, "本轮 13 个新增文案九语种全覆盖" + (ui2Missing.length ? "，缺：" + ui2Missing.join(",") : ""));
 
     rawE.close();
     cleanupPath(exPath);
@@ -914,6 +969,75 @@ async function main() {
     check(rl2.status === 200 && rl2.data.session_ttl_minutes === 1440, "旧库自愈后 PUT 1440 → 200");
     rl2 = await call("POST", "/api/login", eSL, { headers: XSL, body: { password: "secret" } });
     check((rl2.setCookie.match(/Max-Age=(\d+)/) || [])[1] === "86400", "旧库设置 1440 后登录 Max-Age=86400（24 小时）");
+
+    /* 7) 多目标通知：JSON 存储 / 敏感字段脱敏 / 空值沿用旧值 / 非法渠道拒绝 / 清空回退 */
+    let sRev = (await call("GET", "/api/settings", eS2, { headers: HS(), cookie: ckS2 })).data.revision;
+    let rt = await call("PUT", "/api/settings", eS2, { headers: HS(), cookie: ckS2, body: {
+      revision: sRev,
+      notify: { targets: [
+        { channel: "feishu", name: "研发群", enabled: true, fields: { webhook: "https://example.com/hook/aaa111", secret: "sec123456" } },
+        { channel: "telegram", name: "个人 TG", enabled: true, fields: { bot_token: "123456:ABC", chat_id: "1024" } },
+      ] },
+    } });
+    check(rt.status === 200 && rt.data.success, "删除前：多目标保存 → 200");
+    let st = await call("GET", "/api/settings", eS2, { headers: HS(), cookie: ckS2 });
+    const tgts = st.data.notify.targets || [];
+    const tgStr = JSON.stringify(st.data.notify);
+    check(tgts.length === 2 && tgts[0].channel === "feishu" && tgts[1].channel === "telegram", "多目标读取：2 个目标按渠道返回");
+    check(tgStr.indexOf("example.com/hook/aaa111") === -1 && tgStr.indexOf("sec123456") === -1 && tgStr.indexOf("123456:ABC") === -1, "多目标响应不含敏感明文（只回脱敏末位）");
+    check(tgts[0].fields.webhook.masked === "••••a111" && tgts[0].configured === true, "多目标敏感字段脱敏格式与已配置标记");
+    const fid = tgts[0].id;
+    sRev = st.data.revision;
+    rt = await call("PUT", "/api/settings", eS2, { headers: HS(), cookie: ckS2, body: {
+      revision: sRev,
+      notify: { targets: [ { id: fid, channel: "feishu", name: "研发群-改", enabled: true, fields: {} } ] },
+    } });
+    check(rt.status === 200, "编辑已存目标（敏感字段留空）→ 200");
+    st = await call("GET", "/api/settings", eS2, { headers: HS(), cookie: ckS2 });
+    check(st.data.notify.targets.length === 1 && st.data.notify.targets[0].name === "研发群-改"
+      && st.data.notify.targets[0].fields.webhook.masked === "••••a111", "空敏感字段沿用旧密文（未丢失凭据）");
+    /* 8) 多目标：稳定 id / 跨渠道凭据复用拒绝 / 重复 id 拒绝 / revision 并发保护 */
+    sRev = st.data.revision;
+    rt = await call("PUT", "/api/settings", eS2, { headers: HS(), cookie: ckS2, body: {
+      revision: sRev,
+      notify: { targets: [
+        { id: fid, channel: "feishu", name: "研发群-改", enabled: true, fields: {} },
+        { channel: "telegram", name: "值班 TG", enabled: true, fields: { bot_token: "tg-2", chat_id: "2048" } },
+      ] },
+    } });
+    check(rt.status === 200, "多目标再次保存（保留既有 id + 新增目标）→ 200");
+    st = await call("GET", "/api/settings", eS2, { headers: HS(), cookie: ckS2 });
+    check(st.data.notify.targets.length === 2 && st.data.notify.targets[0].id === fid
+      && st.data.notify.targets[0].fields.webhook.masked === "••••a111", "目标 id 稳定，敏感字段仍沿用旧密文");
+    const rev2 = st.data.revision;
+    rt = await call("PUT", "/api/settings", eS2, { headers: HS(), cookie: ckS2, body: {
+      revision: rev2, notify: { targets: [ { id: fid, channel: "telegram", name: "跨渠道", fields: {} } ] },
+    } });
+    check(rt.status === 400 && rt.data.error === "INVALID_TARGETS", "同一 id 跨渠道复用 → 400（禁止错误复用凭据）");
+    rt = await call("PUT", "/api/settings", eS2, { headers: HS(), cookie: ckS2, body: {
+      revision: rev2, notify: { targets: [
+        { id: fid, channel: "feishu", name: "a", fields: {} },
+        { id: fid, channel: "feishu", name: "b", fields: {} },
+      ] },
+    } });
+    check(rt.status === 400 && rt.data.error === "INVALID_TARGETS", "同批次重复 target_id → 400");
+    rt = await call("PUT", "/api/settings", eS2, { headers: HS(), cookie: ckS2, body: { revision: rev2 - 1, notify: { targets: [] } } });
+    check(rt.status === 409 && rt.data.error === "REVISION_CONFLICT", "多目标保存使用 revision 乐观锁（过期修订号 → 409）");
+    st = await call("GET", "/api/settings", eS2, { headers: HS(), cookie: ckS2 });
+    check(st.data.notify.targets.length === 2, "409 后配置未被覆盖（并发写入不生效）");
+    const keepId = st.data.notify.targets[1].id;
+    rt = await call("PUT", "/api/settings", eS2, { headers: HS(), cookie: ckS2, body: {
+      revision: st.data.revision,
+      notify: { targets: [ { id: keepId, channel: "telegram", name: "值班 TG", enabled: true, fields: { chat_id: "2048" } } ] },
+    } });
+    check(rt.status === 200, "按稳定 id 删除另一目标 → 200");
+    st = await call("GET", "/api/settings", eS2, { headers: HS(), cookie: ckS2 });
+    check(st.data.notify.targets.length === 1 && st.data.notify.targets[0].id === keepId
+      && st.data.notify.targets[0].channel === "telegram", "删除后仅保留被保留的稳定 id 目标，未误删其他目标");
+    rt = await call("PUT", "/api/settings", eS2, { headers: HS(), cookie: ckS2, body: { revision: st.data.revision, notify: { targets: [ { channel: "nope", name: "x", fields: {} } ] } } });
+    check(rt.status === 400 && rt.data.error === "INVALID_TARGETS", "非法渠道目标 → 400 INVALID_TARGETS");
+    rt = await call("PUT", "/api/settings", eS2, { headers: HS(), cookie: ckS2, body: { revision: st.data.revision, notify: { targets: [] } } });
+    check(rt.status === 200 && (await call("GET", "/api/settings", eS2, { headers: HS(), cookie: ckS2 })).data.notify.targets.length === 0, "清空多目标 → 回退单目标配置");
 
     rawS.close();
     cleanupPath(stPath);
@@ -1010,11 +1134,12 @@ async function main() {
     check(r.status === 200 && r.data.limit === 10 && r.data.list.length === 10, "默认每页 10 条");
     check(r.data.total === 25 && r.data.has_more === true && !!r.data.next_cursor, "首屏 total=25 / has_more / next_cursor");
 
-    /* 2) 摘要瘦身：不传完整正文，摘要≤20 字符，验证码由服务端提取 */
+    /* 2) 摘要瘦身：不传完整正文；摘要上限 120 码位（卡片按两行截断，溢出才显示「查看全文」） */
     const first = r.data.list[0];
     check(first.content === undefined, "slim=1 时列表不返回完整正文");
-    check(typeof first.summary === "string" && Array.from(first.summary).length <= 20, "摘要长度 ≤ 20 个码位");
-    check(first.content_len > 20 && first.summary_truncated === true, "长正文标记为已截断");
+    check(typeof first.summary === "string" && Array.from(first.summary).length <= 120, "摘要长度 ≤ 120 个码位");
+    check(first.content_len >= Array.from(first.summary).length, "摘要不超过正文长度（截断上限生效）");
+    check(first.summary_truncated === (first.content_len > 120), "summary_truncated 与正文长度一致（>120 才标记）");
     check(first.code === String(120000 + 25), "列表附带服务端提取的验证码");
 
     /* 3) 游标链：连续翻页无遗漏、无重复，顺序为时间倒序 + id 倒序 */
@@ -1280,131 +1405,6 @@ async function main() {
     cleanupPath(sPath);
   }
 
-  /* ===== 组：指纹编码无歧义 / 同快照一致（最终验收补证） ===== */
-  group("指纹补证：messages.id 严格整数 / 逗号编码无歧义 / 指纹与行同快照");
-  {
-    const qPath = join(tmpdir(), "smstoweb_fpid_" + process.pid + ".db");
-    cleanupPath(qPath);
-    const rawQ = new DatabaseSync(qPath);
-    const eQ = { DB: makeD1(rawQ), RECEIVE_TOKEN: "tok", ENABLE_AUTH: "false", ADMIN_PASSWORD: "secret", SESSION_SECRET: "test-session-secret-0123456789abcdef", RETENTION_DAYS: "30" };
-    const HQ = { "X-Receive-Token": "tok" };
-    for (let i = 1; i <= 6; i++) {
-      await call("POST", "/api/receive", eQ, { headers: HQ, body: { name: "指纹机", sender: "10086", source: "sms", content: "指纹第 " + i + " 条", time: "2026-10-10 10:00:0" + i } });
-    }
-
-    /* 1) id 列类型与约束：非整数主键写入必须失败（不可能出现含逗号/字符串的 id） */
-    let threw = false;
-    try { rawQ.exec("INSERT INTO messages (id, device_id, sender, content, received_at) VALUES ('1,2', 1, '10086', 'x', '2026-10-10 11:00:00')"); } catch (e) { threw = true; }
-    check(threw, "id='1,2'（含逗号字符串）写入被拒绝 → 集合编码不可能被 id 内容污染");
-    threw = false;
-    try { rawQ.exec("INSERT INTO messages (id, device_id, sender, content, received_at) VALUES (1.5, 1, '10086', 'y', '2026-10-10 11:00:01')"); } catch (e) { threw = true; }
-    check(threw, "id=1.5（非整数）写入被拒绝");
-    let stored = null;
-    try {
-      rawQ.exec("INSERT INTO messages (id, device_id, sender, content, received_at) VALUES ('007', 1, '10086', 'z', '2026-10-10 11:00:02')");
-      stored = rawQ.prepare("SELECT id, typeof(id) AS t FROM messages WHERE content='z'").get();
-    } catch (e) { stored = null; }
-    check(!!stored && stored.id === 7 && stored.t === "integer", "id='007' 被整数亲和归一化为 7（无前导零歧义）");
-    const types = rawQ.prepare("SELECT COUNT(*) AS n FROM messages WHERE typeof(id) <> 'integer'").get();
-    check(types.n === 0, "全表 id 的 SQLite 类型均为 integer（0 条非整数）");
-
-    /* 2) 编码无歧义：整数序列逗号连接与集合一一对应（不同集合必得不同摘要） */
-    const h = (s) => createHash("sha256").update(s).digest("hex");
-    check(h("1,4") !== h("2,3") && h("1,4") !== h("14") && h("1,4") !== h("1,04"),
-      "规范化编码无歧义：{1,4} 与 {2,3} / {14} / {1,04} 摘要均不同");
-
-    /* 3) 同快照一致：一次读取得到的指纹与返回行必须来自同一状态 */
-    const starQ = (id, on) => call("POST", "/api/messages/star", eQ, { body: { id, starred: on } });
-    await starQ(1, true); await starQ(2, true);
-    let rq = await call("GET", "/api/messages?slim=1&limit=2", eQ);
-    let starIds = rq.data.list.filter((m) => m.starred === 1).map((m) => String(m.id));
-    let fp1 = rq.data.next_cursor ? rq.data.next_cursor.split("|")[3] : "";
-    check(fp1 === h("1,2") && starIds.sort().join(",") === "1,2", "状态 A：指纹=hash(1,2) 且返回行星标集合恰为 {1,2}");
-
-    await starQ(1, false); await starQ(2, false); await starQ(3, true); await starQ(4, true);
-    rq = await call("GET", "/api/messages?slim=1&limit=2", eQ);
-    starIds = rq.data.list.filter((m) => m.starred === 1).map((m) => String(m.id));
-    const fp2 = rq.data.next_cursor ? rq.data.next_cursor.split("|")[3] : "";
-    check(fp2 === h("3,4") && starIds.sort().join(",") === "3,4", "状态 B：指纹=hash(3,4) 且返回行星标集合恰为 {3,4}");
-    check(fp1 !== fp2 && h("1,4") !== h("2,3"), "跨状态指纹不同（{1,2} vs {3,4}；且同数量同总和不碰撞）");
-
-    rawQ.close();
-    cleanupPath(qPath);
-  }
-
-  /* ===== 基线组（第 0 步前既有）：收发核心 ===== */
-  group("收发 / 去重 / 列表 / 筛选 / 长轮询 / 删除 / 截断（免登录）");
-  let r = await call("POST", "/api/push", e0, { body: { content: "no token here" } });
-  check(r.status === 403, "push 无 token → 403（未命中库内与环境变量，fail-closed，状态码同旧版）");
-
-  const body1 = { source: "notify", sender: "web-01", content: "hello 1", time: "2026-10-17 12:00:00" };
-  r = await call("POST", "/api/push?token=tok", e0, { body: body1 });
-  check(r.status === 200 && r.data && r.data.success === true && r.data.duplicated === false, "push 带 token → 入库成功");
-  r = await call("POST", "/api/push?token=tok", e0, { body: body1 });
-  check(r.data && r.data.duplicated === true, "相同内容+时间重推 → duplicated:true");
-
-  r = await call("POST", "/api/receive?token=tok", e0, { body: { name: "我的手机", sim: "13800000000", from: "10086", content: "验证码 123456", time: "2026-10-17 10:00:00" } });
-  check(r.status === 200 && r.data && r.data.success === true, "receive 短信 → 入库成功");
-
-  r = await call("GET", "/api/messages", e0);
-  check(r.status === 200 && r.data && r.data.total >= 2, "列表 total>=2");
-  check(r.data && r.data.list.some(m => m.content === "hello 1"), "列表含 push 的消息");
-  check(r.data && r.data.list.every(m => typeof m.sim_number === "string"), "每行带 sim_number 字段");
-
-  r = await call("GET", "/api/messages?source=sms", e0);
-  check(r.data && r.data.list.length === 1 && r.data.list[0].source === "sms", "来源筛选 source=sms 仅 1 条");
-
-  r = await call("GET", "/api/wait?last_id=0", e0);
-  check(r.data && r.data.changed === true, "长轮询 last_id=0 有更新 → changed:true 立即返回");
-
-  const list = (await call("GET", "/api/messages", e0)).data.list;
-  r = await call("DELETE", "/api/messages/" + list[list.length - 1].id, e0);
-  check(r.data && r.data.success === true && r.data.deleted === 1, "删除单条消息成功");
-
-  r = await call("POST", "/api/push?token=tok", e0, { body: { sender: "big", content: "x".repeat(10000) } });
-  check(r.status === 200, "超长正文 push 仍成功（截断而非报错）");
-  const big = (await call("GET", "/api/messages?q=xxxxx&limit=100", e0)).data.list.filter(m => m.sender === "big");
-  check(big.length === 1 && big[0].content.length === 8000, "超长正文被截断到 8000 字");
-
-  const home = await fetchApp(R("GET", "/", {}), e0);
-  const homeHtml = await home.text();
-  check(home.status === 200 && /class="switch"/.test(homeHtml) && /自动复制验证码/.test(homeHtml), "管理页渲染且含新开关 UI");
-
-  /* ===== 基线组（第 0 步前既有）：定时清理 ===== */
-  group("定时清理 runCron / cron HTTP 鉴权");
-  await db.prepare("INSERT INTO messages(device_id, sender, content, received_at, source) SELECT id,'old','old msg xyz','2000-01-01 00:00:00','sms' FROM devices LIMIT 1").run();
-  const before = (await db.prepare("SELECT COUNT(*) AS n FROM messages WHERE content='old msg xyz'").first()).n;
-  await runCron(env({ RETENTION_DAYS: "1" }));
-  const after = (await db.prepare("SELECT COUNT(*) AS n FROM messages WHERE content='old msg xyz'").first()).n;
-  check(before === 1 && after === 0, "超过保留期的旧消息被 cron 清理");
-  r = await handleCronRequest(R("GET", "/api/cron", {}), e0);
-  check(r.status === 403, "/api/cron 无 token → 403");
-  r = await handleCronRequest(R("GET", "/api/cron?token=tok", {}), e0);
-  check(r.status === 200, "/api/cron 带 token → 200");
-
-  /* ===== 基线组（第 0 步前既有）：设备别名 ===== */
-  group("设备别名 / 合并 / 动态来源");
-  await call("POST", "/api/push?token=tok", e0, { body: { name: "手机A", content: "a-one", time: "2026-10-18 09:00:00" } });
-  await call("POST", "/api/push?token=tok", e0, { body: { name: "手机B", content: "b-one", time: "2026-10-18 09:01:00" } });
-  await call("POST", "/api/push?token=tok", e0, { body: { name: "手机A", source: "alert", content: "a-two", time: "2026-10-18 09:02:00" } });
-  let devs = (await call("GET", "/api/devices", e0)).data.list;
-  const devA = devs.find(d => d.display_name === "手机A");
-  const devB = devs.find(d => d.display_name === "手机B");
-  check(!!devA && !!devB, "创建两个设备标签");
-
-  r = await call("POST", "/api/devices/alias", e0, { body: { id: devB.id, alias: "备用机" } });
-  check(r.data && r.data.success === true, "设置设备别名成功");
-  devs = (await call("GET", "/api/devices", e0)).data.list;
-  check(devs.find(d => d.id === devB.id).display_name === "备用机", "别名生效（display_name 变为备用机）");
-
-  r = await call("GET", "/api/sources", e0);
-  check(r.data && r.data.list.some(s => s.source === "alert" && s.count >= 1), "来源清单含自定义来源 alert");
-  r = await call("GET", "/api/messages?source=alert", e0);
-  check(r.data && r.data.list.length === 1 && r.data.list[0].source === "alert", "自定义来源 alert 可单独筛选");
-
-  const aBefore = (await call("GET", "/api/messages?device_id=" + devA.id, e0)).data.total;
-  const bBefore = (await call("GET", "/api/messages?device_id=" + devB.id, e0)).data.total;
-  r = await call("POST", "/api/devices/merge", e0, { body: { from: devA.id, to: devB.id } });
   /* ===== 组：列表星标集合投影重构（P1）——分页等价 / 指纹覆盖完整集合 / 空与大量星标 ===== */
   group("列表投影重构：数字分页与游标分页等价 / 指纹覆盖完整集合 / 空与大量星标");
   {
@@ -1509,6 +1509,167 @@ async function main() {
     cleanupPath(emptyProjPath);
   }
 
+  /* ===== 组：指纹编码无歧义 / 同快照一致（最终验收补证） ===== */
+  group("指纹补证：messages.id 严格整数 / 逗号编码无歧义 / 指纹与行同快照");
+  {
+    const qPath = join(tmpdir(), "smstoweb_fpid_" + process.pid + ".db");
+    cleanupPath(qPath);
+    const rawQ = new DatabaseSync(qPath);
+    const eQ = { DB: makeD1(rawQ), RECEIVE_TOKEN: "tok", ENABLE_AUTH: "false", ADMIN_PASSWORD: "secret", SESSION_SECRET: "test-session-secret-0123456789abcdef", RETENTION_DAYS: "30" };
+    const HQ = { "X-Receive-Token": "tok" };
+    for (let i = 1; i <= 6; i++) {
+      await call("POST", "/api/receive", eQ, { headers: HQ, body: { name: "指纹机", sender: "10086", source: "sms", content: "指纹第 " + i + " 条", time: "2026-10-10 10:00:0" + i } });
+    }
+
+    /* 1) id 列类型与约束：非整数主键写入必须失败（不可能出现含逗号/字符串的 id） */
+    let threw = false;
+    try { rawQ.exec("INSERT INTO messages (id, device_id, sender, content, received_at) VALUES ('1,2', 1, '10086', 'x', '2026-10-10 11:00:00')"); } catch (e) { threw = true; }
+    check(threw, "id='1,2'（含逗号字符串）写入被拒绝 → 集合编码不可能被 id 内容污染");
+    threw = false;
+    try { rawQ.exec("INSERT INTO messages (id, device_id, sender, content, received_at) VALUES (1.5, 1, '10086', 'y', '2026-10-10 11:00:01')"); } catch (e) { threw = true; }
+    check(threw, "id=1.5（非整数）写入被拒绝");
+    let stored = null;
+    try {
+      rawQ.exec("INSERT INTO messages (id, device_id, sender, content, received_at) VALUES ('007', 1, '10086', 'z', '2026-10-10 11:00:02')");
+      stored = rawQ.prepare("SELECT id, typeof(id) AS t FROM messages WHERE content='z'").get();
+    } catch (e) { stored = null; }
+    check(!!stored && stored.id === 7 && stored.t === "integer", "id='007' 被整数亲和归一化为 7（无前导零歧义）");
+    const types = rawQ.prepare("SELECT COUNT(*) AS n FROM messages WHERE typeof(id) <> 'integer'").get();
+    check(types.n === 0, "全表 id 的 SQLite 类型均为 integer（0 条非整数）");
+
+    /* 2) 编码无歧义：整数序列逗号连接与集合一一对应（不同集合必得不同摘要） */
+    const h = (s) => createHash("sha256").update(s).digest("hex");
+    check(h("1,4") !== h("2,3") && h("1,4") !== h("14") && h("1,4") !== h("1,04"),
+      "规范化编码无歧义：{1,4} 与 {2,3} / {14} / {1,04} 摘要均不同");
+
+    /* 3) 同快照一致：一次读取得到的指纹与返回行必须来自同一状态 */
+    const starQ = (id, on) => call("POST", "/api/messages/star", eQ, { body: { id, starred: on } });
+    await starQ(1, true); await starQ(2, true);
+    let rq = await call("GET", "/api/messages?slim=1&limit=2", eQ);
+    let starIds = rq.data.list.filter((m) => m.starred === 1).map((m) => String(m.id));
+    let fp1 = rq.data.next_cursor ? rq.data.next_cursor.split("|")[3] : "";
+    check(fp1 === h("1,2") && starIds.sort().join(",") === "1,2", "状态 A：指纹=hash(1,2) 且返回行星标集合恰为 {1,2}");
+
+    await starQ(1, false); await starQ(2, false); await starQ(3, true); await starQ(4, true);
+    rq = await call("GET", "/api/messages?slim=1&limit=2", eQ);
+    starIds = rq.data.list.filter((m) => m.starred === 1).map((m) => String(m.id));
+    const fp2 = rq.data.next_cursor ? rq.data.next_cursor.split("|")[3] : "";
+    check(fp2 === h("3,4") && starIds.sort().join(",") === "3,4", "状态 B：指纹=hash(3,4) 且返回行星标集合恰为 {3,4}");
+    check(fp1 !== fp2 && h("1,4") !== h("2,3"), "跨状态指纹不同（{1,2} vs {3,4}；且同数量同总和不碰撞）");
+
+    rawQ.close();
+    cleanupPath(qPath);
+  }
+
+  /* ===== 组：批量已读 API（v1.0.4 体验优化） ===== */
+  group("批量已读：部分失败如实上报 / 未读统计 / 单条兼容 / 参数边界");
+  {
+    const bPath = join(tmpdir(), "smstoweb_bulkread_" + process.pid + ".db");
+    cleanupPath(bPath);
+    const rawB2 = new DatabaseSync(bPath);
+    const eB2 = { DB: makeD1(rawB2), RECEIVE_TOKEN: "tok", ENABLE_AUTH: "false", ADMIN_PASSWORD: "secret", SESSION_SECRET: "test-session-secret-0123456789abcdef", RETENTION_DAYS: "30" };
+    const HB = { "X-Receive-Token": "tok" };
+    for (let i = 1; i <= 3; i++) {
+      await call("POST", "/api/receive", eB2, { headers: HB, body: { name: "批量机", sender: "10086", source: "sms", content: "批量第 " + i + " 条", time: "2026-10-11 10:00:0" + i } });
+    }
+    const stats0 = await call("GET", "/api/stats", eB2);
+    check(stats0.data.unread === 3, "初始未读 3 条");
+
+    let rb = await call("POST", "/api/messages/read", eB2, { body: { ids: [1, 2, 999999], read: true } });
+    check(rb.status === 200 && rb.data.success && rb.data.updated === 2 && rb.data.failed === 1, "批量已读部分失败：updated=2 / failed=1");
+    check(Array.isArray(rb.data.failed_ids) && rb.data.failed_ids[0] === 999999, "失败 id 逐条列出（999999）");
+    check(rb.data.unread === 1, "批量后服务端返回未读=1");
+    const stats1 = await call("GET", "/api/stats", eB2);
+    check(stats1.data.unread === 1, "统计接口未读与批量结果一致（不重复计入）");
+
+    rb = await call("POST", "/api/messages/read", eB2, { body: { ids: [1], read: true } });
+    check(rb.data.updated === 1 && rb.data.unread === 1, "重复标记已读幂等（未读数保持不变）");
+
+    rb = await call("POST", "/api/messages/read", eB2, { body: { ids: [], read: true } });
+    check(rb.status === 400 && rb.data.error === "no ids", "空 ids → 400");
+    rb = await call("POST", "/api/messages/read", eB2, { body: { ids: new Array(201).fill(1), read: true } });
+    check(rb.status === 400 && rb.data.error === "too many ids", "超过 200 条 → 400");
+
+    rb = await call("POST", "/api/messages/read", eB2, { body: { id: 3, read: true } });
+    check(rb.status === 200 && rb.data.success && rb.data.read === true, "单条接口保持兼容");
+
+    rawB2.close();
+    cleanupPath(bPath);
+  }
+
+  /* ===== 基线组（第 0 步前既有）：收发核心 ===== */
+  group("收发 / 去重 / 列表 / 筛选 / 长轮询 / 删除 / 截断（免登录）");
+  let r = await call("POST", "/api/push", e0, { body: { content: "no token here" } });
+  check(r.status === 403, "push 无 token → 403（未命中库内与环境变量，fail-closed，状态码同旧版）");
+
+  const body1 = { source: "notify", sender: "web-01", content: "hello 1", time: "2026-10-17 12:00:00" };
+  r = await call("POST", "/api/push?token=tok", e0, { body: body1 });
+  check(r.status === 200 && r.data && r.data.success === true && r.data.duplicated === false, "push 带 token → 入库成功");
+  r = await call("POST", "/api/push?token=tok", e0, { body: body1 });
+  check(r.data && r.data.duplicated === true, "相同内容+时间重推 → duplicated:true");
+
+  r = await call("POST", "/api/receive?token=tok", e0, { body: { name: "我的手机", sim: "13800000000", from: "10086", content: "验证码 123456", time: "2026-10-17 10:00:00" } });
+  check(r.status === 200 && r.data && r.data.success === true, "receive 短信 → 入库成功");
+
+  r = await call("GET", "/api/messages", e0);
+  check(r.status === 200 && r.data && r.data.total >= 2, "列表 total>=2");
+  check(r.data && r.data.list.some(m => m.content === "hello 1"), "列表含 push 的消息");
+  check(r.data && r.data.list.every(m => typeof m.sim_number === "string"), "每行带 sim_number 字段");
+
+  r = await call("GET", "/api/messages?source=sms", e0);
+  check(r.data && r.data.list.length === 1 && r.data.list[0].source === "sms", "来源筛选 source=sms 仅 1 条");
+
+  r = await call("GET", "/api/wait?last_id=0", e0);
+  check(r.data && r.data.changed === true, "长轮询 last_id=0 有更新 → changed:true 立即返回");
+
+  const list = (await call("GET", "/api/messages", e0)).data.list;
+  r = await call("DELETE", "/api/messages/" + list[list.length - 1].id, e0);
+  check(r.data && r.data.success === true && r.data.deleted === 1, "删除单条消息成功");
+
+  r = await call("POST", "/api/push?token=tok", e0, { body: { sender: "big", content: "x".repeat(10000) } });
+  check(r.status === 200, "超长正文 push 仍成功（截断而非报错）");
+  const big = (await call("GET", "/api/messages?q=xxxxx&limit=100", e0)).data.list.filter(m => m.sender === "big");
+  check(big.length === 1 && big[0].content.length === 8000, "超长正文被截断到 8000 字");
+
+  const home = await fetchApp(R("GET", "/", {}), e0);
+  const homeHtml = await home.text();
+  check(home.status === 200 && /id="scautocopy"/.test(homeHtml) && /自动复制验证码/.test(homeHtml), "管理页渲染且含新开关 UI");
+
+  /* ===== 基线组（第 0 步前既有）：定时清理 ===== */
+  group("定时清理 runCron / cron HTTP 鉴权");
+  await db.prepare("INSERT INTO messages(device_id, sender, content, received_at, source) SELECT id,'old','old msg xyz','2000-01-01 00:00:00','sms' FROM devices LIMIT 1").run();
+  const before = (await db.prepare("SELECT COUNT(*) AS n FROM messages WHERE content='old msg xyz'").first()).n;
+  await runCron(env({ RETENTION_DAYS: "1" }));
+  const after = (await db.prepare("SELECT COUNT(*) AS n FROM messages WHERE content='old msg xyz'").first()).n;
+  check(before === 1 && after === 0, "超过保留期的旧消息被 cron 清理");
+  r = await handleCronRequest(R("GET", "/api/cron", {}), e0);
+  check(r.status === 403, "/api/cron 无 token → 403");
+  r = await handleCronRequest(R("GET", "/api/cron?token=tok", {}), e0);
+  check(r.status === 200, "/api/cron 带 token → 200");
+
+  /* ===== 基线组（第 0 步前既有）：设备别名 ===== */
+  group("设备别名 / 合并 / 动态来源");
+  await call("POST", "/api/push?token=tok", e0, { body: { name: "手机A", content: "a-one", time: "2026-10-18 09:00:00" } });
+  await call("POST", "/api/push?token=tok", e0, { body: { name: "手机B", content: "b-one", time: "2026-10-18 09:01:00" } });
+  await call("POST", "/api/push?token=tok", e0, { body: { name: "手机A", source: "alert", content: "a-two", time: "2026-10-18 09:02:00" } });
+  let devs = (await call("GET", "/api/devices", e0)).data.list;
+  const devA = devs.find(d => d.display_name === "手机A");
+  const devB = devs.find(d => d.display_name === "手机B");
+  check(!!devA && !!devB, "创建两个设备标签");
+
+  r = await call("POST", "/api/devices/alias", e0, { body: { id: devB.id, alias: "备用机" } });
+  check(r.data && r.data.success === true, "设置设备别名成功");
+  devs = (await call("GET", "/api/devices", e0)).data.list;
+  check(devs.find(d => d.id === devB.id).display_name === "备用机", "别名生效（display_name 变为备用机）");
+
+  r = await call("GET", "/api/sources", e0);
+  check(r.data && r.data.list.some(s => s.source === "alert" && s.count >= 1), "来源清单含自定义来源 alert");
+  r = await call("GET", "/api/messages?source=alert", e0);
+  check(r.data && r.data.list.length === 1 && r.data.list[0].source === "alert", "自定义来源 alert 可单独筛选");
+
+  const aBefore = (await call("GET", "/api/messages?device_id=" + devA.id, e0)).data.total;
+  const bBefore = (await call("GET", "/api/messages?device_id=" + devB.id, e0)).data.total;
+  r = await call("POST", "/api/devices/merge", e0, { body: { from: devA.id, to: devB.id } });
   check(r.data && r.data.success === true && r.data.moved === aBefore, "合并设备成功，迁移条数一致");
   const bAfter = (await call("GET", "/api/messages?device_id=" + devB.id, e0)).data.total;
   check(bAfter === bBefore + aBefore, "合并后目标设备消息数 = 原B + 原A");
@@ -1588,6 +1749,28 @@ async function main() {
   r = await call("DELETE", "/api/devices/" + devBatch.id, e0);
   check(r.data && r.data.success === true && r.data.deleted === 1, "软删全部消息后可直接删除设备标签（UI × 有出现条件）");
 
+  /* ===== 列表 code 字段：英文验证码 / 干扰数字不入库误报 ===== */
+  group("列表 code 字段（中英文识别 / 干扰数字不误报）");
+  {
+    const XC = { "X-Forwarded-For": "203.0.113.79" };
+    let rr = await call("POST", "/api/receive?token=tok", e0, { headers: XC, body: {
+      name: "code手机", sim: "13900000001", from: "GitHub",
+      content: "Your GitHub verification code is 918204. It expires in 10 minutes.",
+      time: "2026-11-07 10:20:00",
+    } });
+    check(rr.status === 200 && rr.data && rr.data.duplicated === false, "英文验证码短信入库");
+    rr = await call("GET", "/api/messages?slim=1&limit=10&q=918204", e0);
+    check(rr.data && rr.data.list.length >= 1 && rr.data.list[0].code === "918204", "列表 slim 响应含英文验证码 code");
+    rr = await call("POST", "/api/receive?token=tok", e0, { headers: XC, body: {
+      name: "code手机", sim: "13900000001", from: "干扰测试",
+      content: "验证码短信：手机 13812345678，订单号 20261020123456，金额 2000 元，日期 2026-10-27，无可用验证码。",
+      time: "2026-11-07 10:21:00",
+    } });
+    check(rr.status === 200, "干扰数字短信入库");
+    rr = await call("GET", "/api/messages?slim=1&limit=10&q=干扰测试", e0);
+    check(rr.data && rr.data.list.length >= 1 && rr.data.list[0].code === "", "手机号/订单号/金额/日期干扰 → code 为空（不误报）");
+  }
+
   /* ===== 基线组（第 0 步前既有）：收藏/统计/PWA ===== */
   group("收藏 / 已读 / 统计 / PWA");
   const mlist = (await call("GET", "/api/messages?limit=100", e0)).data.list;
@@ -1602,6 +1785,12 @@ async function main() {
   check(r.data && r.data.success && r.data.read === true, "标为已读");
   r = await call("GET", "/api/messages?unread=1&limit=100", e0);
   check(r.data && !r.data.list.some(function (m) { return m.id === mid; }), "只看未读排除已读消息");
+  r = await call("GET", "/api/messages?read=1&limit=100", e0);
+  check(r.data && r.data.list.some(function (m) { return m.id === mid; })
+    && r.data.list.every(function (m) { return !!m.read_at; }), "只看已读包含该消息且不混入未读");
+  const exRead = await fetchApp(R("GET", "/api/export?format=json&read=1", {}), e0);
+  const exJson = await exRead.json();
+  check(exRead.status === 200 && Array.isArray(exJson) && exJson.some(function (x) { return x.id === mid; }), "导出按已读筛选返回数据");
   r = await call("POST", "/api/messages/read", e0, { body: { id: mid, read: false } });
   check(r.data && r.data.read === false, "标为未读");
   r = await call("GET", "/api/stats", e0);
@@ -1745,9 +1934,9 @@ async function main() {
     check(!copied, "拉丁系译文非 en 原样复制（违例：" + (copied || "无") + "）");
   }
   const pageHtml = await (await fetchApp(R("GET", "/", {}), e0)).text();
-  check(/data-i18n="stats"/.test(pageHtml) && /data-i18n-ph="searchPh"/.test(pageHtml),
+  check(/data-i18n="pageTitle"/.test(pageHtml) && /data-i18n-ph="searchPh"/.test(pageHtml),
     "管理页静态文案带 data-i18n 标注");
-  check(/id="langbtn"/.test(pageHtml) && /sms_lang/.test(pageHtml), "头部语言切换按钮与本地记忆");
+  check(/id="sclang"/.test(pageHtml) && /sms_lang/.test(pageHtml), "语言选择位于设置中心并本地记忆");
   check(/function applyI18n/.test(pageHtml) && /function T\(key, vars\)/.test(pageHtml), "i18n 运行时（T / applyI18n）已注入");
   check(/r\.status === 401/.test(pageHtml) && /location\.reload/.test(pageHtml),
     "登录过期 401 → 整页重载到登录页（不停在加载失败）");
@@ -1889,6 +2078,15 @@ async function main() {
         ["验证码 482910，请勿告知 13812345678", "482910", "剥离手机号"],
         ["【某App】您的订单20261020123456已发出", "", "无验证码关键词不提取"],
         ["1234567890是您的验证码", "", "超长数字串不从内部截取"],
+        ["验证码 1234", "1234", "4 位验证码"],
+        ["校验码为 839201", "839201", "6 位验证码"],
+        ["动态密码 62481578", "62481578", "8 位验证码"],
+        ["Your verification code is 918204.", "918204", "英文 verification code"],
+        ["OTP: 483920", "483920", "英文 OTP"],
+        ["验证码 123456，订单号 9876543210，手机号 13812345678", "123456", "多候选优先验证码语境"],
+        ["验证码：［583921］", "583921", "特殊字符包裹"],
+        ["您消费 2000 元，验证码是 482910，日期 2026-10-27", "482910", "金额/日期干扰"],
+        ["您的取件码为 8-2-307", "82307", "分隔取件码"],
       ];
       for (const c of cases) {
         let got = "";
@@ -1920,12 +2118,71 @@ async function main() {
         ["2026-10-27 发出，验证码482910", "482910", "剥离日期"],
         ["【某App】您的订单20261020123456已发出", "", "无验证码关键词不提取"],
         ["1234567890是您的验证码", "", "超长数字串不从内部截取"],
+        ["验证码 1234", "1234", "4 位验证码"],
+        ["校验码为 839201", "839201", "6 位验证码"],
+        ["动态密码 62481578", "62481578", "8 位验证码"],
+        ["Your verification code is 918204.", "918204", "英文 verification code"],
+        ["OTP: 483920", "483920", "英文 OTP"],
+        ["918204 is your verification code", "918204", "英文码在前"],
+        ["Use 483920 as your OTP", "483920", "英文码在前 + as your OTP"],
+        ["验证码 123456，订单号 9876543210，手机号 13812345678", "123456", "多候选优先验证码语境"],
+        ["验证码：［583921］", "583921", "特殊字符包裹"],
+        ["您消费 2000 元，验证码是 482910，日期 2026-10-27", "482910", "金额/日期干扰"],
+        ["Order No. 20261020123456 shipped; verification code 482910", "482910", "英文订单号干扰"],
+        ["No verification code required for this order 20261020123456", "", "英文无验证码语义"],
+        ["您的取件码为 8-2-307", "82307", "分隔取件码"],
+        ["取件码 82307 请取件", "82307", "取件码仍可识别"],
+        ["验证码错误，错误代码 4001", "", "错误码不当验证码"],
+        ["验证码已发送，有效期 2026 秒", "", "时长数字不当验证码"],
+        ["验证码已发送，活动截止 2026 年", "", "年份不当验证码"],
+        ["验证码已发送，订单 1234 号", "", "订单号不当验证码"],
+        ["验证码已发送，请拨打客服 4001", "", "客服号码不当验证码"],
       ];
       for (const c of cases) {
         let got;
         try { got = extractCodeLite(c[0]); } catch (e) { got = "<throw:" + e.message + ">"; }
         check(got === c[1], c[2] + "：" + JSON.stringify(c[0]) + " → " + JSON.stringify(got));
       }
+    }
+  }
+
+  /* 复制：Clipboard 优先、回退 execCommand、失败必须明确反馈（不假报成功） */
+  group("验证码复制（Clipboard / 回退 / 失败反馈）");
+  {
+    const copySrc = coreSrc.slice(coreSrc.indexOf("function fallbackCopy"), coreSrc.indexOf("/* 轻提示"));
+    let factory = null;
+    try { factory = new Function("document", "navigator", "toast", "T", copySrc + "\nreturn { doCopy: doCopy, fallbackCopy: fallbackCopy };"); }
+    catch (e) { factory = null; }
+    check(!!factory, "doCopy / fallbackCopy 可在沙箱中求值");
+    if (factory) {
+      async function runCopy(clipMode, execOk) {
+        const toasts = [];
+        let copied = null;
+        const btn = { textContent: "复制", disabled: false };
+        const doc = {
+          createElement: function () { return { style: {}, value: "", select: function () {} }; },
+          body: { appendChild: function () {}, removeChild: function () {} },
+          execCommand: function () { return !!execOk; },
+        };
+        const nav = {};
+        if (clipMode === "ok") nav.clipboard = { writeText: function (t) { copied = t; return Promise.resolve(); } };
+        if (clipMode === "reject") nav.clipboard = { writeText: function (t) { copied = t; return Promise.reject(new Error("denied")); } };
+        const api = factory(doc, nav, function (m) { toasts.push(m); },
+          function (k) { return ({ copied: "已复制", copyFail: "复制失败" })[k] || k; });
+        api.doCopy("583921", btn);
+        await new Promise(function (r) { setTimeout(r, 10); });
+        return { copied: copied, toasts: toasts, btnText: btn.textContent, disabled: btn.disabled };
+      }
+      let rr = await runCopy("ok", true);
+      check(rr.copied === "583921", "复制内容严格等于验证码（不含短信全文）");
+      check(rr.toasts.some(function (m) { return m === "已复制"; }) && rr.btnText === "已复制", "复制成功有轻量反馈（toast + 按钮文案）");
+      rr = await runCopy("reject", false);
+      check(rr.toasts.some(function (m) { return m === "复制失败"; }), "Clipboard 拒绝且回退失败 → 明确报错");
+      check(rr.btnText === "复制" && rr.disabled === false, "复制失败不显示成功文案、不锁按钮");
+      rr = await runCopy("none", false);
+      check(rr.toasts.some(function (m) { return m === "复制失败"; }), "无 Clipboard API 且回退失败 → 明确报错");
+      rr = await runCopy("reject", true);
+      check(rr.toasts.some(function (m) { return m === "已复制"; }), "Clipboard 拒绝但 execCommand 回退成功 → 报成功");
     }
   }
 

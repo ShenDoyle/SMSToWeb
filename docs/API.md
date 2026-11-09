@@ -59,9 +59,10 @@ Query 参数：
 | `range` | 时间范围：`1d` / `7d` / `30d` |
 | `limit` / `page` | 分页（**默认 10/页**，上限 100；非法值回退默认） |
 | `cursor` | 稳定游标（`starred|received_at|id|<sha256>`，由上一页 `next_cursor` 给出）；末段为**星标 ID 集合的 SHA-256**（该筛选条件下 ID 升序、逗号规范化后计算）。与 `page` 互斥，优先用于“加载更多” |
-| `slim` | `1` 时列表只返回 `summary`（约 20 码位）与 `code`，不回传完整 `content`；详情按 `GET /api/messages/{id}` 取 |
+| `slim` | `1` 时列表只返回 `summary`（**最多 120 码位**，前端按两行截断）与 `code`，不回传完整 `content`；详情按 `GET /api/messages/{id}` 取 |
 | `starred` | `1` 仅看星标 |
 | `unread` | `1` 仅看未读（可与 `cursor` 组合，翻页条件保持一致） |
+| `read` | `1` 仅看已读（可与 `cursor` 组合） |
 
 响应：`{ "success": true, "total": 123, "limit": 10, "page": 1, "pages": 13, "has_more": true, "next_cursor": "0|2026-10-01 12:00:08|42|<64 位 sha256>", "slim": true, "list": [ { "id", "device_id", "sim", "sim_number", "device_name", "sender", "source", "received_at", "starred", "read_at", "summary", "summary_truncated", "content_len", "code" } ] }`
 
@@ -81,15 +82,15 @@ Query 参数：
 |---|---|---|
 | POST | `/api/messages/remove` | 软删除（body: `{ ids: [..] }`，写入 deleted_at） |
 | POST | `/api/messages/restore` | 恢复软删除（body: `{ ids: [..] }`） |
-| POST | `/api/messages/clear` | 清空回收站/全部（body: `{ scope: "trash" \| "all" }`） |
+| POST | `/api/messages/clear` | 软删除匹配筛选的全部消息（body: `{ device_id?, source?, range?, q? }`） |
 | POST | `/api/messages/star` | 星标切换（body: `{ id, starred }`） |
-| POST | `/api/messages/read` | 标记已读（body: `{ id }`） |
-| DELETE | `/api/messages/{id}` | 物理删除单条 |
+| POST | `/api/messages/read` | 标记已读/未读：单条 `{ id, read? }`，或批量 `{ ids: [..], read? }`（≤200，逐条执行并返回 `updated/failed/failed_ids/unread`） |
+| DELETE | `/api/messages/{id}` | 软删除单条（写 `deleted_at`，可经 `/api/messages/restore` 恢复） |
 | GET | `/api/messages/{id}` | 单条完整消息（详情用，`slim` 列表配套） |
 
 ### GET `/api/export?format=csv|json` — 导出
 
-支持同列表的筛选参数；CSV 带 BOM 与 `attachment` 下载头，公式注入防护（`=/+-@` 开头的单元格前置单引号）。
+支持同列表的筛选参数（`q` / `source` / `device_id` / `range` / `starred` / `unread` / `read`）；CSV 带 BOM 与 `attachment` 下载头，公式注入防护（`=/+-@` 开头的单元格前置单引号）。
 
 ### GET `/api/stats` — 统计
 
@@ -140,6 +141,10 @@ body: `{ "id" }`。不存在 → 404 `NOT_FOUND`（防粘错 id 误判成功）�
 
 body: `{ "id" }`。吊销旧令牌并生成**同名**新令牌，返回新明文（一次）与新 `id`；新令牌**沿用原备注与有效期**（轮换不偷偷续期，需要续期请吊销后重建）。不存在 → 404。泄露止血场景首选。
 
+### POST `/api/tokens/rename` — 重命名
+
+body: `{ "id", "name" }`。仅修改**活跃令牌**的展示名，不影响哈希、有效期、备注与最近使用；名称规则与创建一致（字母/数字/_/-，最长 64，活跃名唯一）。不存在或已吊销 → 404 `NOT_FOUND`；非法名 → 400 `INVALID_NAME`；重名 → 400 `NAME_TAKEN`。
+
 ### 错误码约定
 
 | 状态码 | `error` | 场景 |
@@ -151,6 +156,7 @@ body: `{ "id" }`。吊销旧令牌并生成**同名**新令牌，返回新明文
 | 404 | `NOT_FOUND` | 吊销/轮换的 id 不存在 |
 | 400 | `INVALID_TTL` | 会话时长非法（非整数 / 不在 5~43200 分钟范围内） |
 | 400 | `INVALID_SETTING` | 未知设置键 / 值类型或范围非法（响应带 `setting`） |
+| 400 | `INVALID_TARGETS` | 多目标数组非法（渠道不存在 / 名称为空或超长 / 字段校验失败 / 超 50 项） |
 | 400 | `RESERVED_KEY` | 试图写入或清除保留键 `schema_meta` / `settings_rev` |
 | 401 | — | 未登录（会话缺失或过期） |
 | 409 | `REVISION_CONFLICT` | 携带的 `revision` 与当前修订号不符（并发保存），响应带最新 `revision` |
@@ -184,7 +190,16 @@ body: `{ "id" }`。吊销旧令牌并生成**同名**新令牌，返回新明文
           "secret": { "sensitive": true, "configured": true, "masked": "••••" }
         }
       }
-    }
+    },
+    "targets": [
+      {
+        "id": "nt_7f3a2c91", "channel": "feishu", "name": "研发群", "enabled": true, "configured": true,
+        "fields": {
+          "webhook": { "sensitive": true, "configured": true, "masked": "••••a111" },
+          "secret": { "sensitive": true, "configured": true, "masked": "••••3456" }
+        }
+      }
+    ]
   },
   "notify_schema": { "types": ["verify", "sms", "notify"], "retry_max": 3, "channels": [ { "key": "feishu", "label": "飞书", "fields": [ { "key": "webhook", "sensitive": true } ] } ] }
 }
@@ -192,6 +207,7 @@ body: `{ "id" }`。吊销旧令牌并生成**同名**新令牌，返回新明文
 
 - `revision`：设置修订号，用于并发保存校验。
 - `notify.channels.<渠道>.source`：`db` = 值来自数据库，`env` = 回退旧环境变量；`configured=false` 表示未配置。
+- `notify.targets`：**多目标配置**（JSON 数组，每项 `{ id, channel, name, enabled, fields }`），与单目标字段并存；只要该数组非空，发送时就按目标逐条独立转发，单目标 `channels` 仅作为兼容回退。敏感字段同样只返回 `configured` + `masked`。
 - 非敏感字段返回 `value`；敏感字段只返回 `configured` + `masked`（末 4 位，长度 ≤4 时仅 `••••`）。
 - `notify_schema` 供设置页动态渲染渠道与字段，不包含任何值。
 - `schema_meta`（结构指纹保留键）永不返回。
@@ -214,7 +230,11 @@ body: `{ "id" }`。吊销旧令牌并生成**同名**新令牌，返回新明文
     "types": ["sms"],
     "retry": 2,
     "link": "https://example.com/",
-    "channels": { "feishu": { "enabled": true, "webhook": "https://open.feishu.cn/...", "secret": "..." } }
+    "channels": { "feishu": { "enabled": true, "webhook": "https://open.feishu.cn/...", "secret": "..." } },
+    "targets": [
+      { "channel": "feishu", "name": "研发群", "enabled": true, "fields": { "webhook": "https://open.feishu.cn/...", "secret": "..." } },
+      { "id": "nt_7f3a2c91", "channel": "telegram", "name": "值班 TG", "enabled": true, "fields": { "chat_id": "1024" } }
+    ]
   },
   "clear": ["notify.feishu.secret", "notify.link"]
 }
@@ -223,6 +243,7 @@ body: `{ "id" }`。吊销旧令牌并生成**同名**新令牌，返回新明文
 语义：
 
 - **敏感字段传空值 = 不修改**（避免误清空）；要清除必须放进 `clear`。
+- `notify.targets`：数组整体替换；不带 `id` 的项创建新目标，带 `id` 的项更新既有目标；**目标内敏感字段留空 = 沿用该 id 的旧密文**（编辑时无需回传明文）。传 `[]` 清空多目标并回退单目标配置；上限 50 项，渠道必须存在，名称 1~64 字。
 - `clear` 中：**渠道字段**写空串（同时遮蔽同名旧环境变量）；**渠道开关 / 全局规则 / 普通标量**删除键（回退环境变量或默认值）。
 - `settings` 接受与 `notify` 等价的扁平键名（如 `notify.retry`），便于脚本调用。
 - `revision` 可选；携带时必须等于当前修订号，否则 409 `REVISION_CONFLICT`，整批不写。
@@ -236,7 +257,7 @@ body: `{ "id" }`。吊销旧令牌并生成**同名**新令牌，返回新明文
 
 ### POST `/api/settings/notify/test` — 测试通知
 
-body: `{ "channel": "feishu" }`。只测试指定渠道，绕过总开关、类型规则与该渠道启停（便于启用前验证）。
+body: `{ "channel": "feishu", "target_id": "nt_7f3a2c91" }`。只测试指定渠道/目标，绕过总开关、类型规则与渠道启停（便于启用前验证）；`target_id` 省略时测试该渠道单目标配置。
 
 | 状态码 | 说明 |
 |---|---|

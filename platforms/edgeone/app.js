@@ -561,33 +561,59 @@ async function hmacSha256Base64(secret, payload) {
   return btoa(bin);
 }
 
-/* 服务端精简版验证码检测（与前端七级级联语义对齐的轻量三态版，通知样式共用）：
+/* 服务端精简验证码检测（与前端 extractCode 的七级级联合同语义，供列表卡片 code 字段与通知三态共用）：
  * ① 码在前（必须先于关键词在前——防「123456是您的验证码，您有2000积分」取 2000）
  * ② 关键词在前：a.分隔码（防 1234 5678 被截断成 1234） b.紧邻数字（非数字间隔 ≤8）
- * ③ Google 风格 G-123456。
- * 检测前剥离手机号/日期/时间/金额/单号等干扰串；仅用于转发标题与卡片高亮，检测失败自动走普通样式 */
+ * ③ Google 风格 G-123456；④ 字母数字混合码；⑤ 剥离干扰后唯一数字兜底。
+ * 中文 / 英文 / 中英混合关键词同一套规则；检测前剥离手机号/日期/时间/金额/单号等干扰串。
+ * 说明：列表中 slim 模式不回传正文，前端只能依赖本函数返回的 code，因此规则必须与前端
+ * extractCode 保持同级联顺序（本轮仅把前端已有的英文关键词与边界规则移植过来，未改算法结构）。 */
 function extractCodeLite(content) {
   const s0 = String(content || "");
   if (!s0) return "";
-  let s = s0
-    .replace(/\+?\d[\d-]{7,11}\d/g, " ")                                    /* 手机号/座机（≥9 位数字串） */
-    .replace(/\d{4}[-/年]\d{1,2}[-/月]\d{1,2}日?/g, " ")                    /* 日期 */
+  const KW = "验证码|校验码|检验码|确认码|激活码|动态码|动态密码|动态口令|授权码|安全码|随机码|认证码|取件码|提货码|登录码|驗證碼|校驗碼|認證碼|verification\\s*code|security\\s*code|confirmation\\s*code|access\\s*code|auth(?:entication)?\\s*code|login\\s*code|one[-\\s]?time\\s*(?:code|password)|pass\\s*code|passcode|2fa|otp";
+  let s = String(s0 || "").replace(/\s+/g, " ");
+  if (!new RegExp("(?:" + KW + ")", "i").test(s)) return "";
+  s = s
+    .replace(/\+?\d[\d-]{7,11}\d/g, " ")                                    /* 手机号/座机（9~13 位数字串） */
+    .replace(/\d{4}[-/年.]\d{1,2}[-/月.]\d{1,2}日?/g, " ")                  /* 日期（2026-10-27 / 2026年10月27日） */
+    .replace(/\d{1,2}\/\d{1,2}\/\d{2,4}/g, " ")                             /* 日期（10/27/2026） */
     .replace(/\d{1,2}:\d{2}(?::\d{2})?/g, " ")                              /* 时间 */
-    .replace(/[¥￥$]\s*\d+(?:\.\d+)?\s*元?/g, " ").replace(/\d+(?:\.\d+)?\s*元/g, " ")  /* 金额 */
-    .replace(/(?:订单|工单|账单|流水|快递|运单|取件)[号码]?[:：#]?\s*[A-Za-z0-9-]{6,}/g, " ");  /* 各类单号 */
+    .replace(/[¥￥$€£]\s*\d+(?:\.\d+)?\s*(?:元|USD|EUR)?/gi, " ")            /* 金额（¥2000 / $20.00） */
+    .replace(/\d+(?:\.\d+)?\s*(?:元|块钱|人民币)/g, " ")                     /* 金额（2000元） */
+    .replace(/(?:订单|工单|账单|流水|参考|凭证|编号)[号码]?[:：#]?\s*[A-Za-z0-9-]{4,}/g, " ")
+    .replace(/(?:快递|运单|取件)[号码]?[:：#]?\s*[A-Za-z0-9-]{6,}/g, " ")
+    .replace(/(?:order|invoice|reference|ref|transaction|txn|ticket)\s*(?:no\.?|number|#|id)?\s*[:：#]?\s*[A-Za-z0-9-]{4,}/gi, " ")
+    .replace(/(?:tracking|waybill)\s*(?:no\.?|number|#|id)?\s*[:：#]?\s*[A-Za-z0-9-]{6,}/gi, " ")
+    /* 明确非验证码语境的数字：错误码/状态码、时长/年份、客服热线 */
+    .replace(/(?:错误|失败|状态|响应|业务|故障|返回)[代码号]*\s*[:：]?\s*\d{4,8}/g, " ")
+    .replace(/(?:error|status|response|result|failure)\s*code\s*[:#]?\s*\d{4,8}/gi, " ")
+    .replace(/\d{4,8}\s*(?:秒|分钟|小时|天|年|个月|周)/g, " ")
+    .replace(/(?:拨打|致电|客服电话|客服|热线|电话)\s*[:：]?\s*\d{4,8}/g, " ");
   let m;
-  /* ① 码在前：123456…验证码（码与关键词间允许 ≤4 个非字母数字符号 + 可选连接词） */
-  m = s.match(/(?:^|[^0-9A-Za-z])(\d{4,8})[^\dA-Za-z]{0,4}(?:是您?的|是你?的|为你?的|的)?(?:登录|注册|支付|校验|身份)?验证码/);
+  /* ① 码在前（中文）：123456…验证码 */
+  m = s.match(/(?:^|[^0-9A-Za-z])(\d{4,8})(?![0-9])[^\dA-Za-z]{0,4}(?:是您?的|是你?的|为你?的|的)?(?:登录|注册|支付|校验|身份)?(?:验证码|校验码|检验码|确认码|认证码|激活码|动态密码|动态码|授权码|安全码)/);
   if (m) return m[1];
-  /* ②a 关键词在前 + 分隔码：验证码…1234 5678 / 1234-5678（两侧各 3-4 位） */
-  m = s.match(/验证码(?:登录|注册|支付|校验)?[^\d]{0,6}?(\d{3,4})[ -](\d{3,4})(?![0-9])/);
+  /* ① 码在前（英文）：918204 is your verification code / 483920 as your OTP */
+  m = s.match(/(?:^|[^0-9A-Za-z])(\d{4,8})(?![0-9])[^\dA-Za-z]{0,8}(?:is\s+|as\s+)?(?:your\s+|the\s+)?(?:verification|security|confirmation|access|auth(?:entication)?|login|one[-\s]?time|otp|2fa)\s*(?:code|password)?/i);
+  if (m) return m[1];
+  /* ②a 关键词在前 + 分隔码：验证码 1234 5678 / 取件码 8-2-307（2~3 段） */
+  m = new RegExp("(?:" + KW + ")[^\\d]{0,10}?(\\d{1,4}(?:[ -]\\d{1,4}){1,2})(?![0-9])", "i").exec(s);
+  if (m) return m[1].replace(/[- ]/g, "");
+  /* ②a2 关键词在前 + 两段码（兼容仅两段的分隔写法） */
+  m = new RegExp("(?:" + KW + ")[^\\d]{0,10}?(\\d{3,4})[ -](\\d{3,4})(?![0-9])", "i").exec(s);
   if (m) return m[1] + m[2];
-  /* ②b 关键词在前 + 紧邻数字：验证码…123456（非数字间隔 ≤8，不跨句） */
-  m = s.match(/验证码(?:登录|注册|支付|校验)?[^\d]{0,8}?(\d{4,8})/);
+  /* ②b 关键词在前 + 紧邻数字：验证码…123456 / verification code is 918204 */
+  m = new RegExp("(?:" + KW + ")[^\\d]{0,12}?(?:is\\s+)?(?:\\d{3,4}[ -])?(\\d{4,8})(?![0-9])", "i").exec(s);
   if (m) return m[1];
   /* ③ Google 风格：G-123456 */
   m = s.match(/[Gg]-(\d{3,8})(?![0-9])/);
   if (m) return m[1];
+  /* ④ 字母数字混合（须同时含字母与数字；右侧不得紧贴字母数字） */
+  m = new RegExp("(?:" + KW + ")[^0-9A-Za-z]{0,4}([0-9A-Za-z]{4,8})(?![0-9A-Za-z])", "i").exec(s);
+  if (m && /[0-9]/.test(m[1]) && /[A-Za-z]/.test(m[1])) return m[1];
+  /* ⑤ 无法确定 → 空串。正文里出现验证码关键词但没有任何“码在前/码在后”的关联时，
+     孤立的 4–8 位数字可能是错误代码、订单号、年份、时长等，不能当作验证码返回。 */
   return "";
 }
 
@@ -721,6 +747,23 @@ function resolveNotifyConfig(env, rows) {
     ch.configured = spec.need.every(function (f) { return !!ch.fields[f]; });
     cfg.channels[name] = ch;
   }
+  /* 多目标：notify.targets（JSON 数组，每项 {id,channel,name,enabled,fields}）优先于单目标字段 */
+  cfg.targets = [];
+  if (rows && rows["notify.targets"] !== undefined) {
+    try {
+      const arr = JSON.parse(rows["notify.targets"]);
+      if (Array.isArray(arr)) {
+        cfg.targets = arr.filter(function (t) { return t && NOTIFY_CHANNELS[t.channel]; }).map(function (t) {
+          const spec = NOTIFY_CHANNELS[t.channel];
+          const fields = {};
+          for (const f of Object.keys(spec.fields)) {
+            fields[f] = String((t.fields && t.fields[f]) === undefined || (t.fields && t.fields[f]) === null ? "" : t.fields[f]);
+          }
+          return { id: String(t.id || ""), channel: t.channel, name: String(t.name || "").slice(0, TOKEN_NAME_MAX), enabled: t.enabled !== false, fields: fields };
+        });
+      }
+    } catch (e) { cfg.targets = []; }
+  }
   return cfg;
 }
 
@@ -818,6 +861,48 @@ async function dispatchNotify(env, msg, opts) {
   if (!only) {
     if (!cfg.enabled) return mode.collect ? [] : undefined;
     if (cfg.types.indexOf(info.type) === -1) return mode.collect ? [] : undefined;
+  }
+  /* 多目标模式：逐个目标独立发送（单个失败不影响其他目标），复用下面的渠道渲染逻辑。
+     多目标只覆盖「自己所属的渠道」：未被目标覆盖的已启用单目标渠道并入同一列表继续发送，
+     避免「配了一个多目标就把 Telegram / 企微等单目标渠道整体静默」。 */
+  if (cfg.targets && cfg.targets.length && !mode._single) {
+    let list = cfg.targets;
+    if (only) list = list.filter(function (x) { return x.channel === only; });
+    if (mode.target_id) list = list.filter(function (x) { return x.id === String(mode.target_id); });
+    if (!mode.target_id) {
+      const covered = {};
+      list.forEach(function (x) { covered[x.channel] = true; });
+      Object.keys(NOTIFY_CHANNELS).forEach(function (nm) {
+        const ch = cfg.channels[nm];
+        const allowed = only ? only === nm : !!(ch && ch.enabled);
+        if (covered[nm] || !allowed) return;
+        list = list.concat([{ id: "", channel: nm, name: "", enabled: true, fields: Object.assign({}, ch.fields) }]);
+      });
+    }
+    if (!list.length) return mode.collect ? [] : undefined;
+    const out = [];
+    for (const tg of list) {
+      const clone = { enabled: true, types: NOTIFY_TYPES.slice(), retry: cfg.retry, link: cfg.link, channels: {}, targets: [] };
+      for (const nm of Object.keys(NOTIFY_CHANNELS)) clone.channels[nm] = { enabled: false, fields: {}, fromDb: true, configured: false };
+      const spec = NOTIFY_CHANNELS[tg.channel];
+      clone.channels[tg.channel] = {
+        enabled: !!tg.enabled,
+        fields: Object.assign({}, tg.fields),
+        fromDb: true,
+        configured: spec.need.every(function (f) { return !!tg.fields[f]; }),
+      };
+      const r = await dispatchNotify(env, msg, Object.assign({}, mode, { config: clone, _single: true, target_id: "" })).catch(function (e) {
+        /* 单个目标的意外异常不得中断后续目标；仅记录并转为该目标失败结果 */
+        logEvent("error", "notify_forward_failed", "notify", env, "-", { message: safeNotifyError(e) });
+        return mode.collect ? [{ channel: tg.channel, ok: false, error: safeNotifyError(e) }] : undefined;
+      });
+      if (mode.collect && Array.isArray(r)) {
+        out.push.apply(out, r.map(function (x) {
+          return Object.assign({}, x, { target_id: tg.id, target_name: tg.name, channel: tg.channel });
+        }));
+      }
+    }
+    return mode.collect ? out : undefined;
   }
   /* 仅测试指定渠道时可绕过开关，便于启用前验证配置是否可用 */
   const active = function (name) {
@@ -1276,6 +1361,7 @@ async function handleListMessages(url, env) {
   const rangeDays = { "1d": 1, "7d": 7, "30d": 30 }[range] || 0;
   const starredOnly = url.searchParams.get("starred") === "1";
   const unreadOnly = url.searchParams.get("unread") === "1";
+  const readOnly = url.searchParams.get("read") === "1";
 
   const where = ["m.deleted_at IS NULL"];
   const params = [];
@@ -1297,6 +1383,7 @@ async function handleListMessages(url, env) {
   }
   if (starredOnly) where.push("m.starred = 1");
   if (unreadOnly) where.push("m.read_at IS NULL");
+  if (readOnly) where.push("m.read_at IS NOT NULL");
   if (rawCursor && !cursor) return json({ success: false, error: "INVALID_CURSOR" }, 400);
 
   /* 游标条件与 ORDER BY (starred DESC, received_at DESC, id DESC) 严格对应 */
@@ -1367,10 +1454,12 @@ async function handleListMessages(url, env) {
 
   for (const r of rows) {
     delete r._starids;
-    /* Unicode 安全摘要：按码位截取（emoji/中文不被切断），约 20 字 */
+    /* Unicode 安全摘要：按码位截取（emoji/中文不被切断）。
+       上限放宽到 120 码位：卡片按 CSS 两行截断，超出才显示「查看全文」；
+       仍不回传完整正文（详情按 id 单独取），保持摘要 API 架构不变。 */
     const chars = Array.from(String(r.content || ""));
-    r.summary = chars.slice(0, 20).join("");
-    r.summary_truncated = chars.length > 20;
+    r.summary = chars.slice(0, 120).join("");
+    r.summary_truncated = chars.length > 120;
     r.code = extractCodeLite(r.content);
     r.sim_number = r.sim || "";
     /* slim：正文不回传前端（摘要/验证码/长度足够渲染卡片），详情按 id 单独取 */
@@ -1431,6 +1520,9 @@ async function handleExport(url, env) {
   const source = (url.searchParams.get("source") || "").trim();
   const range = (url.searchParams.get("range") || "").trim();
   const rangeDays = { "1d": 1, "7d": 7, "30d": 30 }[range] || 0;
+  const starOnly = url.searchParams.get("starred") === "1";
+  const unreadOnly = url.searchParams.get("unread") === "1";
+  const readOnly = url.searchParams.get("read") === "1";
   const format = (url.searchParams.get("format") || "csv").toLowerCase() === "json" ? "json" : "csv";
 
   const where = ["m.deleted_at IS NULL"];
@@ -1442,6 +1534,9 @@ async function handleExport(url, env) {
     params.push(new Date(Date.now() - rangeDays * 86400000).toISOString().replace("T", " ").slice(0, 19));
   }
   if (q) { where.push("(m.content LIKE ? OR m.sender LIKE ?)"); params.push("%" + q + "%", "%" + q + "%"); }
+  if (starOnly) where.push("m.starred = 1");
+  if (unreadOnly) where.push("m.read_at IS NULL");
+  if (readOnly) where.push("m.read_at IS NOT NULL");
   const whereSql = where.length ? "WHERE " + where.join(" AND ") : "";
 
   const rows = (await env.DB.prepare(
@@ -1540,9 +1635,31 @@ async function handleStarMessage(request, env) {
 }
 async function handleReadMessage(request, env) {
   let body; try { body = await request.json(); } catch { return json({ success: false, error: "invalid json" }, 400); }
+  const read = body && (body.read === true || body.read === 1 || body.read === "1");
+  /* 批量：body.ids = [..]（≤200）→ 逐条执行并返回逐条结果，支持“部分失败”如实上报 */
+  if (Array.isArray(body && body.ids)) {
+    const ids = body.ids.map(function (x) { return parseInt(x, 10); }).filter(function (n) { return Number.isInteger(n) && n > 0; });
+    if (!ids.length) return json({ success: false, error: "no ids" }, 400);
+    if (ids.length > 200) return json({ success: false, error: "too many ids" }, 400);
+    const okIds = [], failedIds = [];
+    for (const id of ids) {
+      try {
+        const res = read
+          ? await env.DB.prepare("UPDATE messages SET read_at = datetime('now') WHERE id = ?1").bind(id).run()
+          : await env.DB.prepare("UPDATE messages SET read_at = NULL WHERE id = ?1").bind(id).run();
+        const ch = res && res.meta ? res.meta.changes : 0;
+        if (ch > 0) okIds.push(id); else failedIds.push(id);
+      } catch (e) { failedIds.push(id); }
+    }
+    let unread = null;
+    try {
+      const t = await env.DB.prepare("SELECT SUM(CASE WHEN read_at IS NULL THEN 1 ELSE 0 END) AS u FROM messages WHERE deleted_at IS NULL").first();
+      unread = (t && t.u) || 0;
+    } catch (e) {}
+    return json({ success: true, read: read, updated: okIds.length, failed: failedIds.length, failed_ids: failedIds, unread: unread });
+  }
   const id = parseInt(body && body.id, 10);
   if (!Number.isInteger(id) || id <= 0) return json({ success: false, error: "invalid id" }, 400);
-  const read = body && (body.read === true || body.read === 1 || body.read === "1");
   if (read) await env.DB.prepare("UPDATE messages SET read_at = datetime('now') WHERE id = ?1").bind(id).run();
   else await env.DB.prepare("UPDATE messages SET read_at = NULL WHERE id = ?1").bind(id).run();
   return json({ success: true, read: read });
@@ -1980,6 +2097,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
 <style>
   ${DS_TOKENS_CSS}
   * { box-sizing: border-box; margin: 0; padding: 0; }
+  [hidden] { display: none !important; }
   body { font: 14px/1.6 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
          background: var(--bg); color: var(--text); padding: 0 0 40px; }
   .wrap { max-width: 760px; margin: 0 auto; padding: 16px; }
@@ -2056,6 +2174,30 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .copy:focus-visible { outline: 2px solid var(--ds-color-link); outline-offset: 2px; }
   .line { margin-top: 4px; }
   .content { word-break: break-word; white-space: pre-wrap; }
+  /* 摘要卡片：固定两行截断；是否显示「查看全文」由 JS 实测溢出决定（不按字数猜） */
+  .content.summary { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+                     overflow: hidden; white-space: pre-wrap; }
+  .more[hidden] { display: none; }
+  /* 单条已读：小尺寸、低干扰，仅未读消息出现 */
+  .rbtn { border: 1px solid var(--ds-color-border); background: var(--ds-color-bg-surface);
+          color: var(--ds-color-text-secondary); border-radius: var(--ds-radius-sm);
+          font-size: 11px; padding: 1px 8px; cursor: pointer; min-height: 24px; line-height: 1.4; }
+  .rbtn:hover { border-color: var(--ds-color-primary); color: var(--ds-color-primary); }
+  .rbtn:disabled { opacity: .5; cursor: progress; }
+  /* 批量操作区（列表页独立，不在设置中心） */
+  .bulkbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 4px 0 8px; }
+  .bulkbar .bulkmeta { color: var(--ds-color-text-secondary); font-size: 12px; }
+  /* 详情弹窗：正文为主体 */
+  .detail-body { white-space: pre-wrap; word-break: break-word; line-height: 1.7; font-size: 15px;
+                 color: var(--ds-color-text); background: var(--ds-color-bg-subtle);
+                 border: 1px solid var(--ds-color-border-subtle); border-radius: var(--ds-radius-lg);
+                 padding: 12px; margin: 4px 0 10px; max-height: 46vh; overflow: auto; }
+  .detail-body .empty-text { color: var(--ds-color-text-tertiary); font-size: 13px; }
+  .detail-meta { border: 1px solid var(--ds-color-border-subtle); border-radius: var(--ds-radius-lg);
+                 padding: 2px 12px 6px; margin-bottom: 12px; }
+  .detail-sec { font-size: var(--ds-text-xs); color: var(--ds-color-text-tertiary); margin: 8px 0 2px; }
+  .detail-actionrow { display: flex; flex-wrap: wrap; gap: 8px; }
+  .detail-actionrow + .detail-actionrow { margin-top: 10px; }
   .content a { color: var(--link); word-break: break-all; }
   .time-line { color: var(--faint); font-size: 12px; cursor: default; }
   .foot-line { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
@@ -2337,6 +2479,197 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .srctag.s-alert { background: var(--ds-color-warning); }
   .srctag.s-other { background: var(--ds-color-text-secondary); }
   .star.on { color: var(--ds-color-warning); }
+  /* ===== V2 仪表盘布局：消息中心（与静态原型对齐） ===== */
+  body { background: var(--bg); }
+  .wrap { max-width: 1180px; padding: 18px 20px 40px; }
+  .gh { display: none; }
+  .topbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 16px; }
+  .brand { display: flex; align-items: center; gap: 11px; }
+  .logo { width: 38px; height: 38px; border-radius: 11px; background: var(--accent); color: #fff;
+          display: grid; place-items: center; font-weight: 800; font-size: 15px; box-shadow: var(--ds-shadow-1); }
+  .brand-name { font-size: 17px; font-weight: 700; letter-spacing: -.2px; }
+  .brand-sub { font-size: 12px; color: var(--muted); }
+  .top-actions { display: flex; gap: 8px; align-items: center; }
+  .top-actions .tbtn { padding: 7px 12px; min-height: 34px; font-size: 13px; border-radius: 8px; }
+  .page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin: 0 0 14px; }
+  .page-head h1 { font-size: 22px; letter-spacing: -.4px; margin: 0 0 2px; }
+  .subtitle { color: var(--muted); font-size: 12px; }
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr) 268px; gap: 14px; align-items: start; }
+  .panel { background: var(--card); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--ds-shadow-1); }
+  .toolbar { display: block; padding: 12px 16px; margin: 0; border-bottom: 1px solid var(--row-border); }
+  .toolbar-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+  .toolbar-title { font-size: 15px; font-weight: 700; }
+  .toolbar-title #stat { font-size: 12px; color: var(--muted); font-weight: 400; margin-left: 6px; }
+  .filters { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .chip { border: 1px solid var(--border); background: var(--card); border-radius: 999px; padding: 5px 11px;
+          color: var(--muted); font-size: 12px; min-height: 30px; cursor: pointer; }
+  .chip:hover { border-color: var(--accent); color: var(--accent); }
+  .chip.active { background: var(--accent-bg); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .filters .searchwrap { flex: 1; min-width: 170px; margin-left: auto; }
+  .filters .searchwrap input { min-height: 32px; padding: 6px 28px 6px 10px; border-radius: 8px; font-size: 13px; }
+  .filters select { min-height: 32px; padding: 5px 8px; border-radius: 8px; font-size: 12px;
+                    background: var(--card); color: var(--text); border: 1px solid var(--border); }
+  .bulk { display: none; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 16px;
+          background: var(--ds-color-bg-subtle); border-bottom: 1px solid var(--row-border); font-size: 12px; color: var(--muted); }
+  body.selecting .bulk { display: flex; }
+  .bulk[hidden] { display: none; }
+  .bulk .count { font-weight: 600; color: var(--accent); }
+  .bulk .spacer { flex: 1; }
+  .bulk .tbtn { padding: 4px 9px; font-size: 12px; min-height: 28px; }
+  .bulk-check { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+  .select-hint { font-size: 11px; color: var(--faint); margin-left: 6px; font-weight: 400; }
+  .list { display: block; padding: 0 16px; }
+  .daysep { font-size: 11px; color: var(--faint); font-weight: 600; margin: 12px 0 2px; }
+  .card { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; background: transparent;
+          border: 0; border-bottom: 1px solid var(--row-border); border-radius: 6px; padding: 14px 0;
+          animation: slidein .25s ease-out; position: relative; -webkit-touch-callout: none;
+          -webkit-user-select: none; user-select: none; }
+  .card:last-child { border-bottom: 0; }
+  .card.selected { background: var(--ds-color-primary-subtle); }
+  .card.pressing { background: var(--ds-color-bg-subtle); }
+  .device-icon { width: 30px; height: 30px; border-radius: 8px; background: var(--accent-bg); display: grid;
+                 place-items: center; color: var(--accent); font-size: 13px; flex: none; }
+  .tab .tmain { min-width: 0; flex: 1; display: flex; flex-direction: column; }
+  .tab .tsub, .tab .tname { display: block; }
+  body.selecting .card { grid-template-columns: 20px minmax(0, 1fr); }
+  .card.flash { animation: slidein .25s ease-out, flash 1.6s ease-out; }
+  .selwrap { display: none; padding-top: 3px; }
+  body.selecting .selwrap { display: block; position: static; }
+  .selwrap input { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
+  .msg-main { min-width: 0; }
+  .msg-top { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-bottom: 4px; }
+  .avatar-sm { width: 26px; height: 26px; border-radius: 50%; flex: none; display: grid; place-items: center;
+               background: var(--accent-bg); color: var(--accent); font-size: 12px; font-weight: 700; }
+  .sender { font-size: 14px; font-weight: 700; color: var(--text); }
+  .phone { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .tag { font-size: 11px; border-radius: 5px; padding: 1px 7px; background: var(--bg); color: var(--muted); white-space: nowrap; }
+  .tag.type { background: rgba(37,99,235,.10); color: var(--ds-color-info); }
+  .tag.unread-tag { background: rgba(180,83,9,.12); color: var(--ds-color-warning); }
+  .tag.star-tag { color: var(--ds-color-warning); background: transparent; }
+  .msg-time { margin-left: auto; color: var(--faint); font-size: 11px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .content.summary { margin: 0 0 7px; font-size: 13px; line-height: 1.6; color: var(--muted); white-space: pre-wrap; }
+  .msg-bottom { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .msg-meta { font-size: 11px; color: var(--faint); }
+  .msg-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; flex-wrap: wrap; }
+  .msg-actions .star, .msg-actions .del { border: 0; background: none; color: var(--faint); cursor: pointer;
+                                          font-size: 12px; padding: 4px 5px; border-radius: 6px; margin: 0; }
+  .msg-actions .star.on { color: var(--ds-color-warning); }
+  .msg-actions .star:hover, .msg-actions .del:hover { background: var(--bg); }
+  .msg-actions .del { color: var(--faint); display: none; }
+  .msg-actions .del:hover { color: var(--danger); }
+  body.selecting .msg-actions .del { display: inline-flex; }
+  .msg-actions .rbtn { border: 1px solid var(--accent); background: var(--accent-bg); color: var(--accent);
+                       border-radius: 7px; font-size: 12px; padding: 4px 9px; min-height: 28px; cursor: pointer; }
+  .msg-actions .more { border: 0; background: none; color: var(--link); font-size: 12px; padding: 4px 5px; }
+  .msg-actions .more:hover { background: var(--bg); }
+  /* 验证码胶囊：顶部右侧；主色绿（与全局强调色一致），右段为实心复制按钮 */
+  .code-chip { display: inline-flex; align-items: stretch; overflow: hidden; font-family: var(--ds-font-mono);
+               font-size: 12px; font-weight: 700; color: var(--accent); background: var(--accent-bg);
+               border: 1px solid var(--accent); border-radius: 7px; line-height: 1; }
+  .code-chip .code-val { display: inline-flex; align-items: center; padding: 2px 7px 2px 8px; letter-spacing: 1px; color: var(--accent); }
+  .code-chip .copy { display: inline-flex; align-items: center; justify-content: center; border: 0;
+                     border-left: 1px solid var(--accent); background: var(--accent); color: #fff;
+                     font-family: var(--ds-font-family); font-size: 11px; font-weight: 600; padding: 2px 9px;
+                     min-height: 22px; min-width: 40px; cursor: pointer; transition: background .15s; }
+  .code-chip .copy:hover { background: var(--accent-deep); }
+  .code-chip .copy:active { background: var(--accent-deep); filter: brightness(.94); }
+  .code-chip .copy:disabled { opacity: .75; cursor: default; }
+  .code-chip .copy:focus-visible { outline: 2px solid var(--ds-color-link); outline-offset: -2px; }
+  .msg-top .code-chip { margin-left: 6px; }
+  .plan-hint { color: var(--faint); font-size: 11px; }
+  /* 右侧栏 */
+  .sidebar { display: flex; flex-direction: column; gap: 12px; }
+  .side-card { padding: 14px 16px; }
+  .side-title { font-weight: 700; font-size: 13px; margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .side-title .mini-link { font-size: 12px; font-weight: 500; color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; }
+  .tabs { display: flex; flex-direction: column; gap: 0; overflow: visible; padding: 0; margin: 0; }
+  .tab { display: flex; align-items: center; gap: 8px; flex: none; padding: 8px 0; border: 0; border-bottom: 1px solid var(--row-border);
+         border-radius: 0; background: none; cursor: pointer; font-size: 12px; color: var(--text); white-space: normal; text-align: left; }
+  .tab:last-child { border-bottom: 0; }
+  .tab.active { background: none; color: var(--accent); font-weight: 600; }
+  .tab .tname { font-weight: 600; }
+  .tab .tsub { font-size: 11px; color: var(--faint); font-weight: 400; }
+  .tab .tcount { margin-left: auto; font-size: 11px; color: var(--faint); white-space: nowrap; }
+  .tab .tabop { margin-left: 0; font-size: 12px; padding: 2px 3px; }
+  .settings-rows, .side-rows { display: flex; flex-direction: column; gap: 2px; }
+  .settings-mini, .side-row { display: flex; justify-content: space-between; align-items: center; gap: 8px;
+                              padding: 7px 0; border-bottom: 1px solid var(--row-border); font-size: 12px; color: var(--muted); }
+  .settings-mini:last-child, .side-row:last-child { border-bottom: 0; }
+  .settings-mini strong, .side-row strong { color: var(--text); font-size: 12px; font-weight: 600; }
+  .scope { font-size: 10px; border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; color: var(--muted); white-space: nowrap; }
+  .scope.browser { color: var(--ds-color-warning); border-color: var(--ds-color-warning); }
+  .scope.global { color: var(--ds-color-info); border-color: var(--ds-color-info); }
+  .pagination { padding: 11px 16px; border-top: 1px solid var(--row-border); display: flex; align-items: center;
+                justify-content: space-between; color: var(--faint); font-size: 11px; gap: 8px; flex-wrap: wrap; }
+  .pages { display: flex; gap: 4px; align-items: center; }
+  .pages button { border: 1px solid var(--border); background: var(--card); border-radius: 6px; padding: 3px 9px; color: var(--muted); font-size: 12px; min-height: 28px; }
+  .pages button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  .pages button:disabled { opacity: .4; cursor: default; }
+  .jumpwrap { display: flex; gap: 6px; align-items: center; }
+  .jumpwrap input { width: 64px; padding: 4px 8px; border: 1px solid var(--border); border-radius: 6px;
+                    background: var(--card); color: var(--text); font-size: 12px; min-height: 28px; }
+  .jumpwrap button { border: 1px solid var(--border); background: var(--card); color: var(--text); border-radius: 6px;
+                     padding: 3px 9px; font-size: 12px; min-height: 28px; cursor: pointer; }
+  .morewrap { display: flex; justify-content: center; margin: 0; padding: 12px 0; border-top: 1px solid var(--row-border); }
+  .morewrap .tbtn { font-size: 12px; }
+  .nomore { color: var(--faint); font-size: 11px; padding: 4px 0; }
+  .selbar { position: static; transform: none; left: auto; bottom: auto; display: flex; align-items: center; gap: 8px;
+            background: var(--ds-color-bg-subtle); border: 0; border-bottom: 1px solid var(--row-border); border-radius: 0;
+            padding: 8px 16px; z-index: auto; flex-wrap: wrap; }
+  .selbar span { font-size: 12px; color: var(--muted); }
+  .selbar .tbtn { min-height: 28px; font-size: 12px; padding: 4px 9px; }
+  .newpill { bottom: 26px; background: var(--accent); }
+  .foot { margin-top: 24px; }
+  /* 详情/设置弹层：与原型一致的宽版卡片 */
+  .modal { background: rgba(15,25,43,.45); align-items: center; }
+  .sheet { max-width: 760px; max-height: 90vh; padding: 0; border-radius: 14px; overflow: auto; }
+  .sheet h3 { font-size: 15px; margin: 0 30px 2px 0; }
+  .mx { top: 12px; right: 12px; width: 30px; height: 30px; border-radius: 8px; background: var(--bg); font-size: 18px; }
+  #modalbody { padding: 16px 18px 12px; }
+  .drow { font-size: 12px; }
+  .detail-content { font-size: 15px; background: var(--ds-color-bg-subtle); border: 1px solid var(--border);
+                    border-radius: 10px; padding: 14px 15px; max-height: 38vh; overflow: auto; }
+  .detail-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--row-border); }
+  .detail-actions .tbtn { font-size: 12px; min-height: 30px; }
+  .setform { max-height: 64vh; }
+  .setgrp { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px;
+            margin: 0 0 10px; border-top: 1px solid var(--border); }
+  .setgrp h4 { font-size: 13px; margin: 0 0 2px; }
+  .setgrp .ds-help { margin: 3px 0 3px; display: block; }
+  .setrow { padding: 6px 0; margin: 0; }
+  .setrow > label { font-size: 12px; }
+  .settest { font-size: 12px; }
+  /* 详情单行元信息 + 底部一行按钮 */
+  .detail-metarow { display: flex; flex-wrap: wrap; align-items: center; gap: 0 6px; font-size: 11.5px;
+                    color: var(--muted); line-height: 1.6; margin-bottom: 8px; }
+  .detail-metarow .sep { color: var(--faint); }
+  .detail-metarow .m-strong { color: var(--text); font-weight: 600; }
+  .detail-metarow .m-num { font-variant-numeric: tabular-nums; }
+  .detail-metarow .m-star { color: var(--ds-color-warning); font-weight: 700; }
+  .modal-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+                padding: 12px 18px 16px; border-top: 1px solid var(--row-border); }
+  .modal-foot .foot-left, .modal-foot .foot-right { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  @media (max-width: 960px) { .layout { grid-template-columns: 1fr; } .sidebar { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (max-width: 660px) {
+    .wrap { padding: 14px 12px 30px; }
+    .brand-sub { display: none; }
+    .page-head h1 { font-size: 20px; }
+    .sidebar { grid-template-columns: 1fr; }
+    .list { padding: 0 12px; }
+    .card { padding: 12px 0; }
+    .msg-time { margin-left: 0; }
+    .msg-top .code-chip { margin-left: auto; }
+    .msg-bottom { flex-direction: column; align-items: flex-start; gap: 6px; }
+    .msg-actions { align-self: flex-end; }
+    .code-chip .copy { min-height: 26px; padding: 3px 10px; }
+    .filters .searchwrap { width: 100%; margin-left: 0; }
+    .selbar { padding: 8px 12px; }
+    .selbar .spacer { display: none; }
+    .modal { align-items: flex-end; padding: 0; }
+    .sheet { border-radius: 18px 18px 0 0; max-height: 88dvh; }
+    .modal-foot { align-items: stretch; }
+    .modal-foot .foot-left, .modal-foot .foot-right { width: 100%; justify-content: flex-end; }
+  }
 </style>
 </head>
 <body>
@@ -2344,97 +2677,117 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   <svg viewBox="0 0 16 16" width="26" height="26" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
 </a>
 <div class="wrap">
-  <div class="head">
-    <h1>__SITE_NAME__</h1>
-    <span class="headacts">
-      <span class="setwrap">
-        <button class="tbtn" id="setbtn" data-i18n-title="settings" data-i18n="settings" aria-haspopup="true" aria-expanded="false">设置</button>
-        <div class="setmenu" id="setmenu" role="menu" aria-label="设置">
-          <button class="tbtn" id="mstats" role="menuitem" data-i18n-title="stats" data-i18n="stats">统计</button>
-          <div class="grp" data-i18n="grpMsg">消息开关</div>
-          <label class="opt"><input type="checkbox" id="autocopy"><span class="switch"></span><span data-i18n="autoCopy">自动复制验证码</span></label>
-          <label class="opt"><input type="checkbox" id="notifyon"><span class="switch"></span><span data-i18n="notifyOn">后台通知</span></label>
-          <label class="opt"><input type="checkbox" id="soundon"><span class="switch"></span><span data-i18n="soundOn">提示音</span></label>
-          <div class="grp" data-i18n="sDnd">免打扰</div>
-          <label class="opt"><input type="checkbox" id="stdnd"><span class="switch"></span><span data-i18n="sDnd">免打扰</span></label>
-          <div class="dndrow">
-            <span data-i18n="sDndRange">免打扰时段</span>
-            <input type="number" id="dnds" min="0" max="23" inputmode="numeric" data-i18n-aria="dndStart" aria-label="免打扰开始小时">
-            <span data-i18n="to">至</span>
-            <input type="number" id="dnde" min="0" max="23" inputmode="numeric" data-i18n-aria="dndEnd" aria-label="免打扰结束小时">
-            <button class="tbtn" id="dndsave" data-i18n="save">保存</button>
-          </div>
-          <div class="grp" data-i18n="grpFilter">筛选</div>
-          <div class="btnrow">
-            <button class="tbtn" id="staronly" data-i18n-title="starTip" data-i18n="starOnly" title="只看收藏">★ 收藏</button>
-            <button class="tbtn" id="unreadonly" data-i18n-title="unreadTip" data-i18n="unreadOnly" title="只看未读">● 未读</button>
-          </div>
-          <div class="grp" data-i18n="grpAction">操作</div>
-          <div class="btnrow">
-            <button class="tbtn" id="selectbtn" data-i18n-title="selectTip" data-i18n="select" title="进入批量选择">选择</button>
-            <button class="tbtn" id="clearbtn" data-i18n-title="clearTip" data-i18n="clear" title="清空当前筛选结果（软删除）">清空</button>
-            <button class="tbtn" id="exportcsv" data-i18n-title="exportCsvTip" data-i18n="exportCsv" title="按当前筛选导出 CSV">导出 CSV</button>
-            <button class="tbtn" id="exportjson" data-i18n-title="exportJsonTip" data-i18n="exportJson" title="按当前筛选导出 JSON">导出 JSON</button>
-          </div>
-          <div class="grp" data-i18n="settings">设置</div>
-          <button class="tbtn" id="msetcenter" role="menuitem" data-i18n="scMenuCenter" data-i18n-title="scMenuCenter">设置中心</button>
-          <button class="tbtn" id="msesttl" role="menuitem" data-i18n="scMenuTtl" data-i18n-title="scMenuTtl">登录有效期</button>
-          <div class="grp" data-i18n="scGrpAccess">接入</div>
-          <button class="tbtn" id="mtokens" role="menuitem" data-i18n="scMenuTokens" data-i18n-title="scMenuTokens">接入令牌</button>
-        </div>
-      </span>
-      <button class="tbtn" id="themebtn" data-i18n-title="themeTip">自动</button>
-      <button class="tbtn" id="langbtn" data-i18n-title="langTip">EN</button>
-    </span>
-  </div>
-  <div class="tabs" id="tabs" role="tablist" data-i18n-aria="devices" aria-label="设备标签"></div>
-  <div class="toolbar">
-    <div class="searchwrap">
-      <input type="search" id="q" list="qhist" data-i18n-ph="searchPh" placeholder="搜索发件人或内容…" autocomplete="off">
-      <button class="clr" id="clearq" hidden data-i18n-title="clearSearch" data-i18n-aria="clearSearch" title="清除搜索" aria-label="清除搜索">×</button>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">SMS</div>
+      <div>
+        <div class="brand-name">__SITE_NAME__</div>
+        <div class="brand-sub" data-i18n="brandSub">消息中心</div>
+      </div>
     </div>
-    <datalist id="qhist"></datalist>
-    <select id="src" data-i18n-title="srcTip" title="按来源筛选">
-      <option value="" data-i18n="allSources">全部来源</option>
-      <option value="sms" data-i18n="srcSms">短信</option>
-      <option value="notify" data-i18n="srcNotify">通知</option>
-    </select>
-    <select id="range" data-i18n-title="rangeTip" title="按时间筛选">
-      <option value="" data-i18n="allTime">全部时间</option>
-      <option value="1d" data-i18n="today">今天</option>
-      <option value="7d" data-i18n="d7">近 7 天</option>
-      <option value="30d" data-i18n="d30">近 30 天</option>
-    </select>
+    <div class="top-actions">
+      <button class="tbtn" id="themebtn" data-i18n-title="themeTip">自动</button>
+      <button class="tbtn" id="setbtn" data-i18n-title="settings" data-i18n="settings">⚙ 设置</button>
+    </div>
+  </header>
+
+  <section class="page-head">
+    <div>
+      <h1 data-i18n="pageTitle">消息中心</h1>
+      <div class="subtitle" data-i18n="pageSub">集中查看设备短信，快速处理未读消息</div>
+    </div>
+  </section>
+
+  <div class="layout">
+    <main class="panel">
+      <div class="toolbar">
+        <div class="toolbar-top">
+          <div class="toolbar-title"><span data-i18n="listTitle">短信列表</span><span id="stat"></span></div>
+          <button class="tbtn" id="refreshbtn" type="button" data-i18n-title="refresh" data-i18n="refresh" title="刷新">↻ 刷新</button>
+        </div>
+        <div class="filters">
+          <button class="chip active" id="fall" type="button" data-i18n="tabAll">全部</button>
+          <button class="chip" id="funread" type="button" data-i18n="unread">未读</button>
+          <button class="chip" id="fread" type="button" data-i18n="read">已读</button>
+          <button class="chip" id="fstar" type="button"><span data-i18n="starOnly">★ 收藏</span></button>
+          <div class="searchwrap">
+            <input type="search" id="q" list="qhist" data-i18n-ph="searchPh" placeholder="搜索发件人或内容…" autocomplete="off">
+            <button class="clr" id="clearq" hidden data-i18n-title="clearSearch" data-i18n-aria="clearSearch" title="清除搜索" aria-label="清除搜索">×</button>
+          </div>
+          <datalist id="qhist"></datalist>
+          <select id="src" data-i18n-title="srcTip" title="按来源筛选">
+            <option value="" data-i18n="allSources">全部来源</option>
+            <option value="sms" data-i18n="srcSms">短信</option>
+            <option value="notify" data-i18n="srcNotify">通知</option>
+          </select>
+          <select id="range" data-i18n-title="rangeTip" title="按时间筛选">
+            <option value="" data-i18n="allTime">全部时间</option>
+            <option value="1d" data-i18n="today">今天</option>
+            <option value="7d" data-i18n="d7">近 7 天</option>
+            <option value="30d" data-i18n="d30">近 30 天</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="selbar" id="selbar" hidden>
+        <label class="bulk-check"><input type="checkbox" id="selall"> <span data-i18n="selAllList">选择当前列表</span></label>
+        <span class="count" id="selcount">已选 0 条</span>
+        <span class="select-hint" data-i18n="selectHint">右键或长按消息可多选</span>
+        <span class="spacer"></span>
+        <span class="select-hint" data-i18n="exportHint">导出当前筛选结果</span>
+        <button class="tbtn" id="exportcsv" data-i18n-title="exportCsvTip" data-i18n="exportCsv" title="按当前筛选导出 CSV">导出 CSV</button>
+        <button class="tbtn" id="exportjson" data-i18n-title="exportJsonTip" data-i18n="exportJson" title="按当前筛选导出 JSON">导出 JSON</button>
+        <button class="tbtn" id="selread" data-i18n="markReadSelected">批量已读</button>
+        <button class="tbtn" id="seldel" disabled data-i18n="del">删除</button>
+        <button class="tbtn" id="clearbtn" data-i18n-title="clearTip" data-i18n="clear" title="清空当前筛选结果（软删除）">清空</button>
+        <button class="tbtn" id="selcancel" data-i18n="cancel">取消</button>
+      </div>
+
+      <div class="list" id="list"><div class="sk"><div class="skc"></div><div class="skc"></div><div class="skc"></div></div></div>
+      <div class="morewrap">
+        <button class="tbtn" id="loadmore" type="button" hidden data-i18n="loadMore">加载更多</button>
+        <div class="nomore" id="nomore" hidden data-i18n="noMore">没有更多了</div>
+      </div>
+      <div class="pagination">
+        <span id="pageinfo"></span>
+        <div class="pages">
+          <button id="prev" type="button" data-i18n="prev">‹</button>
+          <span id="pagenum"></span>
+          <button id="next" type="button" data-i18n="next">›</button>
+        </div>
+        <div class="jumpwrap">
+          <input id="jump" type="number" min="1" inputmode="numeric" data-i18n-ph="jumpPh" data-i18n-title="jumpTip" placeholder="页码" title="输入页码后回车跳转">
+          <button id="gojump" type="button" data-i18n="go">跳转</button>
+        </div>
+      </div>
+    </main>
+
+    <aside class="sidebar">
+      <section class="panel side-card">
+        <div class="side-title"><span data-i18n="devices">设备</span></div>
+        <div class="tabs" id="tabs" role="tablist" data-i18n-aria="devices" aria-label="设备标签"></div>
+      </section>
+      <section class="panel side-card">
+        <div class="side-title"><span data-i18n="settingsOverview">设置概览</span><button class="mini-link" id="sideSetBtn" type="button" data-i18n="openSettings">打开设置中心</button></div>
+        <div class="settings-rows" id="sideSettings"></div>
+      </section>
+      <section class="panel side-card">
+        <div class="side-title"><span data-i18n="quickOverview">快捷概览</span><button class="mini-link" id="sideStatsBtn" type="button" data-i18n="viewStats">查看统计</button></div>
+        <div class="side-rows" id="sideQuick"></div>
+        <div class="side-row"><span data-i18n="unread">未读</span><strong><span id="unreadcount">0</span></strong></div>
+      </section>
+    </aside>
   </div>
-  <div class="meta"><span id="stat"></span><span id="pageinfo"></span><button class="tbtn unreadpill" id="unreadbtn" type="button" data-i18n-title="unreadTip"><span id="unreadcount">0</span> <span data-i18n="unread">未读</span></button></div>
-  <div class="list" id="list"><div class="sk"><div class="skc"></div><div class="skc"></div><div class="skc"></div></div></div>
-  <div class="morewrap">
-    <button class="tbtn" id="loadmore" type="button" hidden data-i18n="loadMore">加载更多</button>
-    <div class="nomore" id="nomore" hidden data-i18n="noMore">没有更多了</div>
-  </div>
-  <div class="pager">
-    <button id="prev" data-i18n="prev">上一页</button>
-    <span id="pagenum"></span>
-    <button id="next" data-i18n="next">下一页</button>
-    <select id="perpage" data-i18n-title="perPageTip" title="每页条数"></select>
-    <input id="jump" type="number" min="1" inputmode="numeric" data-i18n-ph="jumpPh" data-i18n-title="jumpTip" placeholder="页码" title="输入页码后回车跳转">
-    <button id="gojump" data-i18n="go">跳转</button>
-  </div>
+
+  <footer class="foot">© 2026 <a href="https://cbm.im/" target="_blank" rel="noopener noreferrer">左立方</a> · <a href="https://github.com/ShenDoyle/SMSToWeb" target="_blank" rel="noopener noreferrer">SMSToWeb</a> <span class="ver">__APP_VERSION__</span></footer>
 </div>
 <button class="newpill" id="newpill" hidden></button>
-<div class="selbar" id="selbar" hidden>
-  <span id="selcount">已选 0 条</span>
-  <button class="tbtn" id="selall" data-i18n="selAll">全选本页</button>
-  <button class="tbtn" id="seldel" disabled data-i18n="del">删除</button>
-  <button class="tbtn" id="selcancel" data-i18n="cancel">取消</button>
-</div>
 <div class="modal" id="modal" hidden>
   <div class="sheet">
     <button class="mx" id="modalx" type="button" data-i18n-aria="modalClose" aria-label="关闭">×</button>
     <div id="modalbody"></div>
   </div>
 </div>
-<footer class="foot">© 2026 <a href="https://cbm.im/" target="_blank" rel="noopener noreferrer">左立方</a> · <a href="https://github.com/ShenDoyle/SMSToWeb" target="_blank" rel="noopener noreferrer">SMSToWeb</a> <span class="ver">__APP_VERSION__</span></footer>
 <script>
 (function () {
   var SITE_NAME = __SITE_NAME_JSON__;
@@ -2452,7 +2805,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     lastIdByDev: {},
     inited: false, unread: 0, limit: 10, range: "", notifiedId: 0,
     cursor: "", seen: {}, loadingMore: false, loadMoreDepth: 0,
-    selectMode: false, selected: {}, lastQ: "", starOnly: false, unreadOnly: false, lastList: [],
+    selectMode: false, selected: {}, lastQ: "", starOnly: false, unreadOnly: false, readOnly: false, filterMode: "all", lastList: [],
     labels: (function () { try { return JSON.parse(localStorage.getItem("sms_labels") || "{}") || {}; } catch (e) { return {}; } })(),
     autoCopy: (function () { try { return localStorage.getItem("sms_autocopy") !== "0"; } catch (e) { return true; } })(),
     notify: (function () { try { return localStorage.getItem("sms_notify") !== "0"; } catch (e) { return true; } })(),
@@ -3149,18 +3502,18 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scTtlRange: "时长须为 5 ~ 43200 分钟（30 天）",
     scCloseConfirm: "设置有未保存的修改，关闭后这些修改将丢弃。确定关闭？",
     scSwitchConfirm: "当前分组有未保存的修改，切换后将丢弃，继续？",
-    nfWebhook: "Webhook 地址",
+    nfWebhook: "回调地址",
     nfSecret: "签名密钥",
-    nfSendkey: "SendKey",
-    nfToken: "Token / 密钥",
-    nfBotToken: "Bot Token",
-    nfChatId: "Chat ID",
-    nfDeviceKey: "设备 Key",
+    nfSendkey: "发送密钥",
+    nfToken: "令牌 / 密钥",
+    nfBotToken: "机器人令牌",
+    nfChatId: "会话标识",
+    nfDeviceKey: "设备密钥",
     nfUrl: "服务地址",
-    nfApiKey: "API Key",
+    nfApiKey: "接口密钥",
     nfMailTo: "收件人",
     nfMailFrom: "发件人",
-    nfUrls: "Webhook 地址",
+    nfUrls: "回调地址",
     nfTemplate: "请求体模板",
     nfHeaders: "自定义请求头"
     },
@@ -3263,18 +3616,18 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scTtlRange: "時長須為 5 ~ 43200 分鐘（30 天）",
     scCloseConfirm: "設定有未儲存的修改，關閉後這些修改將捨棄。確定關閉？",
     scSwitchConfirm: "目前分組有未儲存的修改，切換後將捨棄，繼續？",
-    nfWebhook: "Webhook 位址",
+    nfWebhook: "回呼位址",
     nfSecret: "簽名金鑰",
-    nfSendkey: "SendKey",
-    nfToken: "Token / 金鑰",
-    nfBotToken: "Bot Token",
-    nfChatId: "Chat ID",
-    nfDeviceKey: "裝置 Key",
+    nfSendkey: "傳送金鑰",
+    nfToken: "權杖 / 金鑰",
+    nfBotToken: "機器人權杖",
+    nfChatId: "會話識別碼",
+    nfDeviceKey: "裝置金鑰",
     nfUrl: "服務位址",
-    nfApiKey: "API Key",
+    nfApiKey: "介面金鑰",
     nfMailTo: "收件人",
     nfMailFrom: "寄件人",
-    nfUrls: "Webhook 位址",
+    nfUrls: "回呼位址",
     nfTemplate: "請求內文範本",
     nfHeaders: "自訂請求標頭"
     },
@@ -4200,6 +4553,285 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       for (var _qk in MISC_I18N[_ql]) I18N[_ql][_qk] = MISC_I18N[_ql][_qk];
     }
   })();
+  /* 消息列表/详情新增文案（九语种） */
+  var UI2_I18N = {
+    "zh-CN": {
+    markRead: "标记已读",
+    markReadSelected: "批量已读",
+    bulkHint: "批量操作只作用于当前列表",
+    bulkOk: "已标记 {n} 条为已读",
+    bulkPartial: "成功 {ok} 条，失败 {ng} 条",
+    bulkFail: "批量操作失败",
+    dType: "消息类型",
+    dCarrier: "运营商",
+    dSender: "发送号码",
+    detailInfo: "消息信息",
+    detailActions: "操作",
+    copyBody: "复制正文",
+    emptyBody: "（无正文）"
+    },
+    "zh-TW": {
+    markRead: "標記已讀",
+    markReadSelected: "批次已讀",
+    bulkHint: "批次操作只作用於目前清單",
+    bulkOk: "已標記 {n} 條為已讀",
+    bulkPartial: "成功 {ok} 條，失敗 {ng} 條",
+    bulkFail: "批次操作失敗",
+    dType: "訊息類型",
+    dCarrier: "電信業者",
+    dSender: "發送號碼",
+    detailInfo: "訊息資訊",
+    detailActions: "操作",
+    copyBody: "複製內文",
+    emptyBody: "（無內文）"
+    },
+    "en": {
+    markRead: "Mark read",
+    markReadSelected: "Mark selected read",
+    bulkHint: "Bulk actions apply to the current list only",
+    bulkOk: "Marked {n} as read",
+    bulkPartial: "{ok} succeeded, {ng} failed",
+    bulkFail: "Bulk action failed",
+    dType: "Message type",
+    dCarrier: "Carrier",
+    dSender: "Sender number",
+    detailInfo: "Message details",
+    detailActions: "Actions",
+    copyBody: "Copy text",
+    emptyBody: "(no content)"
+    },
+    "ja": {
+    markRead: "既読にする",
+    markReadSelected: "選択を既読",
+    bulkHint: "一括操作は現在の一覧のみに適用",
+    bulkOk: "{n} 件を既読にしました",
+    bulkPartial: "{ok} 件成功、{ng} 件失敗",
+    bulkFail: "一括操作に失敗しました",
+    dType: "メッセージ種別",
+    dCarrier: "通信事業者",
+    dSender: "送信元番号",
+    detailInfo: "メッセージ情報",
+    detailActions: "操作",
+    copyBody: "本文をコピー",
+    emptyBody: "（本文なし）"
+    },
+    "ko": {
+    markRead: "읽음 표시",
+    markReadSelected: "선택 항목 읽음",
+    bulkHint: "일괄 작업은 현재 목록에만 적용",
+    bulkOk: "{n}개를 읽음으로 표시",
+    bulkPartial: "{ok}개 성공, {ng}개 실패",
+    bulkFail: "일괄 작업 실패",
+    dType: "메시지 유형",
+    dCarrier: "통신사",
+    dSender: "발신 번호",
+    detailInfo: "메시지 정보",
+    detailActions: "작업",
+    copyBody: "본문 복사",
+    emptyBody: "(본문 없음)"
+    },
+    "es": {
+    markRead: "Marcar leído",
+    markReadSelected: "Marcar leídos",
+    bulkHint: "Las acciones masivas solo afectan la lista actual",
+    bulkOk: "{n} marcados como leídos",
+    bulkPartial: "{ok} correctos, {ng} fallidos",
+    bulkFail: "Error en la acción masiva",
+    dType: "Tipo de mensaje",
+    dCarrier: "Operador",
+    dSender: "Número de origen",
+    detailInfo: "Detalles del mensaje",
+    detailActions: "Acciones",
+    copyBody: "Copiar texto",
+    emptyBody: "(sin contenido)"
+    },
+    "fr": {
+    markRead: "Marquer comme lu",
+    markReadSelected: "Marquer lus",
+    bulkHint: "Les actions groupées ne concernent que la liste affichée",
+    bulkOk: "{n} marqués comme lus",
+    bulkPartial: "{ok} réussis, {ng} échoués",
+    bulkFail: "Échec de l'action groupée",
+    dType: "Type de message",
+    dCarrier: "Opérateur",
+    dSender: "Numéro d'envoi",
+    detailInfo: "Détails du message",
+    detailActions: "Actions",
+    copyBody: "Copier le texte",
+    emptyBody: "(aucun contenu)"
+    },
+    "de": {
+    markRead: "Als gelesen",
+    markReadSelected: "Auswahl als gelesen",
+    bulkHint: "Massenaktionen gelten nur für die aktuelle Liste",
+    bulkOk: "{n} als gelesen markiert",
+    bulkPartial: "{ok} erfolgreich, {ng} fehlgeschlagen",
+    bulkFail: "Massenaktion fehlgeschlagen",
+    dType: "Nachrichtentyp",
+    dCarrier: "Netzbetreiber",
+    dSender: "Absendernummer",
+    detailInfo: "Nachrichtendetails",
+    detailActions: "Aktionen",
+    copyBody: "Text kopieren",
+    emptyBody: "(kein Inhalt)"
+    },
+    "pt-BR": {
+    markRead: "Marcar como lida",
+    markReadSelected: "Marcar lidas",
+    bulkHint: "Ações em massa valem só para a lista atual",
+    bulkOk: "{n} marcadas como lidas",
+    bulkPartial: "{ok} com sucesso, {ng} com falha",
+    bulkFail: "Falha na ação em massa",
+    dType: "Tipo de mensagem",
+    dCarrier: "Operadora",
+    dSender: "Número de origem",
+    detailInfo: "Detalhes da mensagem",
+    detailActions: "Ações",
+    copyBody: "Copiar texto",
+    emptyBody: "(sem conteúdo)"
+    }
+  };
+  (function () {
+    for (var _u2l in UI2_I18N) {
+      if (!I18N[_u2l]) I18N[_u2l] = {};
+      for (var _u2k in UI2_I18N[_u2l]) I18N[_u2l][_u2k] = UI2_I18N[_u2l][_u2k];
+    }
+  })();
+  /* 仪表盘新版界面文案（九语种） */
+  var V2_I18N = {
+    "zh-CN": {
+      brandSub: "消息中心", pageTitle: "消息中心", pageSub: "集中查看设备短信，快速处理未读消息",
+      listTitle: "短信列表", refresh: "刷新", settingsOverview: "设置概览", openSettings: "打开设置中心",
+      quickOverview: "快捷概览", viewStats: "查看统计", selectHint: "右键或长按消息可多选",
+      selAllList: "选择当前列表", tagVerify: "验证码", allDevices: "全部设备",
+      scLanguage: "界面语言", scLang: "语言", scLangHelp: "语言偏好保存在当前浏览器，保存后整页重新加载并应用；不影响其他浏览器。",
+      scPageSize: "分页设置", scPerPage: "每页条数", scPageSizeHelp: "每页条数保存在当前浏览器，保存后立即生效。",
+      scBrowserPrefs: "本浏览器偏好", scBrowserPrefsHelp: "消息开关与免打扰只影响当前浏览器，与全局通知规则互不影响。",
+      scNotifyChannels: "通知渠道", scChannelsN: "已配置 {n} 个", scMinN: "{n} 分钟", scDaysN: "{n} 天", statToday: "今日接收",
+      scTargetOff: "停用", scTargetRename: "重命名", scTargetLegacy: "该渠道已启用多目标，上面的单目标字段不再参与发送。",
+      scAddTarget: "添加目标", scTargetNamePh: "目标名称（如 值班群）", scTargetAdded: "已添加目标，保存后生效",
+      scTargetRemoved: "已移除目标，保存后生效", scTargetSaveFirst: "请先保存目标再发送测试", scMultiTarget: "多目标",
+      copyFail: "复制失败，请手动选择", exportHint: "导出当前筛选结果"
+    },
+    "zh-TW": {
+      brandSub: "訊息中心", pageTitle: "訊息中心", pageSub: "集中查看裝置簡訊，快速處理未讀訊息",
+      listTitle: "簡訊列表", refresh: "重新整理", settingsOverview: "設定概覽", openSettings: "開啟設定中心",
+      quickOverview: "快捷概覽", viewStats: "查看統計", selectHint: "右鍵或長按訊息可多選",
+      selAllList: "選擇目前清單", tagVerify: "驗證碼", allDevices: "全部裝置",
+      scLanguage: "介面語言", scLang: "語言", scLangHelp: "語言偏好儲存在目前瀏覽器，儲存後整頁重新載入並套用；不影響其他瀏覽器。",
+      scPageSize: "分頁設定", scPerPage: "每頁筆數", scPageSizeHelp: "每頁筆數儲存在目前瀏覽器，儲存後立即生效。",
+      scBrowserPrefs: "本瀏覽器偏好", scBrowserPrefsHelp: "訊息開關與免打擾只影響目前瀏覽器，與全域通知規則互不影響。",
+      scNotifyChannels: "通知管道", scChannelsN: "已設定 {n} 個", scMinN: "{n} 分鐘", scDaysN: "{n} 天", statToday: "今日接收",
+      scTargetOff: "停用", scTargetRename: "重新命名", scTargetLegacy: "此管道已啟用多目標，上方的單目標欄位不再參與傳送。",
+      scAddTarget: "新增目標", scTargetNamePh: "目標名稱（例如 值班群）", scTargetAdded: "已新增目標，儲存後生效",
+      scTargetRemoved: "已移除目標，儲存後生效", scTargetSaveFirst: "請先儲存目標再傳送測試", scMultiTarget: "多目標",
+      copyFail: "複製失敗，請手動選取", exportHint: "匯出目前篩選結果"
+    },
+    en: {
+      brandSub: "Message center", pageTitle: "Message center", pageSub: "Review device SMS and clear unread messages quickly",
+      listTitle: "Messages", refresh: "Refresh", settingsOverview: "Settings overview", openSettings: "Open settings",
+      quickOverview: "Quick overview", viewStats: "View stats", selectHint: "Right-click or long-press a message to multi-select",
+      selAllList: "Select current list", tagVerify: "Verification code", allDevices: "All devices",
+      scLanguage: "Language", scLang: "Language", scLangHelp: "The language preference is stored in this browser and applied after saving with a full reload. Other browsers are unaffected.",
+      scPageSize: "Pagination", scPerPage: "Items per page", scPageSizeHelp: "Page size is stored in this browser and takes effect immediately after saving.",
+      scBrowserPrefs: "Browser preferences", scBrowserPrefsHelp: "Message toggles and quiet hours only affect this browser; global notification rules are unchanged.",
+      scNotifyChannels: "Notification channels", scChannelsN: "{n} configured", scMinN: "{n} min", scDaysN: "{n} days", statToday: "Received today",
+      scTargetOff: "Disable", scTargetRename: "Rename", scTargetLegacy: "Multiple targets are enabled; the single-target fields above are no longer used for sending.",
+      scAddTarget: "Add target", scTargetNamePh: "Target name (e.g. on-call group)", scTargetAdded: "Target added; save to apply",
+      scTargetRemoved: "Target removed; save to apply", scTargetSaveFirst: "Save the target before sending a test", scMultiTarget: "Multi-target",
+      copyFail: "Copy failed. Please select it manually", exportHint: "Exports the current filter"
+    },
+    ja: {
+      brandSub: "メッセージセンター", pageTitle: "メッセージセンター", pageSub: "端末のSMSを一覧し、未読をすばやく処理",
+      listTitle: "メッセージ一覧", refresh: "更新", settingsOverview: "設定の概要", openSettings: "設定センターを開く",
+      quickOverview: "クイック概要", viewStats: "統計を見る", selectHint: "右クリックまたは長押しで複数選択",
+      selAllList: "現在の一覧を選択", tagVerify: "認証コード", allDevices: "すべての端末",
+      scLanguage: "表示言語", scLang: "言語", scLangHelp: "言語設定はこのブラウザに保存され、保存後にページを再読み込みして適用されます。他のブラウザには影響しません。",
+      scPageSize: "ページ設定", scPerPage: "1ページの件数", scPageSizeHelp: "1ページの件数はこのブラウザに保存され、保存後すぐに反映されます。",
+      scBrowserPrefs: "このブラウザの設定", scBrowserPrefsHelp: "メッセージの切り替えと邪魔しない時間はこのブラウザのみに影響します。",
+      scNotifyChannels: "通知チャネル", scChannelsN: "{n} 件設定済み", scMinN: "{n} 分", scDaysN: "{n} 日", statToday: "本日の受信",
+      scTargetOff: "無効化", scTargetRename: "名前変更", scTargetLegacy: "このチャネルは複数ターゲットが有効です。上の単一ターゲット項目は送信に使用されません。",
+      scAddTarget: "ターゲットを追加", scTargetNamePh: "ターゲット名（例：当番グループ）", scTargetAdded: "ターゲットを追加しました。保存後に有効になります",
+      scTargetRemoved: "ターゲットを削除しました。保存後に有効になります", scTargetSaveFirst: "テスト送信の前にターゲットを保存してください", scMultiTarget: "複数ターゲット",
+      copyFail: "コピーに失敗しました。手動で選択してください", exportHint: "現在の絞り込み結果を出力"
+    },
+    ko: {
+      brandSub: "메시지 센터", pageTitle: "메시지 센터", pageSub: "기기 SMS를 모아 보고 읽지 않은 메시지를 빠르게 처리",
+      listTitle: "메시지 목록", refresh: "새로고침", settingsOverview: "설정 개요", openSettings: "설정 센터 열기",
+      quickOverview: "빠른 개요", viewStats: "통계 보기", selectHint: "마우스 오른쪽 버튼 또는 길게 눌러 여러 개 선택",
+      selAllList: "현재 목록 선택", tagVerify: "인증 코드", allDevices: "모든 기기",
+      scLanguage: "표시 언어", scLang: "언어", scLangHelp: "언어 설정은 이 브라우저에 저장되며 저장 후 페이지가 새로고침되어 적용됩니다. 다른 브라우저에는 영향이 없습니다.",
+      scPageSize: "페이지 설정", scPerPage: "페이지당 항목 수", scPageSizeHelp: "페이지당 항목 수는 이 브라우저에 저장되며 저장 후 즉시 적용됩니다.",
+      scBrowserPrefs: "이 브라우저 설정", scBrowserPrefsHelp: "메시지 스위치와 방해 금지 시간은 이 브라우저에만 적용됩니다.",
+      scNotifyChannels: "알림 채널", scChannelsN: "{n}개 설정됨", scMinN: "{n}분", scDaysN: "{n}일", statToday: "오늘 수신",
+      scTargetOff: "사용 안 함", scTargetRename: "이름 변경", scTargetLegacy: "이 채널은 다중 대상이 활성화되어 위의 단일 대상 필드는 전송에 사용되지 않습니다.",
+      scAddTarget: "대상 추가", scTargetNamePh: "대상 이름(예: 당직 그룹)", scTargetAdded: "대상이 추가되었습니다. 저장 후 적용됩니다",
+      scTargetRemoved: "대상이 제거되었습니다. 저장 후 적용됩니다", scTargetSaveFirst: "테스트 전에 대상을 저장하세요", scMultiTarget: "다중 대상",
+      copyFail: "복사에 실패했습니다. 직접 선택하세요", exportHint: "현재 필터 결과를 내보냅니다"
+    },
+    es: {
+      brandSub: "Centro de mensajes", pageTitle: "Centro de mensajes", pageSub: "Revisa los SMS de tus dispositivos y resuelve los no leídos",
+      listTitle: "Mensajes", refresh: "Actualizar", settingsOverview: "Resumen de ajustes", openSettings: "Abrir ajustes",
+      quickOverview: "Resumen rápido", viewStats: "Ver estadísticas", selectHint: "Clic derecho o pulsación larga para seleccionar varios",
+      selAllList: "Seleccionar lista actual", tagVerify: "Código de verificación", allDevices: "Todos los dispositivos",
+      scLanguage: "Idioma", scLang: "Idioma", scLangHelp: "La preferencia de idioma se guarda en este navegador y se aplica tras guardar con una recarga completa. Otros navegadores no se ven afectados.",
+      scPageSize: "Paginación", scPerPage: "Elementos por página", scPageSizeHelp: "El tamaño de página se guarda en este navegador y se aplica de inmediato al guardar.",
+      scBrowserPrefs: "Preferencias del navegador", scBrowserPrefsHelp: "Los interruptores de mensajes y el horario de silencio solo afectan a este navegador.",
+      scNotifyChannels: "Canales de notificación", scChannelsN: "{n} configurados", scMinN: "{n} min", scDaysN: "{n} días", statToday: "Recibidos hoy",
+      scTargetOff: "Desactivar", scTargetRename: "Renombrar", scTargetLegacy: "Este canal tiene varios destinos; los campos de destino único de arriba ya no se usan para enviar.",
+      scAddTarget: "Añadir destino", scTargetNamePh: "Nombre del destino (p. ej. grupo de guardia)", scTargetAdded: "Destino añadido; guarda para aplicar",
+      scTargetRemoved: "Destino eliminado; guarda para aplicar", scTargetSaveFirst: "Guarda el destino antes de enviar una prueba", scMultiTarget: "Multi-destino",
+      copyFail: "Error al copiar. Selecciónalo manualmente", exportHint: "Exporta el filtro actual"
+    },
+    fr: {
+      brandSub: "Centre de messages", pageTitle: "Centre de messages", pageSub: "Consultez les SMS des appareils et traitez rapidement les non lus",
+      listTitle: "Messages", refresh: "Actualiser", settingsOverview: "Aperçu des réglages", openSettings: "Ouvrir les réglages",
+      quickOverview: "Aperçu rapide", viewStats: "Voir les statistiques", selectHint: "Clic droit ou appui long pour sélectionner plusieurs messages",
+      selAllList: "Sélectionner la liste actuelle", tagVerify: "Code de vérification", allDevices: "Tous les appareils",
+      scLanguage: "Langue", scLang: "Langue", scLangHelp: "La langue est enregistrée dans ce navigateur et appliquée après un rechargement complet. Les autres navigateurs ne sont pas affectés.",
+      scPageSize: "Pagination", scPerPage: "Éléments par page", scPageSizeHelp: "La taille de page est enregistrée dans ce navigateur et s'applique immédiatement après l'enregistrement.",
+      scBrowserPrefs: "Préférences du navigateur", scBrowserPrefsHelp: "Les interrupteurs de messages et les heures calmes n'affectent que ce navigateur.",
+      scNotifyChannels: "Canaux de notification", scChannelsN: "{n} configurés", scMinN: "{n} min", scDaysN: "{n} jours", statToday: "Reçus aujourd'hui",
+      scTargetOff: "Désactiver", scTargetRename: "Renommer", scTargetLegacy: "Ce canal utilise plusieurs cibles ; les champs de cible unique ci-dessus ne servent plus à l'envoi.",
+      scAddTarget: "Ajouter une cible", scTargetNamePh: "Nom de la cible (ex. groupe d'astreinte)", scTargetAdded: "Cible ajoutée ; enregistrez pour appliquer",
+      scTargetRemoved: "Cible supprimée ; enregistrez pour appliquer", scTargetSaveFirst: "Enregistrez la cible avant d'envoyer un test", scMultiTarget: "Multi-cible",
+      copyFail: "Échec de la copie. Sélectionnez-le manuellement", exportHint: "Exporte le filtre actuel"
+    },
+    de: {
+      brandSub: "Nachrichtenzentrum", pageTitle: "Nachrichtenzentrum", pageSub: "Geräte-SMS ansehen und ungelesene Nachrichten schnell erledigen",
+      listTitle: "Nachrichten", refresh: "Aktualisieren", settingsOverview: "Einstellungsübersicht", openSettings: "Einstellungen öffnen",
+      quickOverview: "Kurzübersicht", viewStats: "Statistik ansehen", selectHint: "Rechtsklick oder langes Drücken für Mehrfachauswahl",
+      selAllList: "Aktuelle Liste auswählen", tagVerify: "Bestätigungscode", allDevices: "Alle Geräte",
+      scLanguage: "Sprache", scLang: "Sprache", scLangHelp: "Die Sprache wird in diesem Browser gespeichert und nach dem Speichern mit vollständigem Neuladen angewendet. Andere Browser sind nicht betroffen.",
+      scPageSize: "Seitengröße", scPerPage: "Einträge pro Seite", scPageSizeHelp: "Die Seitengröße wird in diesem Browser gespeichert und nach dem Speichern sofort angewendet.",
+      scBrowserPrefs: "Browser-Einstellungen", scBrowserPrefsHelp: "Nachrichtenschalter und Ruhezeiten gelten nur für diesen Browser.",
+      scNotifyChannels: "Benachrichtigungskanäle", scChannelsN: "{n} konfiguriert", scMinN: "{n} Min.", scDaysN: "{n} Tage", statToday: "Heute erhalten",
+      scTargetOff: "Deaktivieren", scTargetRename: "Umbenennen", scTargetLegacy: "Für diesen Kanal sind mehrere Ziele aktiv; die Einzelziel-Felder oben werden nicht mehr zum Senden verwendet.",
+      scAddTarget: "Ziel hinzufügen", scTargetNamePh: "Zielname (z. B. Bereitschaftsgruppe)", scTargetAdded: "Ziel hinzugefügt; zum Anwenden speichern",
+      scTargetRemoved: "Ziel entfernt; zum Anwenden speichern", scTargetSaveFirst: "Ziel vor dem Testen speichern", scMultiTarget: "Mehrere Ziele",
+      copyFail: "Kopieren fehlgeschlagen. Bitte manuell markieren", exportHint: "Exportiert den aktuellen Filter"
+    },
+    "pt-BR": {
+      brandSub: "Central de mensagens", pageTitle: "Central de mensagens", pageSub: "Veja os SMS dos dispositivos e resolva os não lidos rapidamente",
+      listTitle: "Mensagens", refresh: "Atualizar", settingsOverview: "Visão dos ajustes", openSettings: "Abrir ajustes",
+      quickOverview: "Visão rápida", viewStats: "Ver estatísticas", selectHint: "Clique com o botão direito ou toque e segure para selecionar vários",
+      selAllList: "Selecionar lista atual", tagVerify: "Código de verificação", allDevices: "Todos os dispositivos",
+      scLanguage: "Idioma", scLang: "Idioma", scLangHelp: "A preferência de idioma é salva neste navegador e aplicada após salvar com recarregamento completo. Outros navegadores não são afetados.",
+      scPageSize: "Paginação", scPerPage: "Itens por página", scPageSizeHelp: "O tamanho da página é salvo neste navegador e aplicado imediatamente após salvar.",
+      scBrowserPrefs: "Preferências do navegador", scBrowserPrefsHelp: "Os interruptores de mensagens e o horário de silêncio afetam apenas este navegador.",
+      scNotifyChannels: "Canais de notificação", scChannelsN: "{n} configurados", scMinN: "{n} min", scDaysN: "{n} dias", statToday: "Recebidos hoje",
+      scTargetOff: "Desativar", scTargetRename: "Renomear", scTargetLegacy: "Este canal tem vários destinos; os campos de destino único acima não são mais usados no envio.",
+      scAddTarget: "Adicionar destino", scTargetNamePh: "Nome do destino (ex. grupo de plantão)", scTargetAdded: "Destino adicionado; salve para aplicar",
+      scTargetRemoved: "Destino removido; salve para aplicar", scTargetSaveFirst: "Salve o destino antes de enviar um teste", scMultiTarget: "Multi-destino",
+      copyFail: "Falha ao copiar. Selecione manualmente", exportHint: "Exporta o filtro atual"
+    }
+  };
+  (function () {
+    for (var _v2l in V2_I18N) {
+      if (!I18N[_v2l]) I18N[_v2l] = {};
+      for (var _v2k in V2_I18N[_v2l]) I18N[_v2l][_v2k] = V2_I18N[_v2l][_v2k];
+    }
+  })();
   function T(key, vars) {
     var m = I18N[LANG] || I18N.en;
     var s = m[key];
@@ -4223,63 +4855,23 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     each("data-i18n-ph", "data-i18n-ph", function (el, v) { el.setAttribute("placeholder", v); });
     each("data-i18n-title", "data-i18n-title", function (el, v) { el.setAttribute("title", v); });
     each("data-i18n-aria", "data-i18n-aria", function (el, v) { el.setAttribute("aria-label", v); });
-    var lb = $("langbtn");
-    if (lb) { lb.textContent = T("langBtn"); lb.title = T("langTip"); }
     var tb = $("themebtn");
     if (tb) tb.setAttribute("title", T("themeTip"));
   }
-  /* 每页条数下拉（含本地化文案） */
-  function buildPerPage() {
-    var sel = $("perpage");
-    if (!sel) return;
+  /* 每页条数选项（本地化文案）；设置中心与分页器共用 */
+  function perPageOptions() {
     var nums = [10, 20, 50, 100], html = "";
     for (var i = 0; i < nums.length; i++) html += '<option value="' + nums[i] + '">' + esc(T("perPage", { n: nums[i] })) + '</option>';
-    sel.innerHTML = html;
+    return html;
   }
-  /* 语言切换：九语言菜单（自名显示），选择后写入 localStorage 并整页重载 */
+  /* 语言名（自名显示）；语言选择位于设置中心 */
   var LANG_NAMES = { "zh-CN": "简体中文", "zh-TW": "繁體中文", "en": "English", "ja": "日本語", "ko": "한국어", "es": "Español", "fr": "Français", "de": "Deutsch", "pt-BR": "Português (BR)" };
-  function openLangMenu(b) {
-    var menu = null;
-    function close() { if (menu) { menu.remove(); menu = null; document.removeEventListener("click", close); } }
-    b.onclick = function (ev) {
-      ev.stopPropagation();
-      if (menu) { close(); return; }
-      menu = document.createElement("div");
-      menu.className = "langmenu";
-      for (var i = 0; i < LANGS.length; i++) {
-        (function (code) {
-          var it = document.createElement("div");
-          it.className = "langitem" + (code === LANG ? " cur" : "");
-          it.textContent = LANG_NAMES[code];
-          it.onclick = function (e2) {
-            e2.stopPropagation();
-            if (code === LANG) { close(); return; }
-            try { localStorage.setItem("sms_lang", code); } catch (e) {}
-            try {
-              var u = new URL(location.href);
-              u.searchParams.set("lang", code);
-              location.replace(u.toString());
-              return;
-            } catch (e) { location.reload(); }
-          };
-          menu.appendChild(it);
-        })(LANGS[i]);
-      }
-      document.body.appendChild(menu);
-      var r = b.getBoundingClientRect();
-      menu.style.top = (r.bottom + 6) + "px";
-      menu.style.right = Math.max(8, window.innerWidth - r.right) + "px";
-      document.addEventListener("click", close);
-    };
-  }
-  function initLang() {
-    var b = $("langbtn");
-    if (!b) return;
-    openLangMenu(b);
+  function langOptions() {
+    return LANGS.map(function (code) {
+      return '<option value="' + code + '"' + (code === LANG ? " selected" : "") + '>' + LANG_NAMES[code] + '</option>';
+    }).join("");
   }
   applyI18n();
-  buildPerPage();
-  initLang();
   function esc(s) {
     return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
@@ -4518,19 +5110,25 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     ta.style.opacity = "0";
     document.body.appendChild(ta);
     ta.select();
-    try { document.execCommand("copy"); } catch (e) {}
+    var ok = false;
+    try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
     document.body.removeChild(ta);
+    return !!ok;
   }
+  /* 复制：Clipboard API 优先，失败回退 execCommand；两者都失败必须明确报错，绝不假报成功 */
   function doCopy(text, btn) {
-    var done = function () {
+    var rely = function (ok) {
+      if (!ok) { toast(T("copyFail")); return; }
+      toast(T("copied"));
+      if (!btn) return;
       var old = btn.textContent;
       btn.textContent = T("copied");
       btn.disabled = true;
       setTimeout(function () { btn.textContent = old; btn.disabled = false; }, 1500);
     };
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(done, function () { fallbackCopy(text); done(); });
-    } else { fallbackCopy(text); done(); }
+      navigator.clipboard.writeText(text).then(function () { rely(true); }, function () { rely(fallbackCopy(text)); });
+    } else { rely(fallbackCopy(text)); }
   }
   /* 轻提示：统一放进堆叠容器，多条不重叠；2.6s 自动消失 */
   function toastRoot() {
@@ -4630,6 +5228,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (state.q) p.set("q", state.q);
     if (state.starOnly) p.set("starred", "1");
     if (state.unreadOnly) p.set("unread", "1");
+    if (state.readOnly) p.set("read", "1");
     /* 游标仅用于“加载更多”；首屏/刷新一律按 page，避免历史游标污染筛选条件 */
     if (cur) p.set("cursor", cur); else p.set("page", state.page);
     p.set("limit", state.limit);
@@ -4641,20 +5240,24 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     return fetch("/api/devices").then(function (r) { return r.json(); }).then(function (res) {
       var tabs = $("tabs");
       tabs.innerHTML = "";
-      var mk = function (label, id, extra) {
+      var total = (res.list || []).reduce(function (s, d) { return s + d.msg_count; }, 0);
+      var mk = function (name, sub, count, id) {
         var el = document.createElement("div");
         el.setAttribute("data-dev", String(id));
         el.className = "tab" + (state.device === id ? " active" : "");
         el.setAttribute("role", "tab");
         el.setAttribute("aria-selected", state.device === id ? "true" : "false");
         el.tabIndex = 0;
-        el.textContent = label + (extra ? " " + extra : "");
+        el.innerHTML = '<span class="device-icon">▣</span><span class="tmain"><span class="tname">' + esc(name) +
+          '</span><span class="tsub">' + esc(sub) + '</span></span><span class="tcount">' + esc(count) + '</span>';
         el.onclick = function () { state.device = id; state.page = 1; markActiveTabs(); load(); };
         return el;
       };
-      tabs.appendChild(mk(T("tabAll"), 0, "(" + (res.list || []).reduce(function (s, d) { return s + d.msg_count; }, 0) + ")"));
+      tabs.appendChild(mk(T("tabAll"), T("allDevices"), total ? String(total) : "", 0));
       (res.list || []).forEach(function (d) {
-        var el = mk(d.display_name === "未命名设备" ? T("unnamed") : d.display_name, d.id, T("devCount", { n: d.msg_count }));
+        var el = mk(d.display_name === "未命名设备" ? T("unnamed") : d.display_name,
+          (d.sim ? d.sim + " · " : "") + T("devCount", { n: d.msg_count }),
+          d.last_at ? relTime(d.last_at) : "", d.id);
         /* 设备标签操作：✎ 重命名（设别名）、⇄ 合并到其他设备（后端 /api/devices/alias、/api/devices/merge） */
         if (d.id) {
           var ed = document.createElement("span");
@@ -4740,6 +5343,16 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var n = Object.keys(state.selected).length;
     if ($("selcount")) $("selcount").textContent = T("selCount", { n: n });
     if ($("seldel")) $("seldel").disabled = n === 0;
+    var all = $("selall");
+    if (all) {
+      var boxes = $("list").querySelectorAll(".selbox");
+      all.checked = boxes.length > 0;
+      for (var i = 0; i < boxes.length; i++) if (!boxes[i].checked) { all.checked = false; break; }
+    }
+    var cards = $("list").querySelectorAll(".card");
+    for (var j = 0; j < cards.length; j++) {
+      cards[j].classList.toggle("selected", !!state.selected[cards[j].getAttribute("data-id")]);
+    }
   }
   function srcClass(s) {
     s = String(s || "").toLowerCase();
@@ -4754,26 +5367,36 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var code = m.code !== undefined ? m.code : extractCode(m.content || "");
     var isSms = (m.source || "sms") === "sms";
     var recv = m.sim_number || m.sim || "";
-    var truncated = !!m.summary_truncated || !!(m.content_len && m.content_len > 20);
     var lbl = isSms ? numLabel(m.sender) : "";
     var snum = isSms ? normalizeNum(m.sender) : "";
-    var undot = m.read_at ? "" : '<span class="undot" title="' + esc(T("unread")) + '"></span>';
-    var senderHtml = isSms
-      ? '<span class="sender">' + esc(m.sender || T("unknownNum")) + '</span>' +
-        (lbl ? '<span class="nlabel" title="' + esc(T("numLibTip")) + '">' + esc(lbl) + '</span>' : '') +
-        (!lbl && /^1[3-9]\d{9}$/.test(snum) ? '<span class="area" data-num="' + snum + '"></span>' : '') + undot
-      : '<span class="srctag ' + srcClass(m.source) + '">' + esc(m.source || T("srcNotify")) + '</span><span class="sender">' + esc(m.sender || m.device_name || T("srcNotify")) + '</span>' + undot;
-    return '<div class="card' + (isFresh ? " flash" : "") + '" data-id="' + m.id + '" data-day="' + esc(dayLabel(m.received_at)) + '">' +
+    var who = isSms ? (lbl || m.sender || T("unknownNum")) : (m.sender || m.device_name || T("srcNotify"));
+    var typeTag = code ? T("tagVerify") : (isSms ? T("srcSms") : srcLabel(m.source));
+    var initial = String(who || "?").slice(0, 1);
+    return '<div class="card msg' + (isFresh ? " flash" : "") + '" data-id="' + m.id + '" data-day="' + esc(dayLabel(m.received_at)) + '">' +
       '<label class="selwrap" title="' + esc(T("selTip")) + '"><input type="checkbox" class="selbox" data-id="' + m.id + '"></label>' +
-      '<div class="row1">' + senderHtml +
-        '<button class="star' + (m.starred ? " on" : "") + '" data-id="' + m.id + '" title="' + esc(T("starItemTip")) + '">' + (m.starred ? "★" : "☆") + '</button>' +
-        '<button class="del" data-id="' + m.id + '">' + esc(T("del")) + '</button>' +
-      '</div>' +
-      (code ? '<div class="code-line">' + esc(T("codeLabel")) + ' <b>' + esc(code) + '</b><button class="copy" data-code="' + esc(code) + '">' + esc(T("copy")) + '</button></div>' : '') +
-      '<div class="line"><span class="content summary" data-id="' + m.id + '" title="' + esc(T("detailTip")) + '">' + linkify(highlight(esc(text), state.q)) + '</span>' +
-        (truncated ? ' <button class="more" type="button" data-id="' + m.id + '">' + esc(T("detailBtn")) + '</button>' : '') + '</div>' +
-      '<div class="line foot-line"><span class="time-line" title="' + esc(fmtTime(m.received_at)) + '">' + esc(relTime(m.received_at)) + '</span>' +
-        (isSms && recv ? '<span class="recv" title="' + esc(T("recvTip")) + '">' + esc(recv) + '</span>' : '') +
+      '<div class="msg-main">' +
+        '<div class="msg-top">' +
+          '<span class="avatar-sm">' + esc(initial) + '</span>' +
+          '<span class="sender">' + esc(who) + '</span>' +
+          (isSms && lbl ? '<span class="phone">' + esc(m.sender || "") + '</span>' : '') +
+          '<span class="tag type">' + esc(typeTag) + '</span>' +
+          (m.read_at ? "" : '<span class="tag unread-tag">' + esc(T("unread")) + '</span>') +
+          '<span class="msg-time" title="' + esc(fmtTime(m.received_at)) + '">' + esc(relTime(m.received_at)) + '</span>' +
+          (code ? '<span class="code-chip"><span class="code-val">' + esc(code) + '</span><button class="copy" type="button" data-code="' + esc(code) + '">' + esc(T("copy")) + '</button></span>' : '') +
+        '</div>' +
+        '<p class="content summary" data-id="' + m.id + '" title="' + esc(T("detailTip")) + '">' + linkify(highlight(esc(text), state.q)) + '</p>' +
+        '<div class="msg-bottom">' +
+          '<span class="msg-meta">' + esc(m.device_name || "") +
+            (isSms && recv ? ' · <span class="recv" title="' + esc(T("recvTip")) + '">' + esc(recv) + '</span>' : '') +
+            (isSms && /^1[3-9]\d{9}$/.test(snum) ? '<span class="area" data-num="' + snum + '"></span>' : '') +
+          '</span>' +
+          '<div class="msg-actions">' +
+            '<button class="more" type="button" data-id="' + m.id + '" hidden>' + esc(T("detailBtn")) + '</button>' +
+            '<button class="star' + (m.starred ? " on" : "") + '" data-id="' + m.id + '" title="' + esc(T("starItemTip")) + '">' + (m.starred ? "★" : "☆") + '</button>' +
+            (m.read_at ? "" : '<button class="rbtn" type="button" data-id="' + m.id + '" title="' + esc(T("markRead")) + '">✓ ' + esc(T("markRead")) + '</button>') +
+            '<button class="del" data-id="' + m.id + '">' + esc(T("del")) + '</button>' +
+          '</div>' +
+        '</div>' +
       '</div>' +
     '</div>';
   }
@@ -4805,6 +5428,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     $("list").innerHTML = html;
     fillAreas();
     syncSelBoxes();
+    markClipped();
   }
   function trimToLimit(listEl) {
     var limit = state.limit || 20;
@@ -4849,6 +5473,32 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     listEl.insertAdjacentHTML("beforeend", html);
     fillAreas();
     syncSelBoxes();
+    markClipped(listEl);
+  }
+  /* 两行截断的真实溢出判定：按实际行数（自然高度 / 行高）决定是否显示「查看全文」，
+     不依赖字数或服务器截断标记，兼容中英文/数字/URL/混合字符与任意宽度 */
+  function markClipped(root) {
+    var listEl = root || $("list");
+    if (!listEl) return;
+    var els = listEl.querySelectorAll(".content.summary");
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      var card = el.closest ? el.closest(".card") : null;
+      var btn = card ? card.querySelector(".more") : null;
+      if (!btn) continue;
+      var cs = getComputedStyle(el);
+      var lh = parseFloat(cs.lineHeight);
+      if (!lh || !isFinite(lh)) lh = parseFloat(cs.fontSize) * 1.6 || 22;
+      /* 临时解除截断，测量自然高度 */
+      var oldClamp = el.style.webkitLineClamp;
+      var oldDisplay = el.style.display;
+      el.style.webkitLineClamp = "unset";
+      el.style.display = "block";
+      var lines = Math.round(el.scrollHeight / lh);
+      el.style.webkitLineClamp = oldClamp;
+      el.style.display = oldDisplay;
+      btn.hidden = lines <= 2;
+    }
   }
   function loadMore() {
     if (state.loadingMore || !state.cursor) return;
@@ -4918,6 +5568,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     updateMeta(res);
     fillAreas();
     syncSelBoxes();
+    markClipped(listEl);
     return true;
   }
   function showRetry(e) {
@@ -4970,6 +5621,24 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     return fetch("/api/messages/star", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: id, starred: starred }) })
       .then(function (r) { return r.json(); }).then(function () { load(); });
   }
+  function readOne(id, btn) {
+    if (!btn || btn.disabled) return;
+    btn.disabled = true;
+    fetch("/api/messages/read", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: id, read: true }) })
+      .then(function (r) { if (r.status === 401) { location.reload(); return new Promise(function () {}); } return r.json(); })
+      .then(function (res) {
+        if (!res || !res.success) { btn.disabled = false; toast(T("readFail")); return; }
+        var card = $("list").querySelector('.card[data-id="' + id + '"]');
+        if (card) {
+          var dot = card.querySelector(".undot");
+          if (dot) dot.parentNode.removeChild(dot);
+          var b = card.querySelector(".rbtn");
+          if (b) b.parentNode.removeChild(b);
+        }
+        refreshUnreadCount();
+      })
+      .catch(function () { btn.disabled = false; toast(T("readFail")); });
+  }
   function toggleRead(id, read) {
     return fetch("/api/messages/read", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: id, read: read }) })
       .then(function (r) { return r.json(); }).then(function () { load(); });
@@ -5003,24 +5672,31 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var code = extractCode(m.content);
     var snum = normalizeNum(m.sender);
     var wasRead = !!m.read_at;
-    var html = '<h3>' + esc(isSms ? (m.sender || T("unknownNum")) : (m.sender || m.device_name || T("srcNotify"))) + '</h3>' +
-      '<div class="dl">' +
-        drow(T("dSource"), isSms ? T("srcSms") : (m.source || T("srcNotify"))) +
-        drow(T("dDevice"), m.device_name || "") +
-        (isSms ? drow(T("dRecv"), m.sim_number || m.sim || "") : "") +
-        drow(T("dTime"), fmtTime(m.received_at)) +
-        drow(T("dLabel"), numLabel(m.sender) || T("notSet")) +
-        drow(T("dStatus"), (m.starred ? T("starredPrefix") : "") + (wasRead ? T("read") : T("unread"))) +
-      '</div>' +
-      (code ? '<div class="code-line">' + esc(T("codeLabel")) + ' <b>' + esc(code) + '</b><button class="copy" data-code="' + esc(code) + '">' + esc(T("copy")) + '</button></div>' : '') +
-      '<div class="detail-content">' + linkify(esc(m.content)) + '</div>' +
-      '<div class="detail-actions">' +
-        '<button class="tbtn" id="dstar">' + esc(m.starred ? T("unstar") : T("star")) + '</button>' +
-        '<button class="tbtn" id="dread">' + esc(T("markUnread")) + '</button>' +
-        '<button class="tbtn" id="dcopy">' + esc(T("copyAll")) + '</button>' +
-        (isSms && snum ? '<a class="tbtn" href="tel:' + esc(snum) + '">' + esc(T("call")) + '</a>' : '') +
-        (isSms && snum ? '<button class="tbtn" id="dlabel">' + esc(T("setLabel")) + '</button>' : '') +
-        '<button class="tbtn" id="ddel">' + esc(T("del")) + '</button>' +
+    var body = String(m.content || "");
+    var typeText = code ? T("tagVerify") : (isSms ? T("srcSms") : (m.source || T("srcNotify")));
+    var parts = [];
+    if (isSms) parts.push('<span class="m-num">' + esc(m.sender || T("unknownNum")) + '</span>');
+    parts.push('<span class="m-strong">' + esc(typeText) + '</span>');
+    if (!isSms) parts.push('<span>' + esc(m.source || T("srcNotify")) + '</span>');
+    parts.push('<span class="m-num">' + esc(fmtTime(m.received_at)) + '</span>');
+    if (m.device_name) parts.push('<span>' + esc(m.device_name) + '</span>');
+    parts.push('<span>' + esc(wasRead ? T("read") : T("unread")) + '</span>');
+    if (m.starred) parts.push('<span class="m-star">★</span>');
+    var html = '<h3>' + esc(isSms ? (numLabel(m.sender) || m.sender || T("unknownNum")) : (m.sender || m.device_name || T("srcNotify"))) + '</h3>' +
+      '<div class="detail-metarow">' + parts.join('<span class="sep">·</span>') + '</div>' +
+      '<div class="detail-body">' + (body ? linkify(esc(body)) : '<span class="empty-text">' + esc(T("emptyBody")) + '</span>') + '</div>' +
+      '<div class="modal-foot">' +
+        '<div class="foot-left">' +
+          '<button class="tbtn" id="dcopy">' + esc(T("copyBody")) + '</button>' +
+          '<button class="tbtn" id="dstar">' + esc(m.starred ? T("unstar") : T("star")) + '</button>' +
+          (isSms && snum ? '<a class="tbtn" href="tel:' + esc(snum) + '">' + esc(T("call")) + '</a>' : '') +
+          (isSms && snum ? '<button class="tbtn" id="dlabel">' + esc(T("setLabel")) + '</button>' : '') +
+          '<button class="tbtn" id="ddel" style="color:var(--ds-color-danger);border-color:var(--ds-color-danger)">' + esc(T("del")) + '</button>' +
+        '</div>' +
+        '<div class="foot-right">' +
+          '<button class="tbtn" id="dclose">' + esc(T("modalClose")) + '</button>' +
+          '<button class="tbtn" id="dread" style="border-color:var(--accent);color:var(--accent)">' + esc(wasRead ? T("markUnread") : T("markRead")) + '</button>' +
+        '</div>' +
       '</div>';
     openModal(html);
     if (!wasRead) {
@@ -5041,9 +5717,10 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         .catch(function () { m.read_at = null; toast(T("readFail")); });
     }
     $("dstar").onclick = function () { toggleStar(m.id, !m.starred).then(closeModal); };
-    $("dread").onclick = function () { toggleRead(m.id, false).then(closeModal); };
+    $("dread").onclick = function () { toggleRead(m.id, !wasRead).then(closeModal); };
     $("dcopy").onclick = function () { doCopy(m.content, $("dcopy")); };
     $("ddel").onclick = function () { closeModal(); doDelete([m.id]); };
+    $("dclose").onclick = closeModal;
     var lb = $("dlabel");
     if (lb) lb.onclick = function () {
       var cur = state.labels[snum] || "";
@@ -5154,12 +5831,15 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
           (rev ? "" : (expired
             ? '<span class="tokacts"><button class="tbtn" data-tokrev="' + esc(t.id) + '">吊销</button></span>'
             : '<span class="tokacts">' +
+              '<button class="tbtn" data-tokren="' + esc(t.id) + '">重命名</button>' +
               '<button class="tbtn" data-tokrot="' + esc(t.id) + '">轮换</button>' +
               '<button class="tbtn" data-tokrev="' + esc(t.id) + '">吊销</button></span>')) +
           '</div>';
       });
       box.innerHTML = html;
       box.onclick = function (ev) {
+        var renB = ev.target.closest ? ev.target.closest("[data-tokren]") : null;
+        if (renB) { renameTokenUi(renB.getAttribute("data-tokren")); return; }
         var revB = ev.target.closest ? ev.target.closest("[data-tokrev]") : null;
         if (revB) { revokeTokenUi(revB.getAttribute("data-tokrev")); return; }
         var rotB = ev.target.closest ? ev.target.closest("[data-tokrot]") : null;
@@ -5228,13 +5908,34 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       else toast("轮换失败");
     }).catch(function () { toast("轮换失败"); });
   }
+  function renameTokenUi(id) {
+    var old = tokNameOf(id);
+    var nm = prompt("重命名令牌「" + old + "」\n仅限字母/数字/_/-，最长 64", old);
+    if (nm === null) return;
+    nm = String(nm).trim();
+    if (!nm) { toast("令牌名称不能为空"); return; }
+    tokApi("POST", "/api/tokens/rename", { id: id, name: nm }).then(function (res) {
+      if (res.s === 401) { location.reload(); return; }
+      if (res.d && res.d.success) { toast("令牌名称已更新"); loadTokens(); return; }
+      if (res.d && res.d.error === "NAME_TAKEN") { toast("该名称已被使用（活跃令牌名唯一）"); return; }
+      if (res.d && res.d.error === "INVALID_NAME") { toast("名称非法：仅限字母/数字/_/-，最长 64"); return; }
+      if (res.d && res.d.error === "NOT_FOUND") { toast("令牌不存在或已吊销"); loadTokens(); return; }
+      toast("重命名失败");
+    }).catch(function () { toast("重命名失败"); });
+  }
   function registerSW() {
     try { if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(function () {}); } catch (e) {}
   }
   function load(incremental) {
     /* 非增量加载（首屏/筛选/分页/刷新）一律重置分页会话：清游标与已加载深度，
        避免 page 与 cursor 两种模型共享状态互相污染 */
-    if (!incremental) { state.cursor = ""; state.loadMoreDepth = 0; }
+    if (!incremental) {
+      state.cursor = ""; state.loadMoreDepth = 0;
+      /* 翻页 / 筛选 / 刷新 → 退出选择并清空（避免旧选择跨数据集残留）；加载更多与新消息不清理 */
+      state.selected = {};
+      if (state.selectMode) setSelectMode(false);
+      updateSelBar();
+    }
     var q = qs();
     return fetch("/api/messages?" + q)
       .then(function (r) {
@@ -5315,7 +6016,45 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       sel.value = cur;
     }).catch(function () {});
   }
-  function refreshAll() { return Promise.all([loadSources(), loadDevices()]).then(load); }
+  /* 右侧栏：设置概览（读取真实设置） */
+  function scMini(label, value, scope) {
+    return '<div class="settings-mini"><span>' + esc(label) + '</span><span><strong>' + esc(value) + '</strong>'
+      + (scope ? ' <span class="scope ' + scope + '">' + esc(scope === "browser" ? T("scScopeBrowser") : T("scScopeGlobal")) + '</span>' : "")
+      + '</span></div>';
+  }
+  function loadSideSettings() {
+    return fetch("/api/settings").then(function (r) { return r.json(); }).then(function (d) {
+      var box = $("sideSettings");
+      if (!box || !d || !d.success) return;
+      var local = parseInt(localStorage.getItem(TTL_LOCAL_KEY), 10);
+      var localSet = Number.isInteger(local) && local >= 5 && local <= 43200;
+      var ttl = localSet ? local : (parseInt(d.session_ttl_minutes, 10) || 30);
+      var cfg = d.notify || {}, chans = cfg.channels || {};
+      var tgts = cfg.targets || [];
+      var nch = tgts.length ? tgts.filter(function (t) { return t.enabled; }).length
+        : Object.keys(chans).filter(function (k) { return chans[k] && chans[k].configured; }).length;
+      box.innerHTML =
+        scMini(T("scTtl"), T("scMinN", { n: ttl }), localSet ? "browser" : "global") +
+        scMini(T("scNotifyChannels"), T("scChannelsN", { n: nch }), "") +
+        scMini(T("scRetention"), T("scDaysN", { n: d.retention_days || 30 }), "global") +
+        scMini(T("scLanguage"), LANG_NAMES[LANG], "browser");
+    }).catch(function () {});
+  }
+  /* 右侧栏：快捷概览（读取真实统计） */
+  function loadSideStats() {
+    return fetch("/api/stats").then(function (r) { return r.json(); }).then(function (d) {
+      var box = $("sideQuick");
+      if (!box || !d || !d.success) return;
+      var today = 0, days = d.days || [];
+      if (days.length) today = days[days.length - 1].n || 0;
+      box.innerHTML =
+        '<div class="side-row"><span>' + esc(T("statTotal")) + '</span><strong>' + (d.total || 0) + '</strong></div>' +
+        '<div class="side-row"><span>' + esc(T("statToday")) + '</span><strong>' + today + '</strong></div>' +
+        '<div class="side-row"><span>' + esc(T("statStarred")) + '</span><strong>' + (d.starred || 0) + '</strong></div>';
+    }).catch(function () {});
+  }
+  function refreshSide() { loadSideSettings(); loadSideStats(); }
+  function refreshAll() { refreshSide(); return Promise.all([loadSources(), loadDevices()]).then(load); }
   function syncClear() { $("clearq").hidden = !$("q").value; }
   $("q").addEventListener("input", function () {
     syncClear();
@@ -5327,7 +6066,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   $("next").onclick = function () { if (state.page < state.pages) { state.page++; load(); } };
   $("src").onchange = function () { state.src = $("src").value; state.page = 1; load(); };
   $("range").onchange = function () { state.range = $("range").value; state.page = 1; load(); };
-  $("perpage").onchange = function () { state.limit = parseInt($("perpage").value, 10) || 10; state.page = 1; state.cursor = ""; load(); };
   function doJump() {
     var n = parseInt($("jump").value, 10);
     if (!Number.isInteger(n)) return;
@@ -5337,15 +6075,35 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   $("gojump").onclick = doJump;
   $("jump").addEventListener("keydown", function (e) { if (e.key === "Enter") doJump(); });
   state.range = $("range").value = "";
-  state.limit = parseInt($("perpage").value, 10) || 10;
+  (function initLimit() {
+    var v = parseInt(localStorage.getItem("sms_perpage"), 10);
+    state.limit = [10, 20, 50, 100].indexOf(v) !== -1 ? v : 10;
+  })();
   if ($("loadmore")) $("loadmore").onclick = loadMore;
-  if ($("unreadbtn")) $("unreadbtn").onclick = function () {
-    state.unreadOnly = !state.unreadOnly;
-    $("unreadbtn").setAttribute("data-on", state.unreadOnly ? "1" : "0");
-    var ub = $("unreadonly");
-    if (ub) ub.classList.toggle("on", state.unreadOnly);
-    state.page = 1; state.cursor = ""; load();
-  };
+  /* 筛选：全部 / 未读 / 已读 / 星标（单选，与原型筛选 chips 一致） */
+  function applyFilterUI(mode) {
+    var map = { fall: "all", funread: "unread", fread: "read", fstar: "starred" };
+    Object.keys(map).forEach(function (id) {
+      var b = $(id);
+      if (b) b.classList.toggle("active", map[id] === mode);
+    });
+  }
+  function setFilterMode(mode) {
+    state.filterMode = mode;
+    state.starOnly = mode === "starred";
+    state.unreadOnly = mode === "unread";
+    state.readOnly = mode === "read";
+    state.page = 1; state.cursor = ""; state.loadMoreDepth = 0;
+    applyFilterUI(mode);
+    load();
+  }
+  $("fall").onclick = function () { setFilterMode("all"); };
+  $("funread").onclick = function () { setFilterMode("unread"); };
+  $("fread").onclick = function () { setFilterMode("read"); };
+  $("fstar").onclick = function () { setFilterMode(state.filterMode === "starred" ? "all" : "starred"); };
+  $("refreshbtn").onclick = function () { refreshAll(); };
+  $("sideSetBtn").onclick = function () { openSettingsCenter("session"); };
+  $("sideStatsBtn").onclick = openStats;
   /* 导出：按当前筛选条件下载 CSV / JSON（附件下载，不跳转页面） */
   function exportUrl(fmt) {
     var p = new URLSearchParams();
@@ -5353,6 +6111,9 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (state.src) p.set("source", state.src);
     if (state.range) p.set("range", state.range);
     if (state.q) p.set("q", state.q);
+    if (state.starOnly) p.set("starred", "1");
+    if (state.unreadOnly) p.set("unread", "1");
+    if (state.readOnly) p.set("read", "1");
     p.set("format", fmt);
     return "/api/export?" + p.toString();
   }
@@ -5409,30 +6170,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     }, delay || 0);
   }
   pollLoop();
-  /* 开关初始化与记忆（localStorage） */
-  var acb = $("autocopy"), nb = $("notifyon"), sb = $("soundon");
-  acb.checked = state.autoCopy;
-  nb.checked = state.notify;
-  sb.checked = state.sound;
-  acb.onchange = function () {
-    state.autoCopy = acb.checked;
-    try { localStorage.setItem("sms_autocopy", state.autoCopy ? "1" : "0"); } catch (e) {}
-    toast(state.autoCopy ? T("autoCopyOn") : T("autoCopyOff"));
-  };
-  nb.onchange = function () {
-    state.notify = nb.checked;
-    try { localStorage.setItem("sms_notify", state.notify ? "1" : "0"); } catch (e) {}
-    if (state.notify && window.Notification && Notification.permission === "default") {
-      Notification.requestPermission();
-    }
-    toast(state.notify ? T("notifyOnMsg") : T("notifyOffMsg"));
-  };
-  sb.onchange = function () {
-    state.sound = sb.checked;
-    try { localStorage.setItem("sms_sound", state.sound ? "1" : "0"); } catch (e) {}
-    if (state.sound) beep();
-    toast(state.sound ? T("soundOnMsg") : T("soundOffMsg"));
-  };
+  /* 消息开关（自动复制 / 后台通知 / 提示音）在设置中心内维护；此处只负责应用已保存状态 */
+  function applyMsgToggles() {
+    state.autoCopy = localStorage.getItem("sms_autocopy") !== "0";
+    state.notify = localStorage.getItem("sms_notify") !== "0";
+    state.sound = localStorage.getItem("sms_sound") === "1";
+  }
+  applyMsgToggles();
   /* ---------- 设置中心（DS v1）：统一信息架构 / 作用域标识 / 渐进式说明 / 保存·取消·重置 ----------
      作用域：全局（settings 表，影响所有浏览器）｜本浏览器（localStorage，仅当前浏览器）。
      本项目不存在真实「平台级设置」，因此不虚构该分组。
@@ -5475,7 +6219,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     { key: "biz", label: "scTabBiz" },
     { key: "security", label: "scTabSec" }
   ];
-  var SC = { d: null, section: "session", dirty: false };
+  var SC = { d: null, section: "session", dirty: false, targets: [], tgSeq: 0 };
 
   function scBadge(kind) {
     var k = kind === "global" ? "global" : "browser";
@@ -5496,6 +6240,11 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     nfFetchSettings().then(function (d) {
       if (!d || !d.success) { toast(T("scReadFail")); return; }
       SC.d = d;
+      /* 多目标通知：以后端返回的脱敏视图作为编辑模型（敏感字段不回传明文） */
+      SC.targets = ((d.notify && d.notify.targets) || []).map(function (t) {
+        return { id: t.id, channel: t.channel, name: t.name, enabled: !!t.enabled,
+          fields: t.fields || {}, configured: !!t.configured, _new: false };
+      });
       scRenderShell();
     }).catch(function () { toast(T("scReadFail")); });
   }
@@ -5522,6 +6271,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     };
     $("scbody").addEventListener("input", function () { scMarkDirty(true); });
     $("scbody").addEventListener("change", function () { scMarkDirty(true); });
+    $("scbody").addEventListener("click", scTargetAction);
     $("scrcancel").onclick = function () { scMarkDirty(false); scRenderBody(); toast(T("scCancelDone")); };
     $("scrdefault").onclick = scReset;
     $("scrsave").onclick = scSave;
@@ -5565,7 +6315,20 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       + '<option value="custom"' + (localSet && !hit ? " selected" : "") + '>' + T("scCustom") + '</option>';
     var eff = localSet
       ? T("scEffLocal", { v: localVal }) : T("scEffGlobal", { v: g });
-    return '<div class="setgrp"><h4>' + T("scSessionBrowser") + scBadge("browser") + '</h4>'
+    var langCard = '<div class="setgrp"><h4>' + T("scLanguage") + scBadge("browser") + '</h4>'
+      + scHelp(T("scLangHelp"))
+      + '<div class="setrow"><label for="sclang">' + T("scLang") + '</label>'
+      + '<select id="sclang" class="ds-select">' + langOptions() + '</select></div></div>';
+    var pageCard = '<div class="setgrp"><h4>' + T("scPageSize") + scBadge("browser") + '</h4>'
+      + scHelp(T("scPageSizeHelp"))
+      + '<div class="setrow"><label for="sclimit">' + T("scPerPage") + '</label>'
+      + '<select id="sclimit" class="ds-select">'
+      + [10, 20, 50, 100].map(function (n) {
+          return '<option value="' + n + '"' + (state.limit === n ? " selected" : "") + '>' + T("perPage", { n: n }) + '</option>';
+        }).join("")
+      + '</select></div></div>';
+    return langCard + pageCard
+      + '<div class="setgrp"><h4>' + T("scSessionBrowser") + scBadge("browser") + '</h4>'
       + '<div class="ds-alert">' + eff + '</div>'
       + '<div class="setrow"><label for="scbttl">' + T("scTtl") + '</label>'
       + '<select id="scbttl" class="ds-select">' + opts + '</select>'
@@ -5581,12 +6344,44 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       + '</div>';
   }
 
+  /* ---- 通知：多目标行 + 单目标兼容 ---- */
+  function scTargetRow(t, ch) {
+    var parts = [];
+    (ch.fields || []).forEach(function (f) {
+      var v = (t.fields || {})[f.key] || {};
+      if (f.sensitive) {
+        if (v.configured || v.value) parts.push(v.masked || (nfLabel(f.key) + " ••••"));
+      } else if (v.value) {
+        parts.push(nfLabel(f.key) + " " + v.value);
+      }
+    });
+    return '<div class="tokrow"><div class="tokmain"><div class="tokname">' + esc(t.name)
+      + ' <span class="tokbadge">' + esc(t.enabled ? T("scEnable") : T("scTargetOff")) + '</span></div>'
+      + '<div class="tokmeta">' + esc(parts.join(" · ") || T("scNotConfigured")) + '</div></div>'
+      + '<div class="tokacts">'
+      + '<button class="tbtn" type="button" data-tgact="test" data-tgid="' + esc(t.id) + '" data-tgch="' + ch.key + '">' + esc(T("scSendTest")) + '</button>'
+      + '<button class="tbtn" type="button" data-tgact="toggle" data-tgid="' + esc(t.id) + '">' + esc(t.enabled ? T("scTargetOff") : T("scEnable")) + '</button>'
+      + '<button class="tbtn" type="button" data-tgact="rename" data-tgid="' + esc(t.id) + '">' + esc(T("scTargetRename")) + '</button>'
+      + '<button class="tbtn" type="button" data-tgact="del" data-tgid="' + esc(t.id) + '">' + esc(T("del")) + '</button>'
+      + '</div></div>';
+  }
   /* ---- 通知：全局规则 + 各渠道 ---- */
   function scBodyNotify() {
     var d = SC.d;
     var schema = d.notify_schema || { channels: [], types: [], retry_max: 3 };
     var cfg = d.notify || { enabled: true, types: [], retry: 0, link: "", channels: {} };
-    var html = '<div class="setgrp"><h4>' + T("scNotifyRules") + scBadge("global") + '</h4>'
+    var dnd = getDND();
+    var html = '<div class="setgrp"><h4>' + T("scBrowserPrefs") + scBadge("browser") + '</h4>'
+      + scHelp(T("scBrowserPrefsHelp"))
+      + '<div class="setrow"><label for="scautocopy">' + T("autoCopy") + '</label><input type="checkbox" id="scautocopy" class="ds-check" ' + (state.autoCopy ? "checked" : "") + '></div>'
+      + '<div class="setrow"><label for="scnotifyon">' + T("notifyOn") + '</label><input type="checkbox" id="scnotifyon" class="ds-check" ' + (state.notify ? "checked" : "") + '></div>'
+      + '<div class="setrow"><label for="scsoundon">' + T("soundOn") + '</label><input type="checkbox" id="scsoundon" class="ds-check" ' + (state.sound ? "checked" : "") + '></div>'
+      + '<div class="setrow"><label for="scdndon">' + T("sDnd") + '</label><input type="checkbox" id="scdndon" class="ds-check" ' + (dnd.on ? "checked" : "") + '></div>'
+      + '<div class="setrow"><label>' + T("sDndRange") + '</label>'
+      + '<input type="number" id="scdnds" class="ds-input" min="0" max="23" inputmode="numeric" value="' + (parseInt(dnd.start, 10) || 0) + '">'
+      + '<span>' + T("to") + '</span>'
+      + '<input type="number" id="scdnde" class="ds-input" min="0" max="23" inputmode="numeric" value="' + (parseInt(dnd.end, 10) || 0) + '"></div></div>'
+      + '<div class="setgrp"><h4>' + T("scNotifyRules") + scBadge("global") + '</h4>'
       + scHelp(T("scNotifyHelp"))
       + '<div class="setrow"><label for="nfen">' + T("scNotifyEnabled") + '</label><input type="checkbox" id="nfen" class="ds-check" ' + (cfg.enabled ? "checked" : "") + '></div>'
       + '<div class="setrow"><label>' + T("scNotifyTypes") + '</label><span>';
@@ -5607,32 +6402,107 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
 
     (schema.channels || []).forEach(function (ch) {
       var state = cfg.channels[ch.key] || { enabled: true, configured: false, source: "env", fields: {} };
+      var tgs = (SC.targets || []).filter(function (x) { return x.channel === ch.key; });
+      var isCfg = !!state.configured || tgs.length > 0;
       html += '<div class="setgrp"><h4>' + esc(scChannelName(ch)) + scBadge("global")
-        + '<span class="ds-badge ' + (state.configured ? "ds-badge--success" : "") + '">'
-        + (state.configured ? T("scConfigured") : T("scNotConfigured"))
-        + (state.configured ? " · " + (state.source === "db" ? T("scFromDb") : T("scFromEnv")) : "")
+        + '<span class="ds-badge ' + (isCfg ? "ds-badge--success" : "") + '">'
+        + (isCfg ? T("scConfigured") : T("scNotConfigured"))
+        + (isCfg ? " · " + (tgs.length ? T("scMultiTarget") : (state.source === "db" ? T("scFromDb") : T("scFromEnv"))) : "")
         + '</span></h4>'
         + '<div class="setrow"><label for="nf_' + ch.key + '_enabled">' + T("scEnable") + '</label>'
         + '<input type="checkbox" id="nf_' + ch.key + '_enabled" class="ds-check" ' + (state.enabled ? "checked" : "") + '></div>';
+      if (tgs.length) {
+        html += '<div class="toklist">' + tgs.map(function (tg) { return scTargetRow(tg, ch); }).join("") + '</div>'
+          + '<div class="ds-help">' + T("scTargetLegacy") + '</div>';
+      } else {
+        ch.fields.forEach(function (f) {
+          var id = "nf_" + ch.key + "_" + f.key;
+          var val = state.fields[f.key] || {};
+          if (f.sensitive) {
+            var ph = val.configured ? T("scSensitivePhCfg", { m: val.masked || "••••" }) : T("scSensitivePhNew");
+            html += '<div class="setrow"><label for="' + id + '">' + esc(nfLabel(f.key)) + '</label>'
+              + '<input type="text" id="' + id + '" class="ds-input" autocomplete="off" spellcheck="false" placeholder="' + esc(ph) + '">'
+              + '<label class="clr"><input type="checkbox" class="ds-check" id="clr_' + ch.key + '_' + f.key + '"> ' + T("scClear") + '</label></div>';
+          } else {
+            html += '<div class="setrow"><label for="' + id + '">' + esc(nfLabel(f.key)) + '</label>'
+              + '<input type="text" id="' + id + '" class="ds-input" autocomplete="off" value="' + esc(val.value || "") + '"></div>';
+          }
+        });
+        html += '<div class="setrow"><label>' + T("scTest") + '</label>'
+          + '<button class="ds-btn settest" id="nf_test_' + ch.key + '" type="button">' + T("scSendTest") + '</button></div>';
+      }
+      /* 添加目标：名称 + 该渠道全部字段（敏感字段仅新增时填写） */
+      html += '<div class="setrow"><label for="tgname_' + ch.key + '">' + T("scAddTarget") + '</label>'
+        + '<input type="text" id="tgname_' + ch.key + '" class="ds-input" placeholder="' + esc(T("scTargetNamePh")) + '" autocomplete="off"></div>';
       ch.fields.forEach(function (f) {
-        var id = "nf_" + ch.key + "_" + f.key;
-        var val = state.fields[f.key] || {};
-        if (f.sensitive) {
-          var ph = val.configured ? T("scSensitivePhCfg", { m: val.masked || "••••" }) : T("scSensitivePhNew");
-          html += '<div class="setrow"><label for="' + id + '">' + esc(nfLabel(f.key)) + '</label>'
-            + '<input type="text" id="' + id + '" class="ds-input" autocomplete="off" spellcheck="false" placeholder="' + esc(ph) + '">'
-            + '<label class="clr"><input type="checkbox" class="ds-check" id="clr_' + ch.key + '_' + f.key + '"> ' + T("scClear") + '</label></div>';
-        } else {
-          html += '<div class="setrow"><label for="' + id + '">' + esc(nfLabel(f.key)) + '</label>'
-            + '<input type="text" id="' + id + '" class="ds-input" autocomplete="off" value="' + esc(val.value || "") + '"></div>';
-        }
+        html += '<div class="setrow"><label for="tgf_' + ch.key + '_' + f.key + '">' + esc(nfLabel(f.key)) + '</label>'
+          + '<input type="text" id="tgf_' + ch.key + '_' + f.key + '" class="ds-input" autocomplete="off"'
+          + (f.sensitive ? ' spellcheck="false" placeholder="' + esc(T("scSensitivePhNew")) + '"' : '') + '></div>';
       });
-      html += '<div class="setrow"><label>' + T("scTest") + '</label>'
-        + '<button class="ds-btn settest" id="nf_test_' + ch.key + '" type="button">' + T("scSendTest") + '</button></div></div>';
+      html += '<div class="setrow"><label></label><button class="ds-btn" type="button" id="tgadd_' + ch.key + '">' + T("scAddTarget") + '</button></div></div>';
     });
     html += '<div class="ds-alert ds-alert--warning">' + T("scTestSaved") + '</div>'
       + '<div class="setrow"><button class="ds-btn" id="nfimport" type="button">' + T("scImportEnv") + '</button></div>';
     return html;
+  }
+  function scAddTarget(chKey) {
+    var nameEl = $("tgname_" + chKey), name = nameEl ? nameEl.value.trim() : "";
+    if (!name) { toast(T("scTargetNamePh")); if (nameEl) nameEl.focus(); return; }
+    var ch = ((SC.d.notify_schema || {}).channels || []).filter(function (c) { return c.key === chKey; })[0];
+    if (!ch) return;
+    var fields = {};
+    ch.fields.forEach(function (f) {
+      var el = $("tgf_" + chKey + "_" + f.key);
+      var v = el ? el.value.trim() : "";
+      fields[f.key] = { sensitive: !!f.sensitive, value: v, configured: !!v };
+    });
+    SC.tgSeq += 1;
+    /* 新目标用本地唯一临时 id 参与行内操作；保存时 _new 目标不回传 id，由服务端分配 */
+    SC.targets.push({ id: "__new" + SC.tgSeq, channel: chKey, name: name, enabled: true, fields: fields, configured: true, _new: true });
+    scMarkDirty(true);
+    scRenderBody();
+    toast(T("scTargetAdded"));
+  }
+  function scTargetAction(ev) {
+    var addBtn = ev.target && ev.target.closest ? ev.target.closest("[id^='tgadd_']") : null;
+    if (addBtn) { scAddTarget(addBtn.id.slice(6)); return; }
+    var b = ev.target && ev.target.closest ? ev.target.closest("[data-tgact]") : null;
+    if (!b) return;
+    var act = b.getAttribute("data-tgact"), id = b.getAttribute("data-tgid");
+    var t = (SC.targets || []).filter(function (x) { return x.id === id; })[0];
+    if (!t) return;
+    if (act === "toggle") {
+      t.enabled = !t.enabled; scMarkDirty(true); scRenderBody(); return;
+    }
+    if (act === "rename") {
+      var nm = prompt(T("scTargetRename"), t.name);
+      if (nm === null) return;
+      nm = String(nm).trim();
+      if (!nm) { toast(T("scTargetNamePh")); return; }
+      t.name = nm; scMarkDirty(true); scRenderBody(); return;
+    }
+    if (act === "del") {
+      if (!confirm(T("confirmDelN", { n: 1 }))) return;
+      SC.targets = SC.targets.filter(function (x) { return x.id !== id; });
+      scMarkDirty(true); scRenderBody(); toast(T("scTargetRemoved")); return;
+    }
+    if (act === "test") {
+      if (t._new || !t.id) { toast(T("scTargetSaveFirst")); return; }
+      b.disabled = true; b.setAttribute("data-loading", "1");
+      fetch("/api/settings/notify/test", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ channel: t.channel, target_id: t.id }),
+      }).then(function (r) {
+        if (r.status === 401) { location.reload(); return null; }
+        return r.json();
+      }).then(function (res) {
+        b.disabled = false; b.removeAttribute("data-loading");
+        if (!res) return;
+        if (res.success) { toast(T("scTestOk")); return; }
+        if (res.error === "NOT_CONFIGURED") { toast(T("scTestNotCfg")); return; }
+        toast(res.message ? T("scTestFailMsg", { m: res.message }) : T("scTestFail"));
+      }).catch(function () { b.disabled = false; b.removeAttribute("data-loading"); toast(T("scTestFail")); });
+    }
   }
   function scWireNotify() {
     var schema = (SC.d.notify_schema) || { channels: [] };
@@ -5778,14 +6648,58 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     }
     var g = parseInt(gl && gl.value, 10);
     if (!Number.isInteger(g) || g < 5 || g > 43200) { toast(T("scTtlRange")); return; }
+    var lim = $("sclimit"), langEl = $("sclang");
+    var newLimit = lim ? parseInt(lim.value, 10) : state.limit;
+    if ([10, 20, 50, 100].indexOf(newLimit) === -1) newLimit = state.limit;
+    var newLang = langEl ? langEl.value : LANG;
+    var langChanged = !!(newLang && newLang !== LANG);
+    var limitChanged = newLimit !== state.limit;
+    function applyLocal() {
+      try { localStorage.setItem("sms_perpage", String(newLimit)); } catch (e) {}
+      state.limit = newLimit;
+      if (langChanged) { try { localStorage.setItem("sms_lang", newLang); } catch (e) {} }
+    }
+    function afterSaved() {
+      if (!langChanged) return;
+      try {
+        var u = new URL(location.href);
+        u.searchParams.set("lang", newLang);
+        location.replace(u.toString());
+        return;
+      } catch (e) { location.reload(); }
+    }
     if (g !== parseInt(SC.d.session_ttl_minutes, 10)) {
       SC.d.session_ttl_minutes = g;
-      return scPut({ revision: SC.d.revision, session_ttl_minutes: g }, btn, T("scSavedTtlGlobal"));
+      applyLocal();
+      return scPut({ revision: SC.d.revision, session_ttl_minutes: g }, btn, T("scSavedTtlGlobal")).then(function (ok) {
+        if (ok) afterSaved();
+      });
     }
-    if (localChanged) { scMarkDirty(false); closeModal(); toast(T("scSavedTtl")); return; }
+    if (localChanged || limitChanged || langChanged) {
+      applyLocal();
+      scMarkDirty(false); closeModal(); toast(T("scSavedTtl"));
+      afterSaved();
+      return;
+    }
     toast(T("scNoChanges"));
   }
   function scSaveNotify(btn) {
+    /* 本浏览器偏好（消息开关 / 免打扰）：与全局通知规则同一次保存 */
+    function saveBrowserPrefs() {
+      var ac = $("scautocopy"), nb = $("scnotifyon"), sb = $("scsoundon"), dn = $("scdndon");
+      if (ac) { state.autoCopy = ac.checked; try { localStorage.setItem("sms_autocopy", state.autoCopy ? "1" : "0"); } catch (e) {} }
+      if (nb) {
+        state.notify = nb.checked; try { localStorage.setItem("sms_notify", state.notify ? "1" : "0"); } catch (e) {}
+        if (state.notify && window.Notification && Notification.permission === "default") Notification.requestPermission();
+      }
+      if (sb) { state.sound = sb.checked; try { localStorage.setItem("sms_sound", state.sound ? "1" : "0"); } catch (e) {} }
+      if (dn) {
+        var start = Math.min(23, Math.max(0, parseInt($("scdnds").value, 10) || 0));
+        var end = Math.min(23, Math.max(0, parseInt($("scdnde").value, 10) || 0));
+        try { localStorage.setItem("sms_dnd", JSON.stringify({ on: !!dn.checked, start: start, end: end })); } catch (e) {}
+      }
+    }
+    saveBrowserPrefs();
     var types = [];
     var nodes = document.querySelectorAll("[data-nftype]");
     for (var i = 0; i < nodes.length; i++) if (nodes[i].checked) types.push(nodes[i].getAttribute("data-nftype"));
@@ -5802,6 +6716,23 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       },
       clear: [],
     };
+    /* 多目标：新目标携带完整字段；已保存目标不回传敏感明文，服务端按 id 合并 */
+    var schemaCh = (SC.d.notify_schema || {}).channels || [];
+    body.notify.targets = (SC.targets || []).map(function (tg) {
+      var spec = schemaCh.filter(function (c) { return c.key === tg.channel; })[0];
+      var fields = {};
+      (spec ? spec.fields : []).forEach(function (f) {
+        var v = (tg.fields || {})[f.key] || {};
+        if (f.sensitive) {
+          if (tg._new && (v.value || v.configured)) fields[f.key] = v.value || "";
+        } else {
+          fields[f.key] = v.value || "";
+        }
+      });
+      var out = { channel: tg.channel, name: tg.name, enabled: !!tg.enabled, fields: fields };
+      if (!tg._new && tg.id) out.id = tg.id;
+      return out;
+    });
     (schema.channels || []).forEach(function (ch) {
       var c = { enabled: !!$("nf_" + ch.key + "_enabled").checked };
       ch.fields.forEach(function (f) {
@@ -5840,48 +6771,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   function openSessTtl() { openSettingsCenter("session"); }
   function openNotifySettings() { openSettingsCenter("notify"); }
   function openSystemSettings() { openSettingsCenter("biz"); }
-  /* ---------- 设置下拉菜单：统计 / 消息开关 / 免打扰 / 筛选 / 操作 ---------- */
-  var setBtn = $("setbtn"), setMenu = $("setmenu");
-  function setSetOpen(on) {
-    setMenu.classList.toggle("open", on);
-    setBtn.setAttribute("aria-expanded", on ? "true" : "false");
-  }
-  setBtn.onclick = function (ev) {
-    if (ev && ev.stopPropagation) ev.stopPropagation();
-    setSetOpen(!setMenu.classList.contains("open"));
-  };
-  /* 点菜单外或按 Esc 收起 */
-  document.addEventListener("click", function (ev) {
-    if (!setMenu.classList.contains("open")) return;
-    if (setMenu.contains(ev.target) || setBtn.contains(ev.target)) return;
-    setSetOpen(false);
-  });
-  document.addEventListener("keydown", function (ev) {
-    if (ev.key === "Escape" && setMenu.classList.contains("open")) { setSetOpen(false); setBtn.focus(); }
-  });
-  /* 开关（label 内）与免打扰输入区操作不收起，方便连续调；其余项点击即收起 */
-  setMenu.addEventListener("click", function (ev) {
-    var t = ev.target;
-    if (t && t.closest && (t.closest("label") || t.closest(".dndrow"))) return;
-    setSetOpen(false);
-  });
-  /* 统计：先关菜单，再开统计弹层 */
-  $("mstats").onclick = function () { setSetOpen(false); openStats(); };
-  $("mtokens").onclick = function () { setSetOpen(false); openTokens(); };
-  $("msetcenter").onclick = function () { setSetOpen(false); openSettingsCenter("session"); };
-  $("msesttl").onclick = function () { setSetOpen(false); openSessTtl(); };
-  /* 免打扰：回填开关与时段；保存只写 dnd（提示音由 soundon 即时生效，不在此保存） */
-  var dnd = getDND();
-  $("stdnd").checked = !!dnd.on;
-  $("dnds").value = parseInt(dnd.start, 10) || 0;
-  $("dnde").value = parseInt(dnd.end, 10) || 0;
-  $("dndsave").onclick = function () {
-    var on = $("stdnd").checked;
-    var start = Math.min(23, Math.max(0, parseInt($("dnds").value, 10) || 0));
-    var end = Math.min(23, Math.max(0, parseInt($("dnde").value, 10) || 0));
-    try { localStorage.setItem("sms_dnd", JSON.stringify({ on: on, start: start, end: end })); } catch (e) {}
-    setSetOpen(false); toast(T("saved"));
-  };
+  /* 顶部「设置」直接打开设置中心（原下拉菜单内容已迁入设置中心） */
+  $("setbtn").onclick = function () { openSettingsCenter("session"); };
   /* 回到页面即清零未读数、恢复标题，并立刻补拉一次（移动端切后台常被冻结，长轮询可能已断） */
   document.addEventListener("visibilitychange", function () {
     if (!document.hidden) {
@@ -5892,6 +6783,12 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     }
   });
   $("list").addEventListener("click", function (ev) {
+    if (suppressClick) { suppressClick = false; ev.preventDefault(); return; }
+    /* 多选态：点击卡片空白区域切换选中；按钮/复选框保持原有行为 */
+    if (state.selectMode) {
+      var card = ev.target.closest ? ev.target.closest(".card") : null;
+      if (card && !ev.target.closest("button,label,input,a")) { toggleSelCard(card); return; }
+    }
     var starBtn = ev.target.closest ? ev.target.closest(".star") : null;
     if (starBtn) {
       var sid = parseInt(starBtn.getAttribute("data-id"), 10);
@@ -5906,6 +6803,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     }
     var moreBtn = ev.target.closest ? ev.target.closest(".more") : null;
     if (moreBtn) { openDetail(parseInt(moreBtn.getAttribute("data-id"), 10)); return; }
+    var rbtn = ev.target.closest ? ev.target.closest(".rbtn") : null;
+    if (rbtn) { readOne(parseInt(rbtn.getAttribute("data-id"), 10), rbtn); return; }
     var sumEl = ev.target.closest ? ev.target.closest(".summary") : null;
     if (sumEl) { openDetail(parseInt(sumEl.getAttribute("data-id"), 10)); return; }
     var copyBtn = ev.target.closest ? ev.target.closest(".copy") : null;
@@ -5927,17 +6826,61 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       navigator.clipboard.writeText(text).then(fin, function () { fallbackCopy(text); fin(); });
     } else { fallbackCopy(text); fin(); }
   });
-  /* ---------- 批量选择 / 清空 / 主题 / 无障碍 ---------- */
+  /* ---------- 批量选择（右键 / 长按进入，默认隐藏） ---------- */
   function setSelectMode(on) {
     state.selectMode = !!on;
     document.body.classList.toggle("selecting", state.selectMode);
     $("selbar").hidden = !state.selectMode;
-    $("selectbtn").textContent = state.selectMode ? T("done") : T("select");
     if (!state.selectMode) state.selected = {};
     syncSelBoxes();
     updateSelBar();
   }
-  $("selectbtn").onclick = function () { setSelectMode(!state.selectMode); };
+  function toggleSelCard(card) {
+    if (!card) return;
+    var id = card.getAttribute("data-id");
+    if (state.selected[id]) delete state.selected[id]; else state.selected[id] = true;
+    var box = card.querySelector(".selbox");
+    if (box) box.checked = !!state.selected[id];
+    updateSelBar();
+  }
+  var pressTimer = null, pressCard = null, pressX = 0, pressY = 0, suppressClick = false;
+  function cancelPress() {
+    if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+    if (pressCard) { pressCard.classList.remove("pressing"); pressCard = null; }
+  }
+  $("list").addEventListener("contextmenu", function (ev) {
+    var card = ev.target.closest ? ev.target.closest(".card") : null;
+    if (!card) return;
+    ev.preventDefault();
+    setSelectMode(true);
+    if (!state.selected[card.getAttribute("data-id")]) toggleSelCard(card);
+  });
+  $("list").addEventListener("touchstart", function (ev) {
+    var card = ev.target.closest ? ev.target.closest(".card") : null;
+    if (!card) return;
+    cancelPress();
+    var t = ev.touches[0];
+    pressX = t.clientX; pressY = t.clientY;
+    pressCard = card;
+    card.classList.add("pressing");
+    pressTimer = setTimeout(function () {
+      pressTimer = null;
+      pressCard = null;
+      card.classList.remove("pressing");
+      suppressClick = true;
+      setTimeout(function () { suppressClick = false; }, 400);
+      setSelectMode(true);
+      if (!state.selected[card.getAttribute("data-id")]) toggleSelCard(card);
+      if (navigator.vibrate) navigator.vibrate(10);
+    }, 500);
+  }, { passive: true });
+  $("list").addEventListener("touchmove", function (ev) {
+    var t = ev.touches[0];
+    if (!t || !pressTimer) return;
+    if (Math.abs(t.clientX - pressX) > 10 || Math.abs(t.clientY - pressY) > 10) cancelPress();
+  }, { passive: true });
+  $("list").addEventListener("touchend", cancelPress, { passive: true });
+  $("list").addEventListener("touchcancel", cancelPress, { passive: true });
   $("selcancel").onclick = function () { setSelectMode(false); };
   $("selall").onclick = function () {
     var boxes = $("list").querySelectorAll(".selbox");
@@ -5949,6 +6892,31 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       if (!allOn) state.selected[id] = true; else delete state.selected[id];
     }
     updateSelBar();
+  };
+  $("selread").onclick = function () {
+    var ids = Object.keys(state.selected).map(function (k) { return parseInt(k, 10); }).filter(function (n) { return n > 0; });
+    if (!ids.length) return;
+    var btn = $("selread");
+    if (btn.disabled) return;
+    btn.disabled = true;
+    btn.setAttribute("data-loading", "1");
+    fetch("/api/messages/read", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: ids, read: true }) })
+      .then(function (r) { if (r.status === 401) { location.reload(); return new Promise(function () {}); } return r.json(); })
+      .then(function (res) {
+        btn.disabled = false;
+        btn.removeAttribute("data-loading");
+        if (!res || !res.success) { toast(T("bulkFail")); return; }
+        if (res.failed) toast(T("bulkPartial", { ok: res.updated, ng: res.failed }));
+        else toast(T("bulkOk", { n: res.updated }));
+        if (typeof res.unread === "number") {
+          state.unread = res.unread;
+          var el = $("unreadcount");
+          if (el) { el.textContent = state.unread; el.hidden = state.unread <= 0; }
+        }
+        setSelectMode(false);
+        load();
+      })
+      .catch(function () { btn.disabled = false; btn.removeAttribute("data-loading"); toast(T("bulkFail")); });
   };
   $("seldel").onclick = function () {
     var ids = Object.keys(state.selected).map(function (k) { return parseInt(k, 10); }).filter(function (n) { return n > 0; });
@@ -5998,14 +6966,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (e.key === "/" && !typing) { e.preventDefault(); $("q").focus(); }
     if (e.key === "Escape" && state.selectMode) { setSelectMode(false); }
   });
-  /* 收藏 / 未读筛选 + 头部按钮 + 弹层 + PWA + 搜索历史 */
-  $("staronly").onclick = function () { state.starOnly = !state.starOnly; $("staronly").classList.toggle("on", state.starOnly); state.page = 1; load(); };
-  $("unreadonly").onclick = function () {
-    state.unreadOnly = !state.unreadOnly;
-    $("unreadonly").classList.toggle("on", state.unreadOnly);
-    if ($("unreadbtn")) $("unreadbtn").setAttribute("data-on", state.unreadOnly ? "1" : "0");
-    state.page = 1; state.cursor = ""; load();
-  };
+  /* 弹层 + PWA + 搜索历史 */
   $("modalx").onclick = closeModal;
   $("modal").addEventListener("click", function (ev) { if (ev.target === $("modal")) closeModal(); });
   loadQHist();
@@ -6699,6 +7660,23 @@ async function rotateToken(env, id) {
   return created;
 }
 
+/* 重命名（仅活跃令牌；名称规则与创建一致；仅改展示名，不影响哈希/有效期/最近使用） */
+async function renameToken(env, id, name) {
+  const n = String(name || "").trim();
+  if (!n || n.length > TOKEN_NAME_MAX || !TOKEN_NAME_RE.test(n)) return { ok: false, error: "INVALID_NAME" };
+  const row = await env.DB.prepare("SELECT id FROM tokens WHERE id = ? AND revoked_at IS NULL")
+    .bind(String(id || "")).first();
+  if (!row) return { ok: false, error: "NOT_FOUND" };
+  try {
+    const r = await env.DB.prepare("UPDATE tokens SET name = ? WHERE id = ? AND revoked_at IS NULL")
+      .bind(n, String(id)).run();
+    return { ok: true, changed: ((r.meta && r.meta.changes) || 0) > 0, name: n };
+  } catch (e) {
+    if (/unique/i.test(String(e && e.message || e))) return { ok: false, error: "NAME_TAKEN" };
+    throw e;
+  }
+}
+
 /* 记录最后使用时间（第 2 步鉴权命中后调用）。
    节流：单语句条件更新——last_used_at 为空或早于 cutoff 才写，省一次读往返 */
 async function touchLastUsed(env, id) {
@@ -6848,6 +7826,21 @@ async function handleRotateToken(request, env) {
   return json({ success: true, id: r.id, token_prefix: r.token.slice(0, 12), expires_at: r.expires_at, token: r.token });
 }
 
+async function handleRenameToken(request, env) {
+  if (!tokenApiJsonOnly(request)) return json({ success: false, error: "invalid content type" }, 400);
+  if (!allowWrite(request)) return json({ success: false, error: "too many requests" }, 429);
+  const body = await readTokenApiBody(request);
+  if (!body) return json({ success: false, error: "invalid json" }, 400);
+  const id = String(body.id === undefined || body.id === null ? "" : body.id).trim();
+  const r = await renameToken(env, id, body.name);
+  if (!r.ok) {
+    if (r.error === "NOT_FOUND") return json({ success: false, error: "NOT_FOUND" }, 404);
+    if (r.error === "INVALID_NAME" || r.error === "NAME_TAKEN") return json({ success: false, error: r.error }, 400);
+    return json({ success: false, error: "internal error" }, 500);
+  }
+  return json({ success: true, id: id, name: r.name, changed: r.changed });
+}
+
 /* ---------------- 服务端设置（settings 键值表） ----------------
  * PERF25：通知渠道配置、通知开关/规则/重试、数据保留天数、号码归属地接入参数全部入库。
  * 安全边界：ADMIN_PASSWORD / SESSION_SECRET / RECEIVE_TOKEN 等登录与鉴权凭据仍只走环境变量；
@@ -6867,7 +7860,7 @@ function maskSettingValue(v) {
 
 function isAllowedSettingKey(k) {
   if (SETTINGS_ENV_KEYS.indexOf(k) !== -1) return true;
-  if (k === "notify.enabled" || k === "notify.types" || k === "notify.retry" || k === "notify.link") return true;
+  if (k === "notify.enabled" || k === "notify.types" || k === "notify.retry" || k === "notify.link" || k === "notify.targets") return true;
   if (!isNotifyKey(k)) return false;
   const parts = String(k).split(".");
   if (parts.length !== 3) return false;
@@ -6971,6 +7964,55 @@ function scalarFromRows(env, name, all) {
   return v === null ? spec.def : v;
 }
 
+function notifyTargetView(t) {
+  const spec = NOTIFY_CHANNELS[t.channel];
+  const fields = {};
+  for (const f of Object.keys(spec.fields)) {
+    const v = String(t.fields[f] === undefined || t.fields[f] === null ? "" : t.fields[f]);
+    if (spec.fields[f].sensitive) fields[f] = { sensitive: true, configured: !!v, masked: maskSettingValue(v) };
+    else fields[f] = { sensitive: false, value: v };
+  }
+  return {
+    id: t.id, channel: t.channel, name: t.name, enabled: !!t.enabled,
+    configured: spec.need.every(function (f) { return !!t.fields[f]; }),
+    fields: fields,
+  };
+}
+/* 多目标校验/规范化：敏感字段留空 = 沿用同 id 旧值（编辑时不回传明文）；无 id 的新目标自动生成 */
+function normalizeNotifyTargets(raw, existing) {
+  if (!Array.isArray(raw)) return { ok: false };
+  if (raw.length > 50) return { ok: false };
+  const old = (existing || []).reduce(function (m, t) { if (t && t.id) m[t.id] = t; return m; }, {});
+  const out = [];
+  const seen = {};
+  for (const t of raw) {
+    if (!t || typeof t !== "object" || Array.isArray(t)) return { ok: false };
+    const channel = String(t.channel || "");
+    const spec = NOTIFY_CHANNELS[channel];
+    if (!spec) return { ok: false };
+    const name = String(t.name === undefined || t.name === null ? "" : t.name).trim();
+    if (!name || name.length > TOKEN_NAME_MAX) return { ok: false };
+    const id = String(t.id || "").trim() || ("nt_" + randHex(8));
+    /* 同一批次内 id 必须唯一，避免一个 id 被多条目标复用 */
+    if (seen[id]) return { ok: false };
+    seen[id] = true;
+    const prev = old[id] || {};
+    /* 敏感字段沿用旧值必须同时满足「同一 id + 同一渠道」，禁止跨渠道复用凭据 */
+    if (prev.channel && prev.channel !== channel) return { ok: false };
+    const fields = {};
+    for (const f of Object.keys(spec.fields)) {
+      let v = String((t.fields && t.fields[f]) === undefined || (t.fields && t.fields[f]) === null ? "" : t.fields[f]).trim();
+      if (!v && spec.fields[f].sensitive) v = String((prev.fields && prev.fields[f]) || "");
+      if (v === "") { fields[f] = ""; continue; }
+      const r = normalizeSettingValue(notifyFieldKey(channel, f), v);
+      if (!r.ok) return { ok: false };
+      fields[f] = r.value;
+    }
+    out.push({ id: id, channel: channel, name: name, enabled: t.enabled !== false, fields: fields });
+  }
+  return { ok: true, value: JSON.stringify(out) };
+}
+
 function notifyConfigView(cfg) {
   const channels = {};
   for (const name of Object.keys(NOTIFY_CHANNELS)) {
@@ -6990,7 +8032,11 @@ function notifyConfigView(cfg) {
       source: ch.fromDb ? "db" : "env", fields: fields,
     };
   }
-  return { enabled: cfg.enabled, types: cfg.types.slice(), retry: cfg.retry, link: cfg.link, channels: channels };
+  return {
+    enabled: cfg.enabled, types: cfg.types.slice(), retry: cfg.retry, link: cfg.link,
+    channels: channels,
+    targets: (cfg.targets || []).map(notifyTargetView),
+  };
 }
 
 function notifySchemaView() {
@@ -7148,6 +8194,14 @@ async function handlePutSettings(request, env) {
     if (n.link !== undefined && !addValue("notify.link", n.link)) {
       return json({ success: false, error: "INVALID_SETTING", setting: "notify.link" }, 400);
     }
+    if (n.targets !== undefined) {
+      const cur = await readSettingsKeys(env, ["notify.targets"]);
+      let old = [];
+      try { old = JSON.parse(cur["notify.targets"] || "[]"); } catch (e) { old = []; }
+      const r = normalizeNotifyTargets(n.targets, Array.isArray(old) ? old : []);
+      if (!r.ok) return json({ success: false, error: "INVALID_TARGETS" }, 400);
+      writes["notify.targets"] = r.value;
+    }
     if (n.channels && typeof n.channels === "object" && !Array.isArray(n.channels)) {
       for (const ch of Object.keys(n.channels)) {
         if (!NOTIFY_CHANNELS[ch]) return json({ success: false, error: "INVALID_SETTING", setting: "notify." + ch }, 400);
@@ -7209,8 +8263,14 @@ async function handleTestNotify(request, env) {
   if (!body) return json({ success: false, error: "invalid json" }, 400);
   const channel = String(body.channel || "");
   if (!NOTIFY_CHANNELS[channel]) return json({ success: false, error: "INVALID_CHANNEL" }, 400);
+  const targetId = String(body.target_id || "");
   const cfg = await loadNotifyConfig(env);
-  if (!cfg.channels[channel] || !cfg.channels[channel].configured) {
+  if (targetId) {
+    const tg = (cfg.targets || []).filter(function (x) { return x.id === targetId && x.channel === channel; })[0];
+    if (!tg || !NOTIFY_CHANNELS[channel].need.every(function (f) { return !!tg.fields[f]; })) {
+      return json({ success: false, error: "NOT_CONFIGURED" }, 400);
+    }
+  } else if (!cfg.channels[channel] || !cfg.channels[channel].configured) {
     return json({ success: false, error: "NOT_CONFIGURED" }, 400);
   }
   const results = await dispatchNotify(env, {
@@ -7218,11 +8278,11 @@ async function handleTestNotify(request, env) {
     content: "这是一条设置页触发的测试通知；收到即表示该渠道配置可用。",
     time: new Date().toISOString().replace("T", " ").slice(0, 19) + " UTC",
     source: "notify", sender: "SMSToWeb", device: "设置页",
-  }, { only: channel, collect: true, config: cfg });
+  }, { only: channel, target_id: targetId, collect: true, config: cfg });
   const r = results && results[0];
   if (!r) return json({ success: false, error: "NOT_CONFIGURED" }, 400);
   if (!r.ok) return json({ success: false, error: "SEND_FAILED", message: r.error || "" }, 502);
-  return json({ success: true, channel: channel });
+  return json({ success: true, channel: channel, target_id: targetId || undefined });
 }
 
 /* 把当前环境变量里的通知配置一次性写入数据库（迁移入口；已存在的键不覆盖） */
@@ -7319,6 +8379,9 @@ export async function fetchApp(request, env, ctx) {
       }
       if (path === "/api/tokens/rotate" && request.method === "POST") {
         return await handleRotateToken(request, env);
+      }
+      if (path === "/api/tokens/rename" && request.method === "POST") {
+        return await handleRenameToken(request, env);
       }
       /* 服务端设置（GET 读 / PUT 写）：不在 isPublicApi 白名单 → 未登录一律 401 */
       if (path === "/api/settings" && request.method === "GET") {

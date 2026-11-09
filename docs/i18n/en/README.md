@@ -12,13 +12,15 @@ Push SMS and notifications from an Android phone (and any other device) to the c
 - **Real-time receiving**: webhook push lands in the database in seconds; the web page refreshes itself, no manual work
 - **Universal push**: any device that can send an HTTP request (Linux / Windows / macOS / iOS / NAS / scripts) can push notifications into the same page
 - **Sources & filters**: filter dynamically by source (SMS / notifications and custom sources auto-aggregated), stacked with keyword search and Today / Last 7 days / Last 30 days ranges; adjustable page size
-- **Multi-channel forwarding**: new messages can be auto-forwarded to Feishu / WeCom / DingTalk / Telegram / ServerChan / PushPlus / Bark / ntfy / Gotify / Email / generic Webhook — configure only what you use (optional)
+- **Message list**: 10 per page by default; two-line summary (up to 120 codepoints, Unicode-safe); full text in a detail dialog; cursor-based **Load more**; opening a message marks it read with rollback on failure
+- **Verification code**: server-side detection (Chinese / English / mixed, 4–8 digits, separated and alphanumeric forms, noise stripped) with a one-tap copy button in the card header; Clipboard API + fallback, explicit failure feedback
+- **Multi-channel forwarding**: new messages can be auto-forwarded to Feishu / WeCom / DingTalk / Telegram / ServerChan / PushPlus / Bark / ntfy / Gotify / Email / generic Webhook; **multiple independent targets per channel** with per-target enable/rename/delete/test, and legacy environment variables as fallback
 - **Optional security**: admin login toggle, multi-format OTP code extraction (code-first / keyword-first / segmented / mixed, false-positive resistant) with one-tap copy, dark mode
 - **Data & alerts**: export CSV / JSON by current filter; toast / optional sound / floating pill for new messages while visible, browser notification + unread title while hidden; long messages auto-collapsed
 - **Number recognition**: built-in directory of common institutional numbers (carriers / banks / couriers / government) auto-labeled; optional carrier-region lookup for unknown mobile numbers (on by default, can be disabled)
-- **9 languages**: the admin and login pages ship with zh-CN / zh-TW / en / ja / ko / es / fr / de / pt-BR built in; switch from the header 🌐 menu (`?lang=` deep link supported, choice remembered locally); dates, relative times and directory labels switch along
+- **9 languages**: the admin and login pages ship with zh-CN / zh-TW / en / ja / ko / es / fr / de / pt-BR built in; switch from **Settings → Language** on the admin page (browser-scoped, `?lang=` deep link supported, choice remembered locally); dates, relative times and directory labels switch along
 - **Mobile friendly**: `viewport-fit` safe-area support for notches and gesture bars, 16px inputs to prevent iOS auto-zoom, larger touch targets, bottom-sheet dialogs, PWA add-to-home-screen
-- **Bulk & undo**: multi-select delete, clear-by-filter in one tap; 5-second undo after deletion (soft delete); dark mode with auto / light / dark
+- **Bulk & undo**: checkboxes / bulk bar hidden until right-click or long-press; batch mark-read, delete, clear-by-filter and CSV/JSON export; 5-second undo after deletion (soft delete); dark mode with auto / light / dark
 - **Starred / unread / stats**: star to pin, starred-only / unread-only views, stats panel (source breakdown + last 7 days); custom number labels; search highlight and history; do-not-disturb and sound in settings; PWA
 
 ```

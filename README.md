@@ -12,16 +12,43 @@ Push SMS and notifications from an Android phone (and any other device) to the c
 - **Real-time receiving**: webhook push lands in the database in seconds; the web page refreshes itself, no manual work
 - **Universal push**: any device that can send an HTTP request (Linux / Windows / macOS / iOS / NAS / scripts) can push notifications into the same page
 - **Sources & filters**: filter dynamically by source (SMS / notifications and custom sources auto-aggregated), stacked with keyword search and Today / Last 7 days / Last 30 days ranges; adjustable page size
-- **Message list (v1.0.4)**: **10 messages per page by default**; each card shows a **~20-character summary** (Unicode-safe) and opens the full text in a detail dialog; a **Load more** button appends older messages progressively (cursor pagination, no full-history fetch); a **“N unread” pill** jump-filters unread messages; opening a message marks it read (failure rolls back and reports instead of faking success)
+- **Message list**: **10 messages per page by default**; each card shows a **two-line summary (up to 120 codepoints, Unicode-safe)** and opens the full text in a detail dialog; a **Load more** button appends older messages progressively (cursor pagination, no full-history fetch); opening a message marks it read (failure rolls back and reports instead of faking success)
+- **Verification code**: codes are detected server-side (Chinese / English / mixed, 4–8 digits, separator and alphanumeric forms, phone/order/amount/date noise stripped) and shown in the card header with a one-tap copy button; copy uses the Clipboard API with an `execCommand` fallback and reports failure instead of faking success
 - **Pagination consistency**: the cursor carries a **SHA-256 fingerprint of the starred ID set**; if starring changes mid-session, the server rejects the stale cursor with `409 CURSOR_STALE` and the page reloads from the top, so messages are never skipped or duplicated (starred-pinned ordering is unchanged)
-- **Multi-channel forwarding**: new messages can be auto-forwarded to Feishu / WeCom / DingTalk / Telegram / ServerChan / PushPlus / Bark / ntfy / Gotify / Email / generic Webhook — configured in the admin **Settings → Notifications** page (stored in your database, per-channel enable/disable, credential update, test send); the legacy environment variables are still honoured when no database value exists
+- **Multi-channel forwarding**: new messages can be auto-forwarded to Feishu / WeCom / DingTalk / Telegram / ServerChan / PushPlus / Bark / ntfy / Gotify / Email / generic Webhook — configured in the admin **Settings → Notifications** page (stored in your database, per-channel enable/disable, **multiple independent targets per channel**, credential update, per-target test send); one failing target does not block the others, and legacy environment variables are still honoured when no database value exists
 - **Optional security**: admin login toggle, multi-format OTP code extraction (code-first / keyword-first / segmented / mixed, false-positive resistant) with one-tap copy, dark mode
 - **Data & alerts**: export CSV / JSON by current filter; toast / optional sound / floating pill for new messages while visible, browser notification + unread title while hidden; long messages show a short summary and open the full text in a detail dialog
 - **Number recognition**: built-in directory of common institutional numbers (carriers / banks / couriers / government) auto-labeled; optional carrier-region lookup for unknown mobile numbers (on by default, can be disabled)
-- **9 languages**: the admin and login pages ship with zh-CN / zh-TW / en / ja / ko / es / fr / de / pt-BR built in; switch from the header 🌐 menu (`?lang=` deep link supported, choice remembered locally); dates, relative times and directory labels switch along
+- **9 languages**: the admin and login pages ship with zh-CN / zh-TW / en / ja / ko / es / fr / de / pt-BR built in; switch from **Settings → 界面语言** on the admin page (browser-scoped, `?lang=` deep link supported, choice remembered locally); dates, relative times and directory labels switch along
 - **Mobile friendly**: `viewport-fit` safe-area support for notches and gesture bars, 16px inputs to prevent iOS auto-zoom, larger touch targets, bottom-sheet dialogs, PWA add-to-home-screen
-- **Bulk & undo**: multi-select delete, clear-by-filter in one tap; 5-second undo after deletion (soft delete); dark mode with auto / light / dark
+- **Bulk & undo**: checkboxes and the bulk bar stay hidden until you right-click / long-press a message; batch mark-read, delete, clear-by-filter and CSV/JSON export for the current filter; 5-second undo after deletion (soft delete); dark mode with auto / light / dark
 - **Starred / unread / stats**: star to pin, starred-only / unread-only views, stats panel (source breakdown + last 7 days); custom number labels; search highlight and history; do-not-disturb and sound in settings; PWA
+
+## Screenshots
+
+**Message center overview** — a 1180px dashboard: the message list on the left and a real-data sidebar (devices with last-received time, settings overview, quick stats) on the right. Filters and search stay in one compact toolbar; page size, quiet hours and language live in Settings instead of the header.
+
+![Message center overview](docs/images/overview.png)
+
+**Multi-select on demand** — checkboxes and the bulk bar are hidden by default. Right-click any message (or long-press on touch devices) to enter selection mode; the inline bar then offers select-all, mark read, delete, clear-by-filter, and CSV/JSON export for the current filter.
+
+![Multi-select](docs/images/multi-select.png)
+
+**Message detail** — a single line of metadata (number · type · time · device · status, plus ★ only when starred) and one action row: copy / star / call / label / delete on the left, close / toggle read on the right. No message ID, no redundant information grid.
+
+![Message detail](docs/images/detail.png)
+
+**Settings center** — four groups (sign-in & session / notifications / data & operations / security). Language, page size, message toggles and quiet hours are browser-scoped and saved with the same Save / Cancel / Reset flow; credentials are masked and never echoed.
+
+![Settings center](docs/images/settings.png)
+
+**Notification multi-target** — each channel can fan out to several targets (e.g. two Feishu groups). Targets can be enabled, renamed, deleted and tested individually; one failing target does not block the others.
+
+![Notification multi-target](docs/images/notification-targets.png)
+
+**Mobile layout** — the sidebar collapses below the list, dialogs become bottom sheets, and the hidden-by-default bulk bar still fits on a 390px viewport without horizontal overflow.
+
+![Mobile layout](docs/images/mobile.png)
 
 ```
 [SMS] Android(SmsForwarder) ──POST /api/receive──┐

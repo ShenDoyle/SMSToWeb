@@ -58,12 +58,25 @@
 
 | 元素 | 类名/结构 | 规则 |
 |---|---|---|
-| 摘要卡片 | `.content.summary` | 只显示约 20 个码位（服务端按 Unicode 截取）；点击或点「查看详情」打开完整正文 |
+| 摘要卡片 | `.content.summary` | 服务端最多 120 码位，前端固定两行截断；是否显示「查看详情」由 JS 实测溢出决定 |
 | 详情按钮 | `.more`（`data-id`） | 复用 `.tbtn` 视觉，文案走 `detailBtn` |
 | 加载更多 | `.morewrap > #loadmore`、`#nomore` | 居中的 `.tbtn`；加载中 `data-loading="1"`；到底显示 `.nomore` |
-| 未读入口 | `#unreadbtn.unreadpill` | 数量 + 「未读」文字（不只靠颜色）；选中态 `data-on="1"` 用主色浅底 |
-| 未读标记 | `.undot` | 6px 圆点 + `title` 文本，配合详情/筛选 |
-| 验证码 | `.code-line b` / `.copy` | 等宽字体 + 强调色块，复制按钮保留 |
+| 未读入口 | 右侧栏快捷概览 `#sideQuick` + `#unreadcount`；筛选 chips | 数量 + 「未读」文字（不只靠颜色）；原顶部 `#unreadbtn` 已移除 |
+| 未读标记 | `.msg-top .tag.unread-tag` | 未读标签；已读后随列表刷新消失 |
+| 验证码 | `.code-chip`（顶部右侧） | 左侧等宽验证码 + 右侧实心主色「复制」；无验证码不渲染；复制失败明确报错 |
+
+### 3.2 仪表盘布局（v1.0.5 前端）
+
+| 元素 | 类名/结构 | 规则 |
+|---|---|---|
+| 页面骨架 | `.wrap` / `.topbar` / `.page-head` / `.layout` | 1180px 上限；`main.panel` + `aside.sidebar`，≤960 单列 |
+| 列表卡片 | `.card.msg` / `.msg-main` / `.msg-top` / `.content.summary` | 首字头像、发送方、号码、类型/未读标签、右侧时间与验证码 |
+| 筛选 | `.filters .chip` | 全部 / 未读 / 已读 / 星标单选，选中 `active` 用主色浅底 |
+| 多选 | `body.selecting` / `#selbar` / `.selwrap` | 默认隐藏；右键或长按进入；批量栏含全选、已读、删除、清空、CSV/JSON 导出 |
+| 删除可见性 | `.msg-actions .del` | 首页卡片默认隐藏；仅 `body.selecting` 显示；详情 `#ddel` 始终可用 |
+| 侧栏 | `.side-card` / `#tabs` / `#sideSettings` / `#sideQuick` | 设备（含最近接收）、设置概览、快捷统计，数据来自真实 API |
+| 弹层 | `.modal` / `.sheet` / `.modal-foot` | 详情单行元信息 + 底部单行操作；设置中心沿用分组卡片 |
+| 设置中心 | `.setgrp` / `.setrow` / `ds-scope` | 分组卡片式；多目标行复用 `.tokrow` |
 
 ## 4. 交互状态
 
@@ -77,10 +90,10 @@
 |---|---|---|---|
 | 登录页 | ✅ 共用 `DS_TOKENS_CSS` | 精简（仅表单所需） | `string.raw` 注入，测试断言 `--ds-color-primary` 存在 |
 | 管理后台 | ✅ | ✅ `DS COMPONENTS v1` | 同上 |
-| 验证码 | ✅ | `.code-line b` / `.copy` 语义化 | 等宽字体 + 强调色块 + 焦点环 |
+| 验证码 | ✅ | `.code-chip` / `.copy` | 顶部右侧，主色绿胶囊 + 实心复制按钮 + 焦点环 |
 | 设备管理 | ✅ | 沿用 `.tabs` / `.tbtn` | 令牌继承 |
 | 设置中心 | ✅ | ✅ `ds-tabs` / `ds-btn` / `ds-scope` / `ds-alert` | 见 `docs/SETTINGS.md` |
-| 消息列表 | ✅ | ✅ `.content.summary` / `.morewrap` / `.unreadpill` / `.undot` | 摘要卡片 + 详情弹层，复用 `.ds-btn`/`.ds-badge` |
+| 消息列表 | ✅ | ✅ `.card.msg` / `.chip` / `.selbar` / `.code-chip` / `.side-card` | 仪表盘 + 侧栏，复用 `.ds-btn`/`.ds-badge` |
 
 ## 6. 维护约定
 
