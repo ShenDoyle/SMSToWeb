@@ -5963,6 +5963,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
           '<button class="tbtn" id="ddel" style="color:var(--ds-color-danger);border-color:var(--ds-color-danger)">' + esc(T("del")) + '</button>' +
         '</div>' +
         '<div class="foot-right">' +
+          '<button class="tbtn" id="dunread" style="border-color:var(--accent);color:var(--accent)">' + esc(T("markUnread")) + '</button>' +
           '<button class="tbtn" id="dclose">' + esc(T("modalClose")) + '</button>' +
         '</div>' +
       '</div>';
@@ -5996,6 +5997,14 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     $("dstar").onclick = function () { toggleStar(m.id, !m.starred).then(closeModal); };
     $("dcopy").onclick = function () { doCopy(m.content, $("dcopy")); };
     $("ddel").onclick = function () { closeModal(); doDelete([m.id]); };
+    $("dunread").onclick = function () {
+      fetch("/api/messages/read", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: m.id, read: false }) })
+        .then(function (r) { return r.json(); })
+        .then(function (res) {
+          if (res && res.success) { closeModal(); load(); } else { toast(T("readFail")); }
+        })
+        .catch(function () { toast(T("readFail")); });
+    };
     $("dclose").onclick = closeModal;
     var lb = $("dlabel");
     if (lb) lb.onclick = function () {
