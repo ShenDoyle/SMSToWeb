@@ -880,7 +880,8 @@ async function main() {
     check(pgHtml.includes('id="selbar"') && pgHtml.includes('id="selread"') && pgHtml.includes("contextmenu") && pgHtml.includes("长按"), "多选默认隐藏，右键/长按进入批量操作");
     check(pgHtml.includes('id="selread"') && pgHtml.includes("bulkOk") && pgHtml.includes("bulkPartial"), "批量已读按钮与部分失败反馈存在");
     check(pgHtml.includes(".selbar { position: fixed;") && pgHtml.includes("body.selecting .wrap { padding-bottom: 96px; }"), "批量操作条底部悬浮固定，并为内容预留底部空间");
-    check(pgHtml.includes("class=\"rbtn\"") && pgHtml.includes("readOne"), "卡片含单条已读按钮且走单条 API");
+    check(!pgHtml.includes("class=\"rbtn\"") && !pgHtml.includes("function readOne") && pgHtml.includes("function toggleRead"), "卡片不再显示单条「标记已读」按钮，详情仍可切换已读");
+    check(pgHtml.includes('id="scodecopy"') && pgHtml.includes("state.codeCopy") && (pgHtml.match(/codeCopyBtn:/g) || []).length >= 9, "验证码复制按钮可在设置中开关（九语种）");
     check(pgHtml.includes("code-chip") && pgHtml.includes('data-code="') && pgHtml.includes("copyBtn"), "卡片含验证码复制入口（data-code + 复制分支）");
     check(/\.msg-actions \.del \{[^}]*display: none/.test(pgHtml) && /body\.selecting \.msg-actions \.del \{ display: inline-flex/.test(pgHtml), "卡片删除按钮默认隐藏，仅多选时显示（详情删除不受影响）");
     check(pgHtml.includes('data-i18n="exportHint"') && (pgHtml.match(/exportHint:/g) || []).length >= 9, "多选栏可见提示“导出当前筛选结果”（九语种）");

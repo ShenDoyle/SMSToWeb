@@ -2222,12 +2222,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .content.summary { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
                      overflow: hidden; white-space: pre-wrap; }
   .more[hidden] { display: none; }
-  /* 单条已读：小尺寸、低干扰，仅未读消息出现 */
-  .rbtn { border: 1px solid var(--ds-color-border); background: var(--ds-color-bg-surface);
-          color: var(--ds-color-text-secondary); border-radius: var(--ds-radius-sm);
-          font-size: 11px; padding: 1px 8px; cursor: pointer; min-height: 24px; line-height: 1.4; }
-  .rbtn:hover { border-color: var(--ds-color-primary); color: var(--ds-color-primary); }
-  .rbtn:disabled { opacity: .5; cursor: progress; }
   /* 批量操作区（列表页独立，不在设置中心） */
   .bulkbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 4px 0 8px; }
   .bulkbar .bulkmeta { color: var(--ds-color-text-secondary); font-size: 12px; }
@@ -2400,9 +2394,9 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .setgrp h4 .tokbadge { margin-left: auto; }
   .setrow { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 13px; flex-wrap: wrap; }
   .setrow > label { flex: 0 0 auto; min-width: 76px; color: var(--muted); }
-  /* 本浏览器偏好：四项开关固定一行，触屏点整块即可切换 */
+  /* 本浏览器偏好：五项开关固定一行，触屏点整块即可切换 */
   .setrow > label:empty { display: none; }
-  .prefgrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 4px 0 10px; }
+  .prefgrid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; margin: 4px 0 10px; }
   .prefitem { display: flex; align-items: center; justify-content: space-between; gap: 6px;
               min-height: 38px; padding: 6px 8px; border: var(--ds-border-w) solid var(--ds-color-border-subtle);
               border-radius: var(--ds-radius-md); background: var(--ds-color-bg-subtle);
@@ -2648,8 +2642,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .msg-actions .del { color: var(--faint); display: none; }
   .msg-actions .del:hover { color: var(--danger); }
   body.selecting .msg-actions .del { display: inline-flex; }
-  .msg-actions .rbtn { border: 1px solid var(--accent); background: var(--accent-bg); color: var(--accent);
-                       border-radius: 7px; font-size: 12px; padding: 4px 9px; min-height: 28px; cursor: pointer; }
   .msg-actions .more { border: 0; background: none; color: var(--link); font-size: 12px; padding: 4px 5px; }
   .msg-actions .more:hover { background: var(--bg); }
   /* 验证码胶囊：顶部右侧；主色绿（与全局强调色一致），右段为实心复制按钮 */
@@ -2800,6 +2792,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     .setgrp { padding: 12px; }
     .setrow { gap: 6px; margin: 5px 0; }
     .setrow > label { min-width: 0; flex: 0 0 82px; font-size: 12px; }
+    .prefitem { flex-direction: column; align-items: flex-start; justify-content: center; gap: 3px; padding: 6px; }
+    .prefitem span { font-size: 11px; line-height: 1.3; }
     .pushpicks { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .pushsheet { max-width: none; max-height: 88dvh; }
   }
@@ -2952,6 +2946,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     pwdOn: true,
     labels: (function () { try { return JSON.parse(localStorage.getItem("sms_labels") || "{}") || {}; } catch (e) { return {}; } })(),
     autoCopy: (function () { try { return localStorage.getItem("sms_autocopy") !== "0"; } catch (e) { return true; } })(),
+    codeCopy: (function () { try { return localStorage.getItem("sms_codecopy") !== "0"; } catch (e) { return true; } })(),
     notify: (function () { try { return localStorage.getItem("sms_notify") !== "0"; } catch (e) { return true; } })(),
     sound: (function () { try { return localStorage.getItem("sms_sound") === "1"; } catch (e) { return false; } })()
   };
@@ -3008,7 +3003,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       searchPh: "搜索发件人或内容…", clearSearch: "清除搜索",
       srcTip: "按来源筛选", allSources: "全部来源", srcSms: "短信", srcNotify: "通知",
       rangeTip: "按时间筛选", allTime: "全部时间", d7: "近 7 天", d30: "近 30 天",
-      autoCopy: "自动复制验证码", notifyOn: "后台通知", soundOn: "提示音",
+      autoCopy: "自动复制验证码", codeCopyBtn: "验证码复制按钮", notifyOn: "后台通知", soundOn: "提示音",
       starOnly: "★ 收藏", unreadOnly: "● 未读", starTip: "只看收藏", unreadTip: "只看未读",
       select: "选择", selectTip: "进入批量选择", done: "完成",
       clear: "清空", clearTip: "清空当前筛选结果（软删除）",
@@ -3076,7 +3071,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       searchPh: "Search sender or content…", clearSearch: "Clear search",
       srcTip: "Filter by source", allSources: "All sources", srcSms: "SMS", srcNotify: "Notification",
       rangeTip: "Filter by time", allTime: "All time", d7: "Last 7 days", d30: "Last 30 days",
-      autoCopy: "Auto-copy codes", notifyOn: "Background alerts", soundOn: "Sound",
+      autoCopy: "Auto-copy codes", codeCopyBtn: "Code copy button", notifyOn: "Background alerts", soundOn: "Sound",
       starOnly: "★ Starred", unreadOnly: "● Unread", starTip: "Starred only", unreadTip: "Unread only",
       select: "Select", selectTip: "Enter multi-select", done: "Done",
       clear: "Clear", clearTip: "Clear current filter (soft delete)",
@@ -3144,7 +3139,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       searchPh: "搜尋寄件人或內容…", clearSearch: "清除搜尋",
       srcTip: "依來源篩選", allSources: "全部來源", srcSms: "簡訊", srcNotify: "通知",
       rangeTip: "依時間篩選", allTime: "全部時間", d7: "近 7 天", d30: "近 30 天",
-      autoCopy: "自動複製驗證碼", notifyOn: "背景通知", soundOn: "提示音",
+      autoCopy: "自動複製驗證碼", codeCopyBtn: "驗證碼複製按鈕", notifyOn: "背景通知", soundOn: "提示音",
       starOnly: "★ 收藏", unreadOnly: "● 未讀", starTip: "只看收藏", unreadTip: "只看未讀",
       select: "選擇", selectTip: "進入批次選擇", done: "完成",
       clear: "清空", clearTip: "清空目前篩選結果（軟刪除）",
@@ -3212,7 +3207,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       searchPh: "送信者や本文を検索…", clearSearch: "検索をクリア",
       srcTip: "送信元で絞り込み", allSources: "すべての送信元", srcSms: "SMS", srcNotify: "通知",
       rangeTip: "期間で絞り込み", allTime: "全期間", d7: "過去 7 日", d30: "過去 30 日",
-      autoCopy: "認証コード自動コピー", notifyOn: "バックグラウンド通知", soundOn: "通知音",
+      autoCopy: "認証コード自動コピー", codeCopyBtn: "コードのコピーボタン", notifyOn: "バックグラウンド通知", soundOn: "通知音",
       starOnly: "★ スター", unreadOnly: "● 未読", starTip: "スターのみ表示", unreadTip: "未読のみ表示",
       select: "選択", selectTip: "一括選択を開始", done: "完了",
       clear: "消去", clearTip: "現在の絞り込み結果を消去（ソフト削除）",
@@ -3280,7 +3275,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       searchPh: "발신자 또는 내용 검색…", clearSearch: "검색 지우기",
       srcTip: "발신원별 필터", allSources: "전체 발신원", srcSms: "SMS", srcNotify: "알림",
       rangeTip: "기간별 필터", allTime: "전체 기간", d7: "최근 7일", d30: "최근 30일",
-      autoCopy: "인증번호 자동 복사", notifyOn: "백그라운드 알림", soundOn: "알림음",
+      autoCopy: "인증번호 자동 복사", codeCopyBtn: "인증번호 복사 버튼", notifyOn: "백그라운드 알림", soundOn: "알림음",
       starOnly: "★ 즐겨찾기", unreadOnly: "● 읽지 않음", starTip: "즐겨찾기만 보기", unreadTip: "읽지 않은 것만 보기",
       select: "선택", selectTip: "일괄 선택 시작", done: "완료",
       clear: "비우기", clearTip: "현재 필터 결과 비우기(소프트 삭제)",
@@ -3348,7 +3343,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       searchPh: "Buscar remitente o contenido…", clearSearch: "Borrar búsqueda",
       srcTip: "Filtrar por origen", allSources: "Todos los orígenes", srcSms: "SMS", srcNotify: "Notificación",
       rangeTip: "Filtrar por fecha", allTime: "Todo el tiempo", d7: "Últimos 7 días", d30: "Últimos 30 días",
-      autoCopy: "Copiar códigos automáticamente", notifyOn: "Alertas en segundo plano", soundOn: "Sonido",
+      autoCopy: "Copiar códigos automáticamente", codeCopyBtn: "Botón copiar código", notifyOn: "Alertas en segundo plano", soundOn: "Sonido",
       starOnly: "★ Favoritos", unreadOnly: "● No leídos", starTip: "Solo favoritos", unreadTip: "Solo no leídos",
       select: "Seleccionar", selectTip: "Entrar en selección múltiple", done: "Listo",
       clear: "Vaciar", clearTip: "Vaciar el filtro actual (borrado suave)",
@@ -3416,7 +3411,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       searchPh: "Rechercher expéditeur ou contenu…", clearSearch: "Effacer la recherche",
       srcTip: "Filtrer par source", allSources: "Toutes les sources", srcSms: "SMS", srcNotify: "Notification",
       rangeTip: "Filtrer par période", allTime: "Tout", d7: "7 derniers jours", d30: "30 derniers jours",
-      autoCopy: "Copie auto des codes", notifyOn: "Alertes en arrière-plan", soundOn: "Son",
+      autoCopy: "Copie auto des codes", codeCopyBtn: "Bouton copier le code", notifyOn: "Alertes en arrière-plan", soundOn: "Son",
       starOnly: "★ Favoris", unreadOnly: "● Non lus", starTip: "Favoris uniquement", unreadTip: "Non lus uniquement",
       select: "Sélectionner", selectTip: "Activer la sélection multiple", done: "Terminé",
       clear: "Vider", clearTip: "Vider le filtre actuel (suppression logique)",
@@ -3484,7 +3479,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       searchPh: "Absender oder Inhalt suchen…", clearSearch: "Suche löschen",
       srcTip: "Nach Quelle filtern", allSources: "Alle Quellen", srcSms: "SMS", srcNotify: "Benachrichtigung",
       rangeTip: "Nach Zeit filtern", allTime: "Gesamter Zeitraum", d7: "Letzte 7 Tage", d30: "Letzte 30 Tage",
-      autoCopy: "Codes automatisch kopieren", notifyOn: "Hintergrund-Benachrichtigungen", soundOn: "Ton",
+      autoCopy: "Codes automatisch kopieren", codeCopyBtn: "Code kopieren", notifyOn: "Hintergrund-Benachrichtigungen", soundOn: "Ton",
       starOnly: "★ Favoriten", unreadOnly: "● Ungelesen", starTip: "Nur Favoriten", unreadTip: "Nur Ungelesene",
       select: "Auswählen", selectTip: "Mehrfachauswahl starten", done: "Fertig",
       clear: "Leeren", clearTip: "Aktuellen Filter leeren (Soft-Delete)",
@@ -3552,7 +3547,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       searchPh: "Pesquisar remetente ou conteúdo…", clearSearch: "Limpar pesquisa",
       srcTip: "Filtrar por origem", allSources: "Todas as origens", srcSms: "SMS", srcNotify: "Notificação",
       rangeTip: "Filtrar por período", allTime: "Todo o período", d7: "Últimos 7 dias", d30: "Últimos 30 dias",
-      autoCopy: "Copiar códigos automaticamente", notifyOn: "Alertas em segundo plano", soundOn: "Som",
+      autoCopy: "Copiar códigos automaticamente", codeCopyBtn: "Botão copiar código", notifyOn: "Alertas em segundo plano", soundOn: "Som",
       starOnly: "★ Favoritos", unreadOnly: "● Não lidas", starTip: "Somente favoritas", unreadTip: "Somente não lidas",
       select: "Selecionar", selectTip: "Entrar na seleção múltipla", done: "Concluído",
       clear: "Limpar", clearTip: "Limpar o filtro atual (exclusão suave)",
@@ -5686,7 +5681,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
           '<span class="tag type">' + esc(typeTag) + '</span>' +
           (m.read_at ? "" : '<span class="tag unread-tag">' + esc(T("unread")) + '</span>') +
           '<span class="msg-time" title="' + esc(fmtTime(m.received_at)) + '">' + esc(relTime(m.received_at)) + '</span>' +
-          (code ? '<span class="code-chip"><span class="code-val">' + esc(code) + '</span><button class="copy" type="button" data-code="' + esc(code) + '">' + esc(T("copy")) + '</button></span>' : '') +
+          (code ? '<span class="code-chip"><span class="code-val">' + esc(code) + '</span>' + (state.codeCopy ? '<button class="copy" type="button" data-code="' + esc(code) + '">' + esc(T("copy")) + '</button>' : '') + '</span>' : '') +
         '</div>' +
         '<p class="content summary" data-id="' + m.id + '" title="' + esc(T("detailTip")) + '">' + linkify(highlight(esc(text), state.q)) + '</p>' +
         '<div class="msg-bottom">' +
@@ -5697,7 +5692,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
           '<div class="msg-actions">' +
             '<button class="more" type="button" data-id="' + m.id + '" hidden>' + esc(T("detailBtn")) + '</button>' +
             '<button class="star' + (m.starred ? " on" : "") + '" data-id="' + m.id + '" title="' + esc(T("starItemTip")) + '">' + (m.starred ? "★" : "☆") + '</button>' +
-            (m.read_at ? "" : '<button class="rbtn" type="button" data-id="' + m.id + '" title="' + esc(T("markRead")) + '">✓ ' + esc(T("markRead")) + '</button>') +
             '<button class="del" data-id="' + m.id + '">' + esc(T("del")) + '</button>' +
           '</div>' +
         '</div>' +
@@ -5899,24 +5893,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   function toggleStar(id, starred) {
     return fetch("/api/messages/star", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: id, starred: starred }) })
       .then(function (r) { return r.json(); }).then(function () { load(); });
-  }
-  function readOne(id, btn) {
-    if (!btn || btn.disabled) return;
-    btn.disabled = true;
-    fetch("/api/messages/read", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: id, read: true }) })
-      .then(function (r) { if (r.status === 401) { location.reload(); return new Promise(function () {}); } return r.json(); })
-      .then(function (res) {
-        if (!res || !res.success) { btn.disabled = false; toast(T("readFail")); return; }
-        var card = $("list").querySelector('.card[data-id="' + id + '"]');
-        if (card) {
-          var dot = card.querySelector(".undot");
-          if (dot) dot.parentNode.removeChild(dot);
-          var b = card.querySelector(".rbtn");
-          if (b) b.parentNode.removeChild(b);
-        }
-        refreshUnreadCount();
-      })
-      .catch(function () { btn.disabled = false; toast(T("readFail")); });
   }
   function toggleRead(id, read) {
     return fetch("/api/messages/read", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: id, read: read }) })
@@ -6449,6 +6425,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   /* 消息开关（自动复制 / 后台通知 / 提示音）在设置中心内维护；此处只负责应用已保存状态 */
   function applyMsgToggles() {
     state.autoCopy = localStorage.getItem("sms_autocopy") !== "0";
+    state.codeCopy = localStorage.getItem("sms_codecopy") !== "0";
     state.notify = localStorage.getItem("sms_notify") !== "0";
     state.sound = localStorage.getItem("sms_sound") === "1";
   }
@@ -6664,6 +6641,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       + scHelp(T("scBrowserPrefsHelp"))
       + '<div class="prefgrid">'
       + '<label class="prefitem" for="scautocopy"><span>' + T("autoCopy") + '</span><input type="checkbox" id="scautocopy" class="ds-check" ' + (state.autoCopy ? "checked" : "") + '></label>'
+      + '<label class="prefitem" for="scodecopy"><span>' + T("codeCopyBtn") + '</span><input type="checkbox" id="scodecopy" class="ds-check" ' + (state.codeCopy ? "checked" : "") + '></label>'
       + '<label class="prefitem" for="scnotifyon"><span>' + T("notifyOn") + '</span><input type="checkbox" id="scnotifyon" class="ds-check" ' + (state.notify ? "checked" : "") + '></label>'
       + '<label class="prefitem" for="scsoundon"><span>' + T("soundOn") + '</span><input type="checkbox" id="scsoundon" class="ds-check" ' + (state.sound ? "checked" : "") + '></label>'
       + '<label class="prefitem" for="scdndon"><span>' + T("sDnd") + '</span><input type="checkbox" id="scdndon" class="ds-check" ' + (dnd.on ? "checked" : "") + '></label>'
@@ -7079,8 +7057,9 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   function scSaveNotify(btn) {
     /* 本浏览器偏好（消息开关 / 免打扰）：与全局通知规则同一次保存 */
     function saveBrowserPrefs() {
-      var ac = $("scautocopy"), nb = $("scnotifyon"), sb = $("scsoundon"), dn = $("scdndon");
+      var ac = $("scautocopy"), cc = $("scodecopy"), nb = $("scnotifyon"), sb = $("scsoundon"), dn = $("scdndon");
       if (ac) { state.autoCopy = ac.checked; try { localStorage.setItem("sms_autocopy", state.autoCopy ? "1" : "0"); } catch (e) {} }
+      if (cc) { state.codeCopy = cc.checked; try { localStorage.setItem("sms_codecopy", state.codeCopy ? "1" : "0"); } catch (e) {} }
       if (nb) {
         state.notify = nb.checked; try { localStorage.setItem("sms_notify", state.notify ? "1" : "0"); } catch (e) {}
         if (state.notify && window.Notification && Notification.permission === "default") Notification.requestPermission();
@@ -7091,6 +7070,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         var end = Math.min(23, Math.max(0, parseInt($("scdnde").value, 10) || 0));
         try { localStorage.setItem("sms_dnd", JSON.stringify({ on: !!dn.checked, start: start, end: end })); } catch (e) {}
       }
+      /* 复制按钮显隐需立即反映到列表 */
+      load();
     }
     saveBrowserPrefs();
     var types = [];
@@ -7200,8 +7181,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     }
     var moreBtn = ev.target.closest ? ev.target.closest(".more") : null;
     if (moreBtn) { openDetail(parseInt(moreBtn.getAttribute("data-id"), 10)); return; }
-    var rbtn = ev.target.closest ? ev.target.closest(".rbtn") : null;
-    if (rbtn) { readOne(parseInt(rbtn.getAttribute("data-id"), 10), rbtn); return; }
     var sumEl = ev.target.closest ? ev.target.closest(".summary") : null;
     if (sumEl) { openDetail(parseInt(sumEl.getAttribute("data-id"), 10)); return; }
     var copyBtn = ev.target.closest ? ev.target.closest(".copy") : null;
