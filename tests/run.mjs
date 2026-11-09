@@ -879,6 +879,7 @@ async function main() {
     check(pgHtml.includes(".content.summary") && pgHtml.includes("-webkit-line-clamp: 2") && pgHtml.includes("markClipped"), "摘要按 CSS 两行截断并由 JS 实测溢出决定按钮");
     check(pgHtml.includes('id="selbar"') && pgHtml.includes('id="selread"') && pgHtml.includes("contextmenu") && pgHtml.includes("长按"), "多选默认隐藏，右键/长按进入批量操作");
     check(pgHtml.includes('id="selread"') && pgHtml.includes("bulkOk") && pgHtml.includes("bulkPartial"), "批量已读按钮与部分失败反馈存在");
+    check(pgHtml.includes(".selbar { position: fixed;") && pgHtml.includes("body.selecting .wrap { padding-bottom: 96px; }"), "批量操作条底部悬浮固定，并为内容预留底部空间");
     check(pgHtml.includes("class=\"rbtn\"") && pgHtml.includes("readOne"), "卡片含单条已读按钮且走单条 API");
     check(pgHtml.includes("code-chip") && pgHtml.includes('data-code="') && pgHtml.includes("copyBtn"), "卡片含验证码复制入口（data-code + 复制分支）");
     check(/\.msg-actions \.del \{[^}]*display: none/.test(pgHtml) && /body\.selecting \.msg-actions \.del \{ display: inline-flex/.test(pgHtml), "卡片删除按钮默认隐藏，仅多选时显示（详情删除不受影响）");

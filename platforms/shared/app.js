@@ -2700,11 +2700,18 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
                     background: var(--card); color: var(--text); font-size: 12px; min-height: 28px; }
   .jumpwrap button { border: 1px solid var(--border); background: var(--card); color: var(--text); border-radius: 6px;
                      padding: 3px 9px; font-size: 12px; min-height: 28px; cursor: pointer; }
-  .selbar { position: static; transform: none; left: auto; bottom: auto; display: flex; align-items: center; gap: 8px;
-            background: var(--ds-color-bg-subtle); border: 0; border-bottom: 1px solid var(--row-border); border-radius: 0;
-            padding: 8px 16px; z-index: auto; flex-wrap: wrap; }
+  /* 批量操作条：悬浮在视口底部，不随内容滚动，始终可直接操作；窄屏单行左右滑 */
+  .selbar { position: fixed; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+            transform: translateX(-50%); display: flex; align-items: center; gap: 8px; flex-wrap: nowrap;
+            max-width: calc(100% - 24px); overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
+            background: var(--ds-color-bg-subtle); border: 1px solid var(--row-border); border-radius: 999px;
+            padding: 8px 14px; z-index: 97; box-shadow: 0 8px 24px rgba(15,25,43,.16);
+            -webkit-overflow-scrolling: touch; }
+  .selbar::-webkit-scrollbar { display: none; }
+  .selbar > * { flex: 0 0 auto; }
+  body.selecting .wrap { padding-bottom: 96px; }
   .selbar span { font-size: 12px; color: var(--muted); }
-  .selbar .tbtn { min-height: 28px; font-size: 12px; padding: 4px 9px; }
+  .selbar .tbtn { min-height: 30px; font-size: 12px; padding: 4px 10px; }
   .newpill { bottom: 26px; background: var(--accent); }
   .foot { margin-top: 24px; }
   /* 详情/设置弹层：与原型一致的宽版卡片 */
@@ -2753,12 +2760,12 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     .msg-actions { align-self: flex-end; }
     .code-chip .copy { min-height: 26px; padding: 3px 10px; }
     .filters .searchwrap { width: 100%; margin-left: 0; }
-    /* 批量操作条：宽度贴合列表、隐藏冗余提示、按钮等宽三列，避免参差换行 */
-    .selbar { width: auto; padding: 10px 12px; gap: 8px; }
-    .selbar .select-hint { display: none; }
-    .selbar .spacer { display: block; flex: 0 0 100%; height: 0; }
-    .selbar .count { margin-left: auto; }
-    .selbar .tbtn { flex: 1 1 calc(33.333% - 8px); min-width: 84px; min-height: 34px;
+    /* 批量操作条：底部悬浮，单行左右滑，按钮不压缩 */
+    .selbar { width: calc(100% - 16px); padding: 8px 10px; gap: 6px; justify-content: flex-start;
+              bottom: calc(10px + env(safe-area-inset-bottom, 0px)); border-radius: 14px; }
+    .selbar .select-hint, .selbar .spacer { display: none; }
+    .selbar .count { margin-left: 0; }
+    .selbar .tbtn { flex: 0 0 auto; min-width: 68px; min-height: 34px; padding: 0 9px;
                     display: inline-flex; align-items: center; justify-content: center; text-align: center; }
     /* 设置分组标签：单行横向滑动，避免两行网格占用过多空间 */
     .ds-tabs { display: flex; flex-wrap: nowrap; gap: 8px; overflow-x: auto;
@@ -7365,7 +7372,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   });
   /* 横向滑轨：触屏用原生左右滑；桌面把纵向滚轮映射为横向滚动 */
   document.addEventListener("wheel", function (e) {
-    var rail = e.target && e.target.closest ? e.target.closest(".ds-tabs,.modal-foot") : null;
+    var rail = e.target && e.target.closest ? e.target.closest(".ds-tabs,.modal-foot,.selbar") : null;
     if (!rail || rail.scrollWidth <= rail.clientWidth) return;
     if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
       e.preventDefault();
