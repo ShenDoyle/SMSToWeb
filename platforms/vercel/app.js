@@ -228,6 +228,8 @@ async function getSessionTtlMinutes(env) {
   try {
     const row = await env.DB.prepare("SELECT value FROM settings WHERE key = 'session_ttl_minutes'").first();
     const n = Number(row && row.value);
+    /* 兼容旧部署把 3600（秒）当成分钟保存：按默认 30 分钟生效 */
+    if (n === 3600) return SESSION_TTL_DEFAULT_MIN;
     if (Number.isInteger(n) && n >= SESSION_TTL_MIN_MIN && n <= SESSION_TTL_MAX_MIN) return n;
   } catch (e) { /* 缺表或库异常 → 回退默认值 */ }
   return SESSION_TTL_DEFAULT_MIN;
@@ -740,10 +742,9 @@ async function loadNotifyRows(env) {
   } catch (e) { return null; }
 }
 
-/* rows → 生效配置（数据库优先、环境变量兜底、空串视为已清除） */
+/* rows → 生效配置（环境变量优先、设置次之；未配置时使用默认值） */
 function resolveNotifyConfig(env, rows) {
   const cfg = { enabled: true, types: NOTIFY_TYPES.slice(), retry: 0, link: "", channels: {}, rowsLoaded: !!rows };
-  const linkFromDb = !!(rows && rows["notify.link"] !== undefined);
   if (rows) {
     if (rows["notify.enabled"] !== undefined) cfg.enabled = parseSettingBool(rows["notify.enabled"], true);
     if (rows["notify.types"] !== undefined) {
@@ -756,22 +757,27 @@ function resolveNotifyConfig(env, rows) {
     }
     if (rows["notify.link"] !== undefined) cfg.link = String(rows["notify.link"]).trim();
   }
-  /* 数据库显式空串 = 已清除（遮蔽旧环境变量）；只有键不存在时才回退环境变量 */
-  if (!cfg.link && !linkFromDb) cfg.link = trimEnv(env && env.NOTIFY_LINK);
+  /* 环境变量与设置同时存在时，环境变量优先（设置作为较低优先级的补充） */
+  const envLink = trimEnv(env && env.NOTIFY_LINK);
+  if (envLink) cfg.link = envLink;
   for (const name of Object.keys(NOTIFY_CHANNELS)) {
     const spec = NOTIFY_CHANNELS[name];
-    const ch = { enabled: true, fields: {}, fromDb: false, configured: false };
+    const ch = { enabled: true, fields: {}, fromDb: false, fromEnv: false, configured: false };
     if (rows && rows[notifyFieldKey(name, "enabled")] !== undefined) {
       ch.enabled = parseSettingBool(rows[notifyFieldKey(name, "enabled")], true);
-      ch.fromDb = true;
     }
     for (const f of Object.keys(spec.fields)) {
       const k = notifyFieldKey(name, f);
-      if (rows && rows[k] !== undefined) {
+      const envVal = trimEnv(env && env[spec.fields[f].env]);
+      /* 环境变量优先：同一项两边都有值时以环境变量为准；否则读取设置 */
+      if (envVal) {
+        ch.fields[f] = envVal;
+        ch.fromEnv = true;
+      } else if (rows && rows[k] !== undefined) {
         ch.fields[f] = String(rows[k]);
         ch.fromDb = true;
       } else {
-        ch.fields[f] = trimEnv(env && env[spec.fields[f].env]);
+        ch.fields[f] = "";
       }
     }
     ch.configured = spec.need.every(function (f) { return !!ch.fields[f]; });
@@ -2394,6 +2400,15 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .setgrp h4 .tokbadge { margin-left: auto; }
   .setrow { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 13px; flex-wrap: wrap; }
   .setrow > label { flex: 0 0 auto; min-width: 76px; color: var(--muted); }
+  /* 本浏览器偏好：四项开关固定一行，触屏点整块即可切换 */
+  .setrow > label:empty { display: none; }
+  .prefgrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin: 4px 0 10px; }
+  .prefitem { display: flex; align-items: center; justify-content: space-between; gap: 6px;
+              min-height: 38px; padding: 6px 8px; border: var(--ds-border-w) solid var(--ds-color-border-subtle);
+              border-radius: var(--ds-radius-md); background: var(--ds-color-bg-subtle);
+              font-size: var(--ds-text-xs); color: var(--ds-color-text-secondary); cursor: pointer; }
+  .prefitem span { min-width: 0; line-height: 1.35; overflow-wrap: anywhere; }
+  .prefitem input { flex: none; }
   .setrow input[type="text"], .setrow input[type="password"], .setrow input[type="number"], .setrow select,
   .toknewrow input, .toknewrow select {
     flex: 1 1 140px; min-width: 0; min-height: var(--ds-control-h-sm); padding: 6px 8px;
@@ -2718,9 +2733,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .detail-metarow .m-strong { color: var(--text); font-weight: 600; }
   .detail-metarow .m-num { font-variant-numeric: tabular-nums; }
   .detail-metarow .m-star { color: var(--ds-color-warning); font-weight: 700; }
-  .modal-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+  /* 底部操作统一单行：不换行，空间不足时横向滚动（触屏滑动 / 鼠标滚轮） */
+  .modal-foot { display: flex; align-items: center; justify-content: flex-start; gap: 8px; flex-wrap: nowrap;
+                overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch;
                 padding: 12px 18px 16px; border-top: 1px solid var(--row-border); }
-  .modal-foot .foot-left, .modal-foot .foot-right { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .modal-foot::-webkit-scrollbar { display: none; }
+  .modal-foot .foot-left, .modal-foot .foot-right { display: flex; gap: 6px; align-items: center; flex-wrap: nowrap; flex: 0 0 auto; }
+  .modal-foot .foot-right { margin-left: auto; }
   @media (max-width: 960px) { .layout { grid-template-columns: 1fr; } .sidebar { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   @media (max-width: 660px) {
     .wrap { padding: 14px 12px 30px; }
@@ -2741,30 +2760,39 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     .selbar .count { margin-left: auto; }
     .selbar .tbtn { flex: 1 1 calc(33.333% - 8px); min-width: 84px; min-height: 34px;
                     display: inline-flex; align-items: center; justify-content: center; text-align: center; }
-    /* 设置分组标签：两列网格，间距与点击区域统一 */
-    .ds-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;
-               overflow: visible; padding: 0 0 12px; }
-    .ds-tabs > .tab { width: 100%; justify-content: center; text-align: center;
-                      min-height: 38px; padding: 7px 10px; }
+    /* 设置分组标签：单行横向滑动，避免两行网格占用过多空间 */
+    .ds-tabs { display: flex; flex-wrap: nowrap; gap: 8px; overflow-x: auto;
+               padding: 0 0 12px; scroll-snap-type: x proximity;
+               -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+    .ds-tabs::-webkit-scrollbar { display: none; }
+    .ds-tabs > .tab { width: auto; flex: 0 0 auto; justify-content: center; text-align: center;
+                      min-height: 38px; padding: 7px 14px; white-space: nowrap; scroll-snap-align: start; }
     .modal { align-items: flex-end; padding: 0; }
     .sheet { border-radius: 18px 18px 0 0; max-height: 88dvh; }
-    /* 详情弹窗按钮：统一等宽网格；删除占满一行，关闭/标记已读固定在底部 */
-    .modal-foot { flex-direction: column; align-items: stretch; gap: 10px;
-                  padding: 12px 14px calc(14px + env(safe-area-inset-bottom, 0px)); }
-    .modal-foot .foot-left, .modal-foot .foot-right { width: 100%; display: grid;
-                  grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; justify-content: stretch; }
-    .modal-foot .foot-left #ddel { grid-column: 1 / -1; }
-    .modal-foot .tbtn { width: 100%; min-height: 36px; display: inline-flex;
-                        align-items: center; justify-content: center; text-align: center; }
+    /* 详情弹窗按钮：单行横向滑动，触屏可左右滑，鼠标滚轮可横向滚动 */
+    .modal-foot { flex-direction: row; flex-wrap: nowrap; align-items: center; gap: 8px;
+                  overflow-x: auto; scroll-snap-type: x proximity; -webkit-overflow-scrolling: touch;
+                  scrollbar-width: none; padding: 12px 14px calc(14px + env(safe-area-inset-bottom, 0px)); }
+    .modal-foot::-webkit-scrollbar { display: none; }
+    .modal-foot .foot-left, .modal-foot .foot-right { width: auto; flex: 0 0 auto;
+                  display: flex; flex-wrap: nowrap; gap: 8px; justify-content: flex-start; }
+    .modal-foot .tbtn { width: auto; flex: 0 0 auto; min-width: 78px; min-height: 38px;
+                        padding: 0 12px; display: inline-flex;
+                        align-items: center; justify-content: center; text-align: center;
+                        scroll-snap-align: start; }
     /* 设置底部操作：保存整行主按钮，恢复默认/取消并排（取消隐藏时不留空位） */
     .ds-dialog-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-start; margin-top: 14px; }
     .ds-dialog-actions .ds-btn { flex: 0 0 auto; min-height: 38px; }
     .ds-dialog-actions #scrcancel { flex: 1 1 auto; }
     .ds-dialog-actions #scrsave { flex: 1 1 100%; }
-    /* 推送卡片操作：两列等宽，避免按钮参差换行 */
-    .pushcard-acts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
-    .pushcard-acts .tbtn { width: 100%; min-height: 36px; display: inline-flex;
-                           align-items: center; justify-content: center; text-align: center; }
+    /* 推送卡片操作：一行四等宽，紧凑不换行 */
+    .pushcard-acts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+    .pushcard-acts .tbtn { width: 100%; min-height: 34px; padding: 0 4px; font-size: 12px;
+                           display: inline-flex; align-items: center; justify-content: center; text-align: center; }
+    .pushcard { padding: 10px 12px; }
+    .setgrp { padding: 12px; }
+    .setrow { gap: 6px; margin: 5px 0; }
+    .setrow > label { min-width: 0; flex: 0 0 82px; font-size: 12px; }
     .pushpicks { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .pushsheet { max-width: none; max-height: 88dvh; }
   }
@@ -3595,10 +3623,10 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scTtlGlobal: "默认时长",
     scFollowGlobal: "跟随全局默认（清除本浏览器设置）",
     scCustom: "自定义分钟数…",
-    scEffLocal: "当前浏览器：{v}（已单独设置，不随全局变化）",
+    scEffLocal: "当前浏览器：{v}（已单独设置）",
     scEffGlobal: "当前浏览器：跟随全局默认（{v}）",
-    scHelpLocal: "只影响当前浏览器<b>之后的新登录</b>；不修改服务端全局默认值，不影响其他浏览器；已签发的会话过期时间不会因此延长或缩短。选择「跟随全局默认」可清除本浏览器设置。",
-    scHelpGlobal: "未单独设置浏览器时长时，按该值签发会话，同时作为旧客户端（不声明时长）的兼容回退。范围 5 ~ 43200 分钟；修改只影响之后的新登录，已签发会话不变。",
+    scHelpLocal: "只改这个浏览器的登录时长，不影响其他设备；保存后下次登录生效。选择「跟随全局默认」可恢复。",
+    scHelpGlobal: "没有单独设置时长的浏览器都按这里登录。改完对新登录生效，已登录的不会掉线。范围 5 ~ 43200 分钟。",
     scMin30: "30 分钟",
     scHour1: "1 小时",
     scHour8: "8 小时",
@@ -3606,7 +3634,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scDay7: "7 天",
     scDay30: "30 天",
     scNotifyRules: "通知规则",
-    scNotifyHelp: "保存到数据库并立即生效。敏感字段只在服务端保存，页面只显示「是否已配置」；输入留空表示不修改，勾选「清除」才会删除已存值。",
+    scNotifyHelp: "改完点保存即可生效。密钥只保存在服务器，这里只显示「已配置」；留空表示不改动，勾选「清除」才会删除。",
     scNotifyEnabled: "通知总开关",
     scNotifyTypes: "转发类型",
     scTypeVerify: "验证码",
@@ -3620,17 +3648,17 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scLinkPh: "https://…（可选，附加到通知正文）",
     scConfigured: "已配置",
     scNotConfigured: "未配置",
-    scFromDb: "数据库",
+    scFromDb: "设置",
     scFromEnv: "环境变量",
     scEnable: "启用",
     scTest: "测试",
     scSendTest: "发送测试通知",
-    scTestSaved: "测试通知使用<b>已保存</b>的配置：修改凭据后请先保存再测试。",
+    scTestSaved: "请先保存，再发送测试；测试会使用<b>已保存</b>的配置。",
     scTestOk: "测试通知已发送",
     scTestNotCfg: "该渠道尚未配置，请先保存凭据",
     scTestFail: "发送失败",
     scTestFailMsg: "发送失败：{m}",
-    scImportEnv: "从环境变量导入",
+    scImportEnv: "同步环境变量配置",
     scImported: "已导入 {n} 项环境变量配置",
     scNoImport: "没有可导入的环境变量配置",
     scImportFail: "导入失败",
@@ -3640,20 +3668,20 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scClear: "清除",
     scRetention: "消息保留",
     scDays: "保留天数",
-    scDaysHelp: "定时清理会删除超过该天数的消息，范围 1 ~ 3650 天。调小会加快清理，属不可逆操作。",
+    scDaysHelp: "超过这个天数的消息会被自动清理，范围 1 ~ 3650 天；调小后清理会加快，删除后无法恢复。",
     scArea: "号码归属地",
     scAreaEnable: "启用查询",
     scAreaApi: "接口地址",
     scAreaApiPh: "留空使用内置免费接口",
-    scAreaHelp: "自定义接口需支持 {number} 占位（http/https）；关闭后列表不再显示归属地。留空表示使用内置免费接口。",
+    scAreaHelp: "关闭后列表不再显示归属地。自定义接口需要支持 {number} 占位；留空则使用内置免费接口。",
     scTokenTitle: "接入令牌",
-    scTokenHelp: "推送端使用接入令牌鉴权。命名令牌可单独创建、轮换、吊销，便于按来源隔离与追责；吊销后该令牌立即失效。",
+    scTokenHelp: "推送端用令牌接入。可以为不同设备或脚本分别创建，随时停用或删除，互不影响。",
     scManage: "管理",
     scOpenTokens: "打开接入令牌管理",
-    scTokenAlert: "令牌明文只在创建时显示一次；本页不读取、不回显任何令牌值。",
+    scTokenAlert: "新令牌只在创建时显示一次，请立即复制保存。",
     scLoginGuard: "登录防护",
-    scLoginGuardHelp: "连续 5 次密码错误后锁定 10 分钟；会话为无状态签名 Token，退出仅清除浏览器 Cookie。相关策略由部署配置决定，本轮不在界面暴露。",
-    scResetSession: "清除本浏览器登录有效期，并把全局默认恢复为 30 分钟",
+    scLoginGuardHelp: "连续输错 5 次密码会锁定 10 分钟；退出登录会清除本浏览器的登录状态。",
+    scResetSession: "本浏览器恢复为跟随全局默认（30 分钟）",
     scResetNotify: "通知总开关恢复开启、转发类型全选、重试 0 次、跳转链接清空（渠道凭据不变）",
     scResetBiz: "保留天数恢复 30 天、归属地查询开启、自定义接口清空",
     scResetConfirm: "恢复默认：{what}。确认后需点击「保存」才会写入，是否继续？",
@@ -3711,8 +3739,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scCustom: "自訂分鐘數…",
     scEffLocal: "本瀏覽器：{v}（已單獨設定，不隨全域變化）",
     scEffGlobal: "本瀏覽器：跟隨全域預設（{v}）",
-    scHelpLocal: "只影響目前瀏覽器<b>之後的新登入</b>；不修改伺服器全域預設值，不影響其他瀏覽器；已簽發的工作階段到期時間不會因此延長或縮短。選擇「跟隨全域預設」可清除本瀏覽器設定。",
-    scHelpGlobal: "未單獨設定瀏覽器時長時，依此值簽發工作階段，同時作為舊用戶端（未宣告時長）的相容回退。範圍 5 ~ 43200 分鐘；修改只影響之後的新登入，已簽發工作階段不變。",
+    scHelpLocal: "只改這個瀏覽器的登入時長，不影響其他裝置；儲存後下次登入生效。選擇「跟隨全域預設」可恢復。",
+    scHelpGlobal: "沒有單獨設定時長的瀏覽器都按這裡登入。改完對新登入生效，已登入的不會掉線。範圍 5 ~ 43200 分鐘。",
     scMin30: "30 分鐘",
     scHour1: "1 小時",
     scHour8: "8 小時",
@@ -3720,7 +3748,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scDay7: "7 天",
     scDay30: "30 天",
     scNotifyRules: "通知規則",
-    scNotifyHelp: "儲存到資料庫並立即生效。敏感欄位只在伺服器儲存，頁面只顯示「是否已設定」；輸入留空表示不修改，勾選「清除」才會刪除已存值。",
+    scNotifyHelp: "改完點儲存即可生效。密鑰只保存在伺服器，這裡只顯示「已設定」；留空表示不改動，勾選「清除」才會刪除。",
     scNotifyEnabled: "通知總開關",
     scNotifyTypes: "轉發類型",
     scTypeVerify: "驗證碼",
@@ -3754,20 +3782,20 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scClear: "清除",
     scRetention: "訊息保留",
     scDays: "保留天數",
-    scDaysHelp: "定時清理會刪除超過此天數的訊息，範圍 1 ~ 3650 天。調小會加快清理，屬不可逆操作。",
+    scDaysHelp: "超過此天數的訊息會被自動清理，範圍 1 ~ 3650 天；調小後清理會加快，刪除後無法復原。",
     scArea: "號碼歸屬地",
     scAreaEnable: "啟用查詢",
     scAreaApi: "介面位址",
     scAreaApiPh: "留空使用內建免費介面",
-    scAreaHelp: "自訂介面需支援 {number} 佔位（http/https）；關閉後清單不再顯示歸屬地。留空表示使用內建免費介面。",
+    scAreaHelp: "關閉後清單不再顯示歸屬地。自訂介面需支援 {number} 佔位；留空則使用內建免費介面。",
     scTokenTitle: "接入權杖",
-    scTokenHelp: "推送端使用接入權杖驗證。命名權杖可單獨建立、輪換、撤銷，便於依來源隔離與追責；撤銷後該權杖立即失效。",
+    scTokenHelp: "推送端用權杖接入。可以為不同裝置或腳本分別建立，隨時停用或刪除，互不影響。",
     scManage: "管理",
     scOpenTokens: "開啟接入權杖管理",
-    scTokenAlert: "權杖明文只在建立時顯示一次；本頁不讀取、不回顯任何權杖值。",
+    scTokenAlert: "新權杖只在建立時顯示一次，請立即複製保存。",
     scLoginGuard: "登入防護",
-    scLoginGuardHelp: "連續 5 次密碼錯誤後鎖定 10 分鐘；工作階段為無狀態簽名權杖，登出僅清除瀏覽器 Cookie。相關策略由部署設定決定，本輪不在介面暴露。",
-    scResetSession: "清除本瀏覽器登入有效期，並把全域預設恢復為 30 分鐘",
+    scLoginGuardHelp: "連續輸入錯誤 5 次密碼會鎖定 10 分鐘；登出會清除本瀏覽器的登入狀態。",
+    scResetSession: "本瀏覽器恢復為跟隨全域預設（30 分鐘）",
     scResetNotify: "通知總開關恢復開啟、轉發類型全選、重試 0 次、跳轉連結清空（管道憑證不變）",
     scResetBiz: "保留天數恢復 30 天、歸屬地查詢開啟、自訂介面清空",
     scResetConfirm: "恢復預設：{what}。確認後需點擊「儲存」才會寫入，是否繼續？",
@@ -3823,10 +3851,10 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scTtlGlobal: "Default duration",
     scFollowGlobal: "Follow global default (clear this browser)",
     scCustom: "Custom minutes…",
-    scEffLocal: "This browser: {v} (set separately, does not follow global)",
+    scEffLocal: "This browser: {v} (set separately)",
     scEffGlobal: "This browser: following global default ({v})",
-    scHelpLocal: "Affects only <b>new sign-ins in this browser</b>. It does not change the server-side global default and does not affect other browsers. Already-issued sessions keep their expiry. Choose \"Follow global default\" to clear this browser setting.",
-    scHelpGlobal: "Used when a browser has no own setting, and as the fallback for old clients that send no duration. Range 5–43200 minutes; changes affect only new sign-ins, existing sessions stay unchanged.",
+    scHelpLocal: "Changes only this browser's sign-in duration; other devices are unaffected. Takes effect next time you sign in. Choose \"Follow global default\" to reset.",
+    scHelpGlobal: "Browsers without their own duration follow this value. Changes apply to new sign-ins; existing sessions stay signed in. Range 5–43200 minutes.",
     scMin30: "30 minutes",
     scHour1: "1 hour",
     scHour8: "8 hours",
@@ -3834,7 +3862,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scDay7: "7 days",
     scDay30: "30 days",
     scNotifyRules: "Notification rules",
-    scNotifyHelp: "Saved to the database and applied immediately. Sensitive fields are stored server-side only; the page shows configured or not. Leave a field empty to keep the current value; tick \"Clear\" to delete it.",
+    scNotifyHelp: "Tap Save to apply. Keys stay on the server; this page only shows whether a channel is configured. Leave blank to keep the current value, tick \"Clear\" to delete.",
     scNotifyEnabled: "Notifications enabled",
     scNotifyTypes: "Forward types",
     scTypeVerify: "Verification codes",
@@ -3848,17 +3876,17 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scLinkPh: "https://… (optional, appended to notifications)",
     scConfigured: "Configured",
     scNotConfigured: "Not configured",
-    scFromDb: "Database",
+    scFromDb: "Settings",
     scFromEnv: "Env var",
     scEnable: "Enabled",
     scTest: "Test",
     scSendTest: "Send test notification",
-    scTestSaved: "Test notifications use the <b>saved</b> configuration: save new credentials before testing.",
+    scTestSaved: "Save first, then send a test — the test uses the <b>saved</b> settings.",
     scTestOk: "Test notification sent",
     scTestNotCfg: "This channel is not configured yet — save its credentials first",
     scTestFail: "Send failed",
     scTestFailMsg: "Send failed: {m}",
-    scImportEnv: "Import from env vars",
+    scImportEnv: "Sync environment settings",
     scImported: "Imported {n} settings",
     scNoImport: "No importable settings",
     scImportFail: "Import failed",
@@ -3868,20 +3896,20 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scClear: "Clear",
     scRetention: "Message retention",
     scDays: "Retention days",
-    scDaysHelp: "Scheduled cleanup deletes messages older than this, range 1–3650 days. Lowering it cleans faster and cannot be undone.",
+    scDaysHelp: "Messages older than this are cleaned up automatically (1–3650 days). A shorter period cleans sooner; deleted messages cannot be recovered.",
     scArea: "Number location",
     scAreaEnable: "Enable lookup",
     scAreaApi: "API endpoint",
     scAreaApiPh: "Leave empty for the built-in free API",
-    scAreaHelp: "A custom endpoint must support the {number} placeholder (http/https). When disabled, the list hides locations. Empty means the built-in free API.",
+    scAreaHelp: "Turn this off to hide locations in the list. A custom service must accept the {number} placeholder (http/https); leave it empty to use the built-in free service.",
     scTokenTitle: "Access tokens",
-    scTokenHelp: "Ingestion clients authenticate with access tokens. Named tokens can be created, rotated and revoked per source; a revoked token stops working immediately.",
+    scTokenHelp: "Push clients use tokens to connect. Create a separate token for each device or script, and disable or delete it anytime without affecting the others.",
     scManage: "Manage",
     scOpenTokens: "Open token manager",
-    scTokenAlert: "A token's plaintext is shown only once at creation; this page never reads or echoes token values.",
+    scTokenAlert: "A new token is shown only once when it is created — copy and save it now.",
     scLoginGuard: "Sign-in protection",
-    scLoginGuardHelp: "Locked for 10 minutes after 5 wrong passwords. Sessions are stateless signed tokens; signing out only clears the browser cookie. These policies come from deployment config and are not exposed here.",
-    scResetSession: "clear this browser's setting and reset the global default to 30 minutes",
+    scLoginGuardHelp: "After 5 wrong passwords, sign-in is locked for 10 minutes. Signing out only clears this browser's login state.",
+    scResetSession: "reset this browser to follow the global default (30 minutes)",
     scResetNotify: "re-enable notifications, select all types, retry 0, clear the link (channel credentials unchanged)",
     scResetBiz: "retention 30 days, location lookup on, custom endpoint cleared",
     scResetConfirm: "Restore defaults: {what}. Nothing is written until you click Save. Continue?",
@@ -4840,8 +4868,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scPushNameRequired: "请填写推送名称", scPushNeedTypes: "请至少选择一种接收类型",
       scPushFieldNeed: "请填写「{f}」", scPushAdded: "已添加推送，保存后生效", scPushUpdated: "已更新推送，保存后生效",
       scEdit: "编辑", scBack: "上一步", scEnvChannels: "其他已配置渠道",
-      scEnvChannelsHelp: "这些渠道只有单份配置（未拆分为推送卡片），仍会按全局规则发送；可在此停用或测试。",
-      scImportEnvHelp: "把环境变量中已有的通知配置写入数据库，便于后续管理。"
+      scEnvChannelsHelp: "这些渠道还没有单独的推送卡片，仍会按全局规则发送；可以在这里停用或测试。",
+      scImportEnvHelp: "把部署环境里的通知配置复制到设置页，方便统一查看；已有的项不会覆盖，环境变量始终优先。"
     },
     "zh-TW": {
       pageSub: "一驛過一驛，驛騎如星流",
@@ -4866,8 +4894,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scPushNameRequired: "請填寫推送名稱", scPushNeedTypes: "請至少選擇一種接收類型",
       scPushFieldNeed: "請填寫「{f}」", scPushAdded: "已新增推送，儲存後生效", scPushUpdated: "已更新推送，儲存後生效",
       scEdit: "編輯", scBack: "上一步", scEnvChannels: "其他已設定管道",
-      scEnvChannelsHelp: "這些管道只有單份設定（未拆分為推送卡片），仍會依全域規則傳送；可在此停用或測試。",
-      scImportEnvHelp: "把環境變數中既有的通知設定寫入資料庫，便於後續管理。"
+      scEnvChannelsHelp: "這些管道還沒有獨立的推送卡片，仍會依全域規則傳送；可以在這裡停用或測試。",
+      scImportEnvHelp: "把部署環境裡的通知設定複製到設定頁，方便統一檢視；既有的項目不會覆蓋，環境變數始終優先。"
     },
     en: {
       pageSub: "From post to post, like shooting stars.",
@@ -4892,8 +4920,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scPushNameRequired: "Enter a push name", scPushNeedTypes: "Select at least one accepted type",
       scPushFieldNeed: "Enter \"{f}\"", scPushAdded: "Push added; save to apply", scPushUpdated: "Push updated; save to apply",
       scEdit: "Edit", scBack: "Back", scEnvChannels: "Other configured channels",
-      scEnvChannelsHelp: "These channels have a single configuration (not split into push cards) and still follow the global rules. You can disable or test them here.",
-      scImportEnvHelp: "Import notification settings from environment variables into the database for easier management."
+      scEnvChannelsHelp: "These channels have no separate push card yet and still follow the global rules. You can disable or test them here.",
+      scImportEnvHelp: "Copy notification settings from the deployment environment into this page for easier management. Existing items are not overwritten, and environment variables always take precedence."
     },
     ja: {
       pageSub: "駅から駅へ、星のように駆け流れる",
@@ -4918,8 +4946,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scPushNameRequired: "プッシュ名を入力してください", scPushNeedTypes: "受信タイプを1つ以上選択してください",
       scPushFieldNeed: "「{f}」を入力してください", scPushAdded: "プッシュを追加しました。保存後に有効になります", scPushUpdated: "プッシュを更新しました。保存後に有効になります",
       scEdit: "編集", scBack: "戻る", scEnvChannels: "その他の設定済みチャネル",
-      scEnvChannelsHelp: "これらのチャネルは単一設定（プッシュカード未分割）で、全体ルールに従って送信されます。ここで無効化やテストができます。",
-      scImportEnvHelp: "環境変数の通知設定をデータベースへ取り込み、後から管理しやすくします。"
+      scEnvChannelsHelp: "これらのチャネルはまだ個別のプッシュカードがなく、全体ルールに従って送信されます。ここで無効化やテストができます。",
+      scImportEnvHelp: "デプロイ環境の通知設定をこのページにコピーして管理しやすくします。既存の項目は上書きされず、環境変数が常に優先されます。"
     },
     ko: {
       pageSub: "역에서 역으로, 별처럼 흐르는 발걸음",
@@ -4944,8 +4972,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scPushNameRequired: "푸시 이름을 입력하세요", scPushNeedTypes: "수신 유형을 하나 이상 선택하세요",
       scPushFieldNeed: "「{f}」을(를) 입력하세요", scPushAdded: "푸시가 추가되었습니다. 저장 후 적용됩니다", scPushUpdated: "푸시가 업데이트되었습니다. 저장 후 적용됩니다",
       scEdit: "편집", scBack: "이전", scEnvChannels: "기타 설정된 채널",
-      scEnvChannelsHelp: "이 채널들은 단일 설정(푸시 카드로 분리되지 않음)이며 전역 규칙에 따라 전송됩니다. 여기서 비활성화하거나 테스트할 수 있습니다.",
-      scImportEnvHelp: "환경 변수의 알림 설정을 데이터베이스로 가져와 이후 관리하기 쉽게 합니다."
+      scEnvChannelsHelp: "이 채널들은 아직 개별 푸시 카드가 없으며 전역 규칙에 따라 전송됩니다. 여기서 비활성화하거나 테스트할 수 있습니다.",
+      scImportEnvHelp: "배포 환경의 알림 설정을 이 페이지로 복사해 관리하기 쉽게 합니다. 기존 항목은 덮어쓰지 않으며 환경 변수가 항상 우선합니다."
     },
     es: {
       pageSub: "De posta en posta, como estrellas fugaces.",
@@ -4970,8 +4998,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scPushNameRequired: "Escribe un nombre para el envío", scPushNeedTypes: "Selecciona al menos un tipo",
       scPushFieldNeed: "Escribe «{f}»", scPushAdded: "Envío añadido; guarda para aplicar", scPushUpdated: "Envío actualizado; guarda para aplicar",
       scEdit: "Editar", scBack: "Atrás", scEnvChannels: "Otros canales configurados",
-      scEnvChannelsHelp: "Estos canales tienen una sola configuración (sin dividir en tarjetas) y siguen las reglas globales. Puedes desactivarlos o probarlos aquí.",
-      scImportEnvHelp: "Importa la configuración de notificaciones de las variables de entorno a la base de datos para gestionarla mejor."
+      scEnvChannelsHelp: "Estos canales aún no tienen una tarjeta de envío propia y siguen las reglas globales. Puedes desactivarlos o probarlos aquí.",
+      scImportEnvHelp: "Copia la configuración de notificaciones del entorno de despliegue en esta página para gestionarla mejor. Lo existente no se sobrescribe y las variables de entorno siempre tienen prioridad."
     },
     fr: {
       pageSub: "De relais en relais, comme un torrent d'étoiles.",
@@ -4996,8 +5024,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scPushNameRequired: "Saisissez un nom d'envoi", scPushNeedTypes: "Sélectionnez au moins un type",
       scPushFieldNeed: "Saisissez « {f} »", scPushAdded: "Envoi ajouté ; enregistrez pour appliquer", scPushUpdated: "Envoi mis à jour ; enregistrez pour appliquer",
       scEdit: "Modifier", scBack: "Retour", scEnvChannels: "Autres canaux configurés",
-      scEnvChannelsHelp: "Ces canaux ont une configuration unique (non divisée en cartes) et suivent les règles globales. Vous pouvez les désactiver ou les tester ici.",
-      scImportEnvHelp: "Importez la configuration de notification des variables d'environnement dans la base pour la gérer plus facilement."
+      scEnvChannelsHelp: "Ces canaux n'ont pas encore de carte d'envoi dédiée et suivent les règles globales. Vous pouvez les désactiver ou les tester ici.",
+      scImportEnvHelp: "Copiez la configuration de notification de l'environnement de déploiement dans cette page pour la gérer plus facilement. L'existant n'est pas écrasé et les variables d'environnement restent prioritaires."
     },
     de: {
       pageSub: "Von Station zu Station, wie ein Sternenstrom.",
@@ -5022,8 +5050,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scPushNameRequired: "Bitte einen Push-Namen eingeben", scPushNeedTypes: "Mindestens einen Typ auswählen",
       scPushFieldNeed: "„{f}“ eingeben", scPushAdded: "Push hinzugefügt; zum Anwenden speichern", scPushUpdated: "Push aktualisiert; zum Anwenden speichern",
       scEdit: "Bearbeiten", scBack: "Zurück", scEnvChannels: "Weitere konfigurierte Kanäle",
-      scEnvChannelsHelp: "Diese Kanäle haben eine einzige Konfiguration (nicht in Push-Karten aufgeteilt) und folgen den globalen Regeln. Hier kannst du sie deaktivieren oder testen.",
-      scImportEnvHelp: "Benachrichtigungseinstellungen aus Umgebungsvariablen in die Datenbank importieren, um sie leichter zu verwalten."
+      scEnvChannelsHelp: "Diese Kanäle haben noch keine eigene Push-Karte und folgen den globalen Regeln. Hier kannst du sie deaktivieren oder testen.",
+      scImportEnvHelp: "Kopiert die Benachrichtigungseinstellungen aus der Bereitstellungsumgebung auf diese Seite zur einfacheren Verwaltung. Vorhandene Einträge werden nicht überschrieben, Umgebungsvariablen haben immer Vorrang."
     },
     "pt-BR": {
       pageSub: "De estação em estação, como estrelas cadentes.",
@@ -5048,8 +5076,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scPushNameRequired: "Informe um nome para o envio", scPushNeedTypes: "Selecione ao menos um tipo",
       scPushFieldNeed: "Informe «{f}»", scPushAdded: "Envio adicionado; salve para aplicar", scPushUpdated: "Envio atualizado; salve para aplicar",
       scEdit: "Editar", scBack: "Voltar", scEnvChannels: "Outros canais configurados",
-      scEnvChannelsHelp: "Esses canais têm configuração única (não dividida em cartões) e seguem as regras globais. Você pode desativá-los ou testá-los aqui.",
-      scImportEnvHelp: "Importe as configurações de notificação das variáveis de ambiente para o banco de dados para facilitar a gestão."
+      scEnvChannelsHelp: "Esses canais ainda não têm um cartão de envio próprio e seguem as regras globais. Você pode desativá-los ou testá-los aqui.",
+      scImportEnvHelp: "Copie as configurações de notificação do ambiente de implantação para esta página para facilitar a gestão. Itens existentes não são sobrescritos e as variáveis de ambiente sempre têm prioridade."
     }
   };
   (function () {
@@ -5058,6 +5086,46 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       for (var _v2k in V2_I18N[_v2l]) I18N[_v2l][_v2k] = V2_I18N[_v2l][_v2k];
     }
   })();
+  /* 时长单位（九语种）：把分钟数转成易读文案，避免页面出现 3600 之类的技术数字 */
+  var UNIT_I18N = {
+    "zh-CN": { unitMin: "分钟", unitHour: "小时", unitDay: "天" },
+    "zh-TW": { unitMin: "分鐘", unitHour: "小時", unitDay: "天" },
+    "en": { unitMin: "min", unitHour: "h", unitDay: "d" },
+    "ja": { unitMin: "分", unitHour: "時間", unitDay: "日" },
+    "ko": { unitMin: "분", unitHour: "시간", unitDay: "일" },
+    "es": { unitMin: "min", unitHour: "h", unitDay: "d" },
+    "fr": { unitMin: "min", unitHour: "h", unitDay: "j" },
+    "de": { unitMin: "Min.", unitHour: "Std.", unitDay: "Tage" },
+    "pt-BR": { unitMin: "min", unitHour: "h", unitDay: "dias" }
+  };
+  var EXTRA_I18N = {
+    "zh-CN": { scEnvPriority: "环境变量里已经有的项会优先生效；这里保存的设置作为补充，不会覆盖环境变量。" },
+    "zh-TW": { scEnvPriority: "環境變數中既有的項目會優先生效；此處儲存的設定作為補充，不會覆蓋環境變數。" },
+    "en": { scEnvPriority: "Items already set by environment variables take precedence; settings saved here act as a fallback and never override them." },
+    "ja": { scEnvPriority: "環境変数で設定済みの項目が優先されます。ここで保存した設定は補完であり、環境変数を上書きしません。" },
+    "ko": { scEnvPriority: "환경 변수에 이미 설정된 항목이 우선 적용됩니다. 여기서 저장한 설정은 보완용이며 환경 변수를 덮어쓰지 않습니다." },
+    "es": { scEnvPriority: "Lo que ya está definido en las variables de entorno tiene prioridad; lo guardado aquí es un complemento y no lo sobrescribe." },
+    "fr": { scEnvPriority: "Les valeurs définies dans les variables d'environnement sont prioritaires ; les réglages enregistrés ici complètent sans les écraser." },
+    "de": { scEnvPriority: "In Umgebungsvariablen gesetzte Werte haben Vorrang; hier gespeicherte Einstellungen ergänzen sie nur." },
+    "pt-BR": { scEnvPriority: "Itens já definidos nas variáveis de ambiente têm prioridade; o que for salvo aqui é complementar e não os substitui." }
+  };
+  (function () {
+    for (var _ul in UNIT_I18N) {
+      if (!I18N[_ul]) I18N[_ul] = {};
+      for (var _uk in UNIT_I18N[_ul]) I18N[_ul][_uk] = UNIT_I18N[_ul][_uk];
+    }
+    for (var _xl in EXTRA_I18N) {
+      if (!I18N[_xl]) I18N[_xl] = {};
+      for (var _xk in EXTRA_I18N[_xl]) I18N[_xl][_xk] = EXTRA_I18N[_xl][_xk];
+    }
+  })();
+  function fmtMinutes(n) {
+    var v = parseInt(n, 10);
+    if (!v || v < 0) v = 30;
+    if (v % 1440 === 0) return (v / 1440) + " " + T("unitDay");
+    if (v % 60 === 0) return (v / 60) + " " + T("unitHour");
+    return v + " " + T("unitMin");
+  }
   function T(key, vars) {
     var m = I18N[LANG] || I18N.en;
     var s = m[key];
@@ -5976,11 +6044,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       (d.days || []).forEach(function (x) {
         html += '<div class="barrow"><span class="bl">' + esc(String(x.d || "").slice(5)) + '</span><span class="bt"><span class="bf" style="width:' + Math.round(x.n / maxD * 100) + '%"></span></span><span class="bn">' + x.n + '</span></div>';
       });
-      /* 第 4 步升级可观测：统计弹窗显示最近一次 schema 自愈结果（文案中文先行，i18n 后续补） */
-      var sc = d.schema || {};
-      html += '<div class="tokmeta" style="margin-top:10px">库结构自愈：' +
-        (sc.state === "ok" ? "正常" : sc.state === "failed" ? "失败：" + esc(sc.error || "") : "未触发") +
-        (sc.at ? "（" + esc(fmtTokTime(sc.at)) + "）" : "") + '</div>';
       $("statbody").innerHTML = html;
     }).catch(function () { var b = $("statbody"); if (b) b.textContent = T("statFail"); });
   }
@@ -6521,7 +6584,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       + '<option value="global"' + (localSet ? "" : " selected") + '>' + T("scFollowGlobal") + '</option>'
       + '<option value="custom"' + (localSet && !hit ? " selected" : "") + '>' + T("scCustom") + '</option>';
     var eff = localSet
-      ? T("scEffLocal", { v: localVal }) : T("scEffGlobal", { v: g });
+      ? T("scEffLocal", { v: fmtMinutes(localVal) }) : T("scEffGlobal", { v: fmtMinutes(g) });
     var langCard = '<div class="setgrp"><h4>' + T("scLanguage") + scBadge("browser") + '</h4>'
       + scHelp(T("scLangHelp"))
       + '<div class="setrow"><label for="sclang">' + T("scLang") + '</label>'
@@ -6592,10 +6655,12 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var dnd = getDND();
     var html = '<div class="setgrp"><h4>' + T("scBrowserPrefs") + scBadge("browser") + '</h4>'
       + scHelp(T("scBrowserPrefsHelp"))
-      + '<div class="setrow"><label for="scautocopy">' + T("autoCopy") + '</label><input type="checkbox" id="scautocopy" class="ds-check" ' + (state.autoCopy ? "checked" : "") + '></div>'
-      + '<div class="setrow"><label for="scnotifyon">' + T("notifyOn") + '</label><input type="checkbox" id="scnotifyon" class="ds-check" ' + (state.notify ? "checked" : "") + '></div>'
-      + '<div class="setrow"><label for="scsoundon">' + T("soundOn") + '</label><input type="checkbox" id="scsoundon" class="ds-check" ' + (state.sound ? "checked" : "") + '></div>'
-      + '<div class="setrow"><label for="scdndon">' + T("sDnd") + '</label><input type="checkbox" id="scdndon" class="ds-check" ' + (dnd.on ? "checked" : "") + '></div>'
+      + '<div class="prefgrid">'
+      + '<label class="prefitem" for="scautocopy"><span>' + T("autoCopy") + '</span><input type="checkbox" id="scautocopy" class="ds-check" ' + (state.autoCopy ? "checked" : "") + '></label>'
+      + '<label class="prefitem" for="scnotifyon"><span>' + T("notifyOn") + '</span><input type="checkbox" id="scnotifyon" class="ds-check" ' + (state.notify ? "checked" : "") + '></label>'
+      + '<label class="prefitem" for="scsoundon"><span>' + T("soundOn") + '</span><input type="checkbox" id="scsoundon" class="ds-check" ' + (state.sound ? "checked" : "") + '></label>'
+      + '<label class="prefitem" for="scdndon"><span>' + T("sDnd") + '</span><input type="checkbox" id="scdndon" class="ds-check" ' + (dnd.on ? "checked" : "") + '></label>'
+      + '</div>'
       + '<div class="setrow"><label>' + T("sDndRange") + '</label>'
       + '<input type="number" id="scdnds" class="ds-input" min="0" max="23" inputmode="numeric" value="' + (parseInt(dnd.start, 10) || 0) + '">'
       + '<span>' + T("to") + '</span>'
@@ -6646,8 +6711,9 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         + '<button class="ds-btn settest" id="nf_test_' + ch.key + '" type="button">' + T("scSendTest") + '</button></div>';
     });
     if (envRows) {
+      /* 说明环境变量与设置的优先级，避免用户重复配置后困惑 */
       html += '<div class="setgrp"><h4>' + T("scEnvChannels") + scBadge("global") + '</h4>'
-        + scHelp(T("scEnvChannelsHelp")) + envRows + '</div>';
+        + scHelp(T("scEnvChannelsHelp")) + scHelp(T("scEnvPriority")) + envRows + '</div>';
     }
     html += '<div class="setgrp"><h4>' + T("scImportEnv") + scBadge("global") + '</h4>'
       + scHelp(T("scImportEnvHelp"))
@@ -7290,8 +7356,22 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var tag = (e.target && e.target.tagName) || "";
     var typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
     if (e.key === "/" && !typing) { e.preventDefault(); $("q").focus(); }
-    if (e.key === "Escape" && state.selectMode) { setSelectMode(false); }
+    if (e.key === "Escape") {
+      var pm = $("pushmodal");
+      if (pm && !pm.hidden) { closePushEditor(); return; }
+      if (!$("modal").hidden) { closeModal(); return; }
+      if (state.selectMode) setSelectMode(false);
+    }
   });
+  /* 横向滑轨：触屏用原生左右滑；桌面把纵向滚轮映射为横向滚动 */
+  document.addEventListener("wheel", function (e) {
+    var rail = e.target && e.target.closest ? e.target.closest(".ds-tabs,.modal-foot") : null;
+    if (!rail || rail.scrollWidth <= rail.clientWidth) return;
+    if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+      e.preventDefault();
+      rail.scrollLeft += e.deltaY;
+    }
+  }, { passive: false });
   /* 弹层 + PWA + 搜索历史 */
   $("modalx").onclick = closeModal;
   $("modal").addEventListener("click", function (ev) { if (ev.target === $("modal")) closeModal(); });
@@ -8377,7 +8457,7 @@ function notifyConfigView(cfg) {
     }
     channels[name] = {
       label: spec.label, enabled: ch.enabled, configured: ch.configured,
-      source: ch.fromDb ? "db" : "env", fields: fields,
+      source: (ch.fromEnv ? "env" : (ch.fromDb ? "db" : "env")), fields: fields,
     };
   }
   return {
@@ -8479,7 +8559,9 @@ async function handleGetSettings(env) {
   for (const k of Object.keys(all)) if (isNotifyKey(k)) notifyRows[k] = all[k];
   const cfg = resolveNotifyConfig(env, notifyRows);
   const revision = parseInt(all.settings_rev, 10) || 0;
-  const ttl = parseInt(scalarFromRows(env, "session_ttl_minutes", all), 10);
+  let ttl = parseInt(scalarFromRows(env, "session_ttl_minutes", all), 10);
+  /* 兼容旧部署把 3600（秒）当成分钟保存：按默认 30 分钟展示与生效 */
+  if (ttl === 3600) ttl = SESSION_TTL_DEFAULT_MIN;
   return json({
     success: true,
     revision: revision,
@@ -8506,7 +8588,8 @@ async function handlePutSettings(request, env) {
     if (isSensitiveSettingKey(k) && String(raw === undefined || raw === null ? "" : raw).trim() === "") return true;
     const r = normalizeSettingValue(k, raw);
     if (!r.ok) return false;
-    writes[k] = r.value;
+    /* 全局登录时长：3600 视作旧部署「秒」误存，统一按 30 分钟写入，避免旧值继续生效 */
+    writes[k] = (k === "session_ttl_minutes" && r.value === "3600") ? String(SESSION_TTL_DEFAULT_MIN) : r.value;
     return true;
   };
 

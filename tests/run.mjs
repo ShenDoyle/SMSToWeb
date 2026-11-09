@@ -855,9 +855,9 @@ async function main() {
       "窄屏弹窗转为底部抽屉");
     check(pgHtml.includes(".ds-tabs { display: flex; gap: 8px; overflow-x: auto;"),
       "设置分组标签行可横向滚动（不挤压换行溢出）");
-    check(pgHtml.includes(".ds-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;")
-      && pgHtml.includes(".modal-foot .foot-left, .modal-foot .foot-right") && pgHtml.includes("grid-template-columns: repeat(2, minmax(0, 1fr))"),
-      "窄屏设置标签两列网格、详情按钮等宽网格（间距清晰不参差）");
+    check(pgHtml.includes(".ds-tabs { display: flex; flex-wrap: nowrap; gap: 8px; overflow-x: auto;")
+      && pgHtml.includes(".modal-foot .foot-left, .modal-foot .foot-right") && pgHtml.includes(".pushcard-acts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));"),
+      "窄屏设置标签单行横滑、详情按钮单行横滑、推送按钮一行四等宽（触屏可滑动）");
     /* 设置中心文案九语种覆盖：抽样键在 SC_I18N 中应各有 9 处定义 */
     const scSample = ["scTitle", "scSessionBrowser", "scSessionGlobal", "scHelpLocal", "scHelpGlobal",
       "scCloseConfirm", "scSensitivePhCfg", "scResetConfirm", "scTtlRange", "scImportEnv", "nfHeaders", "scScopeBrowser"];
@@ -955,6 +955,14 @@ async function main() {
     rs = await call("PUT", "/api/settings", eS2, { headers: HS(), cookie: ckS2, body: { session_ttl_minutes: 5 } });
     check(rs.status === 200 && (await call("POST", "/api/login", eS2, { headers: HS(), body: { password: "secret" } })).setCookie.includes("Max-Age=300"), "PUT 5（下限）→ 200 且登录 Max-Age=300");
 
+    /* 5.1) 兼容旧部署：把 3600（秒）误存为分钟 → 统一按默认 30 分钟展示与生效 */
+    rs = await call("PUT", "/api/settings", eS2, { headers: HS(), cookie: ckS2, body: { session_ttl_minutes: 3600 } });
+    check(rs.status === 200 && rs.data.session_ttl_minutes === 30, "PUT 3600（旧秒值）→ 规范为 30 分钟");
+    rs = await call("GET", "/api/settings", eS2, { headers: HS(), cookie: ckS2 });
+    check(rs.data.session_ttl_minutes === 30, "GET 回读：3600 旧值按 30 分钟展示");
+    rs = await call("POST", "/api/login", eS2, { headers: HS(), body: { password: "secret" } });
+    check((rs.setCookie.match(/Max-Age=(\d+)/) || [])[1] === "1800", "旧值 3600 下登录 Cookie 仍为 30 分钟（Max-Age=1800）");
+
     /* 6) 旧库无 settings 表：首请求自愈建表 → 读默认/写生效 */
     const lgSPath = join(tmpdir(), "smstoweb_sessttl_legacy_" + process.pid + ".db");
     cleanupPath(lgSPath);
@@ -1041,6 +1049,27 @@ async function main() {
     check(rt.status === 400 && rt.data.error === "INVALID_TARGETS", "非法渠道目标 → 400 INVALID_TARGETS");
     rt = await call("PUT", "/api/settings", eS2, { headers: HS(), cookie: ckS2, body: { revision: st.data.revision, notify: { targets: [] } } });
     check(rt.status === 200 && (await call("GET", "/api/settings", eS2, { headers: HS(), cookie: ckS2 })).data.notify.targets.length === 0, "清空多目标 → 回退单目标配置");
+
+    /* 8.1) 环境变量与设置双渠道并存：不冲突，且环境变量优先于设置 */
+    let srEv = (await call("GET", "/api/settings", eS2, { headers: HS(), cookie: ckS2 })).data;
+    rt = await call("PUT", "/api/settings", eS2, { headers: HS(), cookie: ckS2, body: {
+      revision: srEv.revision,
+      notify: { channels: { feishu: { webhook: "https://example.com/db-hook-999" } } },
+    } });
+    check(rt.status === 200, "设置渠道 feishu webhook → 200（与环境变量渠道并存）");
+    const eEnvPri = Object.assign({}, eS2, { FEISHU_WEBHOOK: "https://example.com/env-hook-777" });
+    st = await call("GET", "/api/settings", eEnvPri, { headers: HS(), cookie: ckS2 });
+    const fchEnv = st.data.notify.channels.feishu;
+    check(fchEnv.source === "env" && fchEnv.configured === true && fchEnv.fields.webhook.masked === "••••-777",
+      "环境变量与设置同时存在 → 环境变量优先（source=env，密文末位 -777）");
+    st = await call("GET", "/api/settings", eS2, { headers: HS(), cookie: ckS2 });
+    const fchDb = st.data.notify.channels.feishu;
+    check(fchDb.source === "db" && fchDb.configured === true && fchDb.fields.webhook.masked === "••••-999",
+      "仅有设置时 → 使用设置（source=db，密文末位 -999）");
+    rt = await call("PUT", "/api/settings", eS2, { headers: HS(), cookie: ckS2, body: {
+      revision: st.data.revision, clear: ["notify.feishu.webhook"],
+    } });
+    check(rt.status === 200, "清理渠道设置 → 200（恢复为未配置，不影响后续用例）");
 
     /* 8.5) 推送卡片级接收类型：缺省回退全部 / 顺序归一 / 持久化 / 非法拒绝 */
     const fresh = async () => (await call("GET", "/api/settings", eS2, { headers: HS(), cookie: ckS2 }));
