@@ -853,8 +853,11 @@ async function main() {
       "弹层与下拉菜单有视口上限（窄屏不溢出）");
     check(pgHtml.includes("@media (max-width: 560px)") && pgHtml.includes("border-radius: 18px 18px 0 0"),
       "窄屏弹窗转为底部抽屉");
-    check(pgHtml.includes(".ds-tabs { display: flex; gap: 6px; overflow-x: auto;"),
+    check(pgHtml.includes(".ds-tabs { display: flex; gap: 8px; overflow-x: auto;"),
       "设置分组标签行可横向滚动（不挤压换行溢出）");
+    check(pgHtml.includes(".ds-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;")
+      && pgHtml.includes(".modal-foot .foot-left, .modal-foot .foot-right") && pgHtml.includes("grid-template-columns: repeat(2, minmax(0, 1fr))"),
+      "窄屏设置标签两列网格、详情按钮等宽网格（间距清晰不参差）");
     /* 设置中心文案九语种覆盖：抽样键在 SC_I18N 中应各有 9 处定义 */
     const scSample = ["scTitle", "scSessionBrowser", "scSessionGlobal", "scHelpLocal", "scHelpGlobal",
       "scCloseConfirm", "scSensitivePhCfg", "scResetConfirm", "scTtlRange", "scImportEnv", "nfHeaders", "scScopeBrowser"];
@@ -1038,6 +1041,81 @@ async function main() {
     check(rt.status === 400 && rt.data.error === "INVALID_TARGETS", "非法渠道目标 → 400 INVALID_TARGETS");
     rt = await call("PUT", "/api/settings", eS2, { headers: HS(), cookie: ckS2, body: { revision: st.data.revision, notify: { targets: [] } } });
     check(rt.status === 200 && (await call("GET", "/api/settings", eS2, { headers: HS(), cookie: ckS2 })).data.notify.targets.length === 0, "清空多目标 → 回退单目标配置");
+
+    /* 8.5) 推送卡片级接收类型：缺省回退全部 / 顺序归一 / 持久化 / 非法拒绝 */
+    const fresh = async () => (await call("GET", "/api/settings", eS2, { headers: HS(), cookie: ckS2 }));
+    let sv = (await fresh()).data;
+    rt = await call("PUT", "/api/settings", eS2, { headers: HS(), cookie: ckS2, body: {
+      revision: sv.revision,
+      notify: { targets: [ { channel: "feishu", name: "类型默认", fields: { webhook: "https://example.com/hook/t1" } } ] },
+    } });
+    check(rt.status === 200, "推送类型：未传 types → 保存成功（向后兼容）");
+    sv = (await fresh()).data;
+    check(JSON.stringify(sv.notify.targets[0].types) === JSON.stringify(["verify", "sms", "notify"]),
+      "推送类型：未传 types 时视图返回全部类型");
+    const tyId = sv.notify.targets[0].id;
+    rt = await call("PUT", "/api/settings", eS2, { headers: HS(), cookie: ckS2, body: {
+      revision: sv.revision,
+      notify: { targets: [
+        { id: tyId, channel: "feishu", name: "仅验证码", fields: {}, types: ["verify", "sms", "verify"] },
+        { channel: "telegram", name: "仅通知", fields: { bot_token: "tg-ty", chat_id: "4096" }, types: ["notify"] },
+      ] },
+    } });
+    check(rt.status === 200, "推送类型：限定类型保存 → 200");
+    sv = (await fresh()).data;
+    check(JSON.stringify(sv.notify.targets[0].types) === JSON.stringify(["verify", "sms"])
+      && JSON.stringify(sv.notify.targets[1].types) === JSON.stringify(["notify"]),
+      "推送类型：去重并按固定顺序持久化（verify,sms / notify）");
+    rt = await call("PUT", "/api/settings", eS2, { headers: HS(), cookie: ckS2, body: {
+      revision: sv.revision,
+      notify: { targets: [ { id: tyId, channel: "feishu", name: "非法类型", fields: {}, types: ["nope"] } ] },
+    } });
+    check(rt.status === 400 && rt.data.error === "INVALID_TARGETS", "推送类型：非法类型值 → 400");
+    rt = await call("PUT", "/api/settings", eS2, { headers: HS(), cookie: ckS2, body: {
+      revision: sv.revision,
+      notify: { targets: [ { id: tyId, channel: "feishu", name: "空类型", fields: {}, types: [] } ] },
+    } });
+    check(rt.status === 400 && rt.data.error === "INVALID_TARGETS", "推送类型：空类型数组 → 400（不允许静默全禁用）");
+
+    /* 8.6) 卡片级类型参与发送：verify / sms / notify 三种类型分别路由到对应卡片 */
+    const realFetchN = globalThis.fetch;
+    const nHits = [];
+    globalThis.fetch = async function (url, opts) {
+      nHits.push(String(url));
+      return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+    };
+    try {
+      sv = (await fresh()).data;
+      rt = await call("PUT", "/api/settings", eS2, { headers: HS(), cookie: ckS2, body: {
+        revision: sv.revision,
+        notify: { targets: [
+          { id: tyId, channel: "feishu", name: "仅验证码", fields: {}, types: ["verify"] },
+          { channel: "telegram", name: "仅通知", fields: { bot_token: "tg-ty", chat_id: "4096" }, types: ["notify"] },
+        ] },
+      } });
+      check(rt.status === 200, "卡片级发送：前置保存 verify/notify 两类卡片 → 200");
+      let rn = await call("POST", "/api/receive?token=tok", eS2, {
+        headers: { "X-Forwarded-For": "203.0.113.81" },
+        body: { name: "类型机A", sim: "13900000001", from: "Gitee", content: "您的验证码是135790，5分钟内有效", time: "2026-11-09 10:00:00" },
+      });
+      check(rn.status === 200 && nHits.length === 1 && nHits[0].indexOf("example.com/hook/t1") !== -1,
+        "卡片级发送：验证码只命中 verify 卡片（实际 hits=" + nHits.length + " " + nHits.join(",") + "）");
+      nHits.length = 0;
+      rn = await call("POST", "/api/receive?token=tok", eS2, {
+        headers: { "X-Forwarded-For": "203.0.113.82" },
+        body: { name: "类型机B", sim: "13900000001", from: "10086", content: "您的话费余额为12.5元", time: "2026-11-09 10:01:00" },
+      });
+      check(rn.status === 200 && nHits.length === 0,
+        "卡片级发送：普通短信（sms）不被 verify/notify 卡片接收（实际 status=" + rn.status + " hits=" + nHits.length + "）");
+      nHits.length = 0;
+      rn = await call("POST", "/api/push?token=tok", eS2, {
+        headers: { "X-Forwarded-For": "203.0.113.83" },
+        body: { source: "notify", sender: "路由器", content: "普通通知：设备已上线", time: "2026-11-09 10:02:00" },
+      });
+      check(rn.status === 200 && nHits.length === 1 && nHits[0].indexOf("api.telegram.org") !== -1,
+        "卡片级发送：纯通知只命中 notify 卡片（实际 status=" + rn.status + " hits=" + nHits.length + " " + nHits.join(",") + "）");
+    } finally { globalThis.fetch = realFetchN; }
+    rt = await call("PUT", "/api/settings", eS2, { headers: HS(), cookie: ckS2, body: { revision: (await fresh()).data.revision, notify: { targets: [] } } });
 
     rawS.close();
     cleanupPath(stPath);
@@ -1724,6 +1802,42 @@ async function main() {
   check(/NUM_LABELS/.test(page2) && /fillAreas/.test(page2), "管理页内置号码库与归属地填充逻辑存在");
 
   /* ===== 基线组（第 0 步前既有）：批量软删除 ===== */
+  group("重要操作密码确认（/api/auth-state 探测 / /api/verify-password 校验 / 复用登录限流）");
+  {
+    const eP = env({ ENABLE_AUTH: "true", ADMIN_PASSWORD: "secret" });
+    const eNo = env();
+    const IPP = { "X-Forwarded-For": "203.0.113.99, 10.0.0.99" };
+
+    let r = await call("GET", "/api/auth-state", eP);
+    check(r.status === 200 && r.data.required === true, "auth-state：开启登录 → required=true（公开可访问）");
+    r = await call("GET", "/api/auth-state", eNo);
+    check(r.status === 200 && r.data.required === false, "auth-state：未开启登录 → required=false");
+
+    r = await call("POST", "/api/verify-password", eP, { headers: IPP, body: { password: "secret" } });
+    check(r.status === 401, "verify-password：无会话 → 401（不在公开白名单）");
+
+    r = await call("POST", "/api/login", eP, { headers: IPP, body: { password: "secret" } });
+    check(r.status === 200 && r.setCookie.indexOf("sms_auth=") === 0, "前置：登录取得会话");
+    const ckP = "sms_auth=" + r.setCookie.split("sms_auth=")[1].split(";")[0];
+
+    r = await call("POST", "/api/verify-password", eP, { headers: IPP, cookie: ckP, body: { password: "secret" } });
+    check(r.status === 200 && r.data.success === true && r.data.required === true, "verify-password：密码正确 → 200");
+    r = await call("POST", "/api/verify-password", eP, { headers: IPP, cookie: ckP, body: { password: "wrong" } });
+    check(r.status === 403 && r.data.success === false, "verify-password：密码错误 → 403");
+    r = await call("POST", "/api/verify-password", eP, { headers: IPP, cookie: ckP, body: { password: "" } });
+    check(r.status === 403, "verify-password：空密码 → 403");
+
+    /* 累计失败达 LOGIN_FAIL_LIMIT → 锁定并返回 429（与登录共用计数） */
+    for (let i = 0; i < 3; i++) {
+      await call("POST", "/api/verify-password", eP, { headers: IPP, cookie: ckP, body: { password: "bad" + i } });
+    }
+    r = await call("POST", "/api/verify-password", eP, { headers: IPP, cookie: ckP, body: { password: "secret" } });
+    check(r.status === 429, "verify-password：连续错误达上限 → 429");
+
+    r = await call("POST", "/api/verify-password", eNo, { body: { password: "whatever" } });
+    check(r.status === 200 && r.data.success === true && r.data.required === false, "verify-password：未开启登录 → 直接放行");
+  }
+
   group("批量删除 / 恢复 / 清空（软删除）");
   await call("POST", "/api/push?token=tok", e0, { body: { name: "批量设备", content: "batch-1", time: "2026-10-19 08:00:00" } });
   await call("POST", "/api/push?token=tok", e0, { body: { name: "批量设备", content: "batch-2", time: "2026-10-19 08:01:00" } });

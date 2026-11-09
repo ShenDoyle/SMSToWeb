@@ -397,6 +397,29 @@ async function handleLogin(request, env) {
 
 function clearLoginFail(request) { loginFails.delete(clientIp(request)); }
 
+/* 登录态探测（公开接口）：前端据此决定重要操作是否需要密码确认。
+   只返回布尔，不泄露密码是否存在以外的任何配置 */
+function handleAuthState(env) {
+  return json({ success: true, required: authEnabled(env) && !!env.ADMIN_PASSWORD }, 200);
+}
+
+/* 重要操作密码确认：校验输入是否为登录密码（复用登录失败限流，防在线爆破）。
+   只做确认，不签发/延长会话；未开启登录时直接放行（required:false） */
+async function handleVerifyPassword(request, env) {
+  if (!authEnabled(env)) return json({ success: true, required: false }, 200);
+  if (!env.ADMIN_PASSWORD) return json({ success: false, error: "server auth not configured" }, 500);
+  if (loginLocked(request)) return json({ success: false, error: "too many attempts" }, 429);
+  let body;
+  try { body = await request.json(); } catch { return json({ success: false, error: "invalid json" }, 400); }
+  const pw = body && body.password !== undefined ? String(body.password) : "";
+  if (!pw || !safeEqual(pw, env.ADMIN_PASSWORD)) {
+    recordLoginFail(request);
+    return json({ success: false, error: "wrong password" }, 403);
+  }
+  clearLoginFail(request);
+  return json({ success: true, required: true }, 200);
+}
+
 /* 写入接口（/api/receive、/api/push）限速：每 IP 每分钟 WRITE_RATE_LIMIT 次，超出返回 429。
    内存态、实例重启清零，Serverless 多实例下为尽力而为的软限制；用于遏制 token 泄露后被网页/脚本刷库 */
 const WRITE_RATE_LIMIT = 120;
@@ -633,6 +656,14 @@ const NOTIFY_KEY_PREFIX = "notify.";
 const NOTIFY_KEY_END = "notify/";
 const NOTIFY_TYPES = ["verify", "sms", "notify"];
 const NOTIFY_RETRY_MAX = 3;
+/* 接收类型规范化：去重并按固定顺序返回；无有效项 → null（调用方决定拒绝或回退默认） */
+function normalizeNotifyTypeList(raw) {
+  const arr = Array.isArray(raw) ? raw : String(raw === undefined || raw === null ? "" : raw).split(",");
+  const list = arr.map(function (s) { return String(s).trim(); })
+    .filter(function (t) { return NOTIFY_TYPES.indexOf(t) !== -1; });
+  const uniq = NOTIFY_TYPES.filter(function (t) { return list.indexOf(t) !== -1; });
+  return uniq.length ? uniq : null;
+}
 
 /* 渠道定义：字段 → 旧环境变量名 / 是否敏感；need 为「已配置」判定所需字段 */
 const NOTIFY_CHANNELS = {
@@ -716,9 +747,8 @@ function resolveNotifyConfig(env, rows) {
   if (rows) {
     if (rows["notify.enabled"] !== undefined) cfg.enabled = parseSettingBool(rows["notify.enabled"], true);
     if (rows["notify.types"] !== undefined) {
-      const list = String(rows["notify.types"]).split(",").map(function (s) { return s.trim(); })
-        .filter(function (t) { return NOTIFY_TYPES.indexOf(t) !== -1; });
-      if (list.length) cfg.types = list;
+      const list = normalizeNotifyTypeList(rows["notify.types"]);
+      if (list) cfg.types = list;
     }
     if (rows["notify.retry"] !== undefined) {
       const n = parseInt(rows["notify.retry"], 10);
@@ -759,7 +789,9 @@ function resolveNotifyConfig(env, rows) {
           for (const f of Object.keys(spec.fields)) {
             fields[f] = String((t.fields && t.fields[f]) === undefined || (t.fields && t.fields[f]) === null ? "" : t.fields[f]);
           }
-          return { id: String(t.id || ""), channel: t.channel, name: String(t.name || "").slice(0, TOKEN_NAME_MAX), enabled: t.enabled !== false, fields: fields };
+          return { id: String(t.id || ""), channel: t.channel, name: String(t.name || "").slice(0, TOKEN_NAME_MAX), enabled: t.enabled !== false,
+            /* 旧记录无 types → 默认接收全部类型（向后兼容） */
+            types: normalizeNotifyTypeList(t.types) || NOTIFY_TYPES.slice(), fields: fields };
         });
       }
     } catch (e) { cfg.targets = []; }
@@ -880,9 +912,15 @@ async function dispatchNotify(env, msg, opts) {
       });
     }
     if (!list.length) return mode.collect ? [] : undefined;
+    /* 卡片级接收类型：在全局类型规则之后再按各推送自己的类型过滤（取交集）；
+       测试发送（mode._test）绕过规则，便于启用前验证配置 */
+    if (!mode._test) list = list.filter(function (x) { return !x.types || x.types.indexOf(info.type) !== -1; });
+    if (!list.length) return mode.collect ? [] : undefined;
     const out = [];
     for (const tg of list) {
       const clone = { enabled: true, types: NOTIFY_TYPES.slice(), retry: cfg.retry, link: cfg.link, channels: {}, targets: [] };
+      /* 内层按目标自己的类型再判定一次，保证单目标通道复用同一逻辑 */
+      if (Array.isArray(tg.types) && tg.types.length) clone.types = tg.types.slice();
       for (const nm of Object.keys(NOTIFY_CHANNELS)) clone.channels[nm] = { enabled: false, fields: {}, fromDb: true, configured: false };
       const spec = NOTIFY_CHANNELS[tg.channel];
       clone.channels[tg.channel] = {
@@ -1996,8 +2034,8 @@ const DS_TOKENS_CSS = String.raw`
     --ds-color-primary-hover: #116632;
     --ds-color-primary-subtle: #e7f4ec;
     --ds-color-success: #15803d;
-    --ds-color-warning: #b45309;
-    --ds-color-danger: #b91c1c;
+    --ds-color-warning: #ea580c;
+    --ds-color-danger: #dc2626;
     --ds-color-info: #2563eb;
     --ds-color-unread: #15803d;
     --ds-color-disabled: #c7ced4;
@@ -2027,7 +2065,7 @@ const DS_TOKENS_CSS = String.raw`
     --ds-focus-ring: 0 0 0 2px var(--ds-color-link);
     /* 组件令牌（保持原语义，供既有选择器直用） */
     --ds-color-sender: #0f766e;
-    --ds-code-bg: #fef3c7; --ds-code-border: #fcd34d; --ds-code-text: #92400e; --ds-code-hover: #fde68a;
+    --ds-code-bg: #e7f4ec; --ds-code-border: #b7dfc6; --ds-code-text: #116632; --ds-code-hover: #d5ebdd;
     /* ---------- 兼容别名（旧变量 → 令牌；迁移期保留，全部走令牌取值） ---------- */
     --bg: var(--ds-color-bg-page); --card: var(--ds-color-bg-surface);
     --text: var(--ds-color-text); --muted: var(--ds-color-text-secondary); --faint: var(--ds-color-text-tertiary);
@@ -2037,19 +2075,19 @@ const DS_TOKENS_CSS = String.raw`
     --sender: var(--ds-color-sender); --link: var(--ds-color-link);
     --code-bg: var(--ds-code-bg); --code-border: var(--ds-code-border); --code-text: var(--ds-code-text); --code-hover: var(--ds-code-hover);
     --del: var(--ds-color-text-tertiary); --del-hover: var(--ds-color-danger);
-    --tabx: #e8b4b4; --sw-off: var(--ds-color-disabled);
+    --tabx: var(--ds-color-text-tertiary); --sw-off: var(--ds-color-disabled);
   }
   @media (prefers-color-scheme: dark) {
     :root {
       --ds-color-bg-page: #14171a; --ds-color-bg-surface: #1d2126; --ds-color-bg-subtle: #14171a;
       --ds-color-text: #e6e9ec; --ds-color-text-secondary: #9aa3ab; --ds-color-text-tertiary: #6b7480;
       --ds-color-primary: #22a04f; --ds-color-primary-hover: #1a8a41; --ds-color-primary-subtle: #12351f;
-      --ds-color-success: #22a04f; --ds-color-warning: #f59e0b; --ds-color-danger: #f87171;
+      --ds-color-success: #22a04f; --ds-color-warning: #fb923c; --ds-color-danger: #f87171;
       --ds-color-info: #6ea8ff; --ds-color-unread: #22a04f; --ds-color-disabled: #3a424a;
       --ds-color-border: #33393f; --ds-color-border-subtle: #2a3036; --ds-color-divider: #262c31;
       --ds-color-link: #6ea8ff; --ds-color-sender: #4fd1a5;
-      --ds-code-bg: #3a2f14; --ds-code-border: #6b5518; --ds-code-text: #fbd46d; --ds-code-hover: #4a3c1a;
-      --tabx: #8a4a4a;
+      --ds-code-bg: #12351f; --ds-code-border: #2f6a45; --ds-code-text: #86efac; --ds-code-hover: #17452a;
+      --tabx: var(--ds-color-text-tertiary);
     }
   }
   /* 主题三态（data-theme 覆盖系统偏好）：只覆盖 DS 令牌，兼容别名自动跟随 */
@@ -2057,23 +2095,23 @@ const DS_TOKENS_CSS = String.raw`
     --ds-color-bg-page: #14171a; --ds-color-bg-surface: #1d2126; --ds-color-bg-subtle: #14171a;
     --ds-color-text: #e6e9ec; --ds-color-text-secondary: #9aa3ab; --ds-color-text-tertiary: #6b7480;
     --ds-color-primary: #22a04f; --ds-color-primary-hover: #1a8a41; --ds-color-primary-subtle: #12351f;
-    --ds-color-success: #22a04f; --ds-color-warning: #f59e0b; --ds-color-danger: #f87171;
+    --ds-color-success: #22a04f; --ds-color-warning: #fb923c; --ds-color-danger: #f87171;
     --ds-color-info: #6ea8ff; --ds-color-unread: #22a04f; --ds-color-disabled: #3a424a;
     --ds-color-border: #33393f; --ds-color-border-subtle: #2a3036; --ds-color-divider: #262c31;
     --ds-color-link: #6ea8ff; --ds-color-sender: #4fd1a5;
-    --ds-code-bg: #3a2f14; --ds-code-border: #6b5518; --ds-code-text: #fbd46d; --ds-code-hover: #4a3c1a;
-    --tabx: #8a4a4a;
+    --ds-code-bg: #12351f; --ds-code-border: #2f6a45; --ds-code-text: #86efac; --ds-code-hover: #17452a;
+    --tabx: var(--ds-color-text-tertiary);
   }
   html[data-theme="light"] {
     --ds-color-bg-page: #f5f6f7; --ds-color-bg-surface: #fff; --ds-color-bg-subtle: #f5f6f7;
     --ds-color-text: #20242a; --ds-color-text-secondary: #6b7280; --ds-color-text-tertiary: #9aa3ab;
     --ds-color-primary: #15803d; --ds-color-primary-hover: #116632; --ds-color-primary-subtle: #e7f4ec;
-    --ds-color-success: #15803d; --ds-color-warning: #b45309; --ds-color-danger: #b91c1c;
+    --ds-color-success: #15803d; --ds-color-warning: #ea580c; --ds-color-danger: #dc2626;
     --ds-color-info: #2563eb; --ds-color-unread: #15803d; --ds-color-disabled: #c7ced4;
     --ds-color-border: #d8dce0; --ds-color-border-subtle: #e3e6e9; --ds-color-divider: #eef1f3;
     --ds-color-link: #2563eb; --ds-color-sender: #0f766e;
-    --ds-code-bg: #fef3c7; --ds-code-border: #fcd34d; --ds-code-text: #92400e; --ds-code-hover: #fde68a;
-    --tabx: #e8b4b4;
+    --ds-code-bg: #e7f4ec; --ds-code-border: #b7dfc6; --ds-code-text: #116632; --ds-code-hover: #d5ebdd;
+    --tabx: var(--ds-color-text-tertiary);
   }
   :root { --input-border: var(--ds-color-border); }
 `;
@@ -2233,7 +2271,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .toolbar, .pager { flex-wrap: wrap; }
   .searchwrap { position: relative; flex: 1; display: flex; min-width: 140px; }
   .searchwrap input { width: 100%; }
-  .clr { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); border: none; background: none;
+  .searchwrap .clr { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); border: none; background: none;
          color: var(--faint); font-size: 16px; cursor: pointer; padding: 0 4px; line-height: 1; }
   .clr:hover { color: var(--text); }
   .tbtn { border: 1px solid var(--border); background: var(--card); color: var(--text); border-radius: 8px;
@@ -2274,7 +2312,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .selbar span { font-size: 13px; color: var(--muted); }
   /* 来源徽章配色 */
   .srctag.s-notify { background: #2563eb; color: #fff; }
-  .srctag.s-alert { background: #b45309; color: #fff; }
+  .srctag.s-alert { background: var(--ds-color-warning); color: #fff; }
   .srctag.s-cron { background: #7c3aed; color: #fff; }
   .srctag.s-other { background: #475569; color: #fff; }
   /* Toast 堆叠 */
@@ -2302,7 +2340,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .detail-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
   /* 收藏 / 未读 */
   .star { border: none; background: none; color: var(--faint); cursor: pointer; font-size: 15px; padding: 0 2px; margin-left: 2px; }
-  .star.on { color: #d97706; }
+  .star.on { color: var(--ds-color-warning); }
   .undot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); margin-left: 6px; vertical-align: middle; }
   .tbtn.on { border-color: var(--accent); color: var(--accent); background: var(--badge-bg); }
   mark { background: var(--code-bg); color: var(--code-text); border-radius: 3px; padding: 0 2px; }
@@ -2343,7 +2381,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .tokrow.revoked .tokbadge { opacity: .6; }
   .tokacts { display: flex; gap: 6px; }
   .toknote { font-size: 12px; line-height: 1.6; padding: 8px 10px; border-radius: 8px;
-             background: rgba(255,180,0,.14); margin: 0 0 10px; }
+             background: var(--ds-color-bg-subtle); border-left: 3px solid var(--ds-color-warning);
+             color: var(--ds-color-text-secondary); margin: 0 0 10px; }
   .toknewrow { display: flex; gap: 8px; margin: 12px 0 4px; flex-wrap: wrap; }
   .toknewrow input { flex: 1; min-width: 0; }
   .toknewrow select, .toknewrow input[type="date"] { flex: 1; min-width: 0; }
@@ -2361,10 +2400,33 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .setrow input[type="text"], .setrow input[type="password"], .setrow input[type="number"], .setrow select {
     flex: 1 1 140px; min-width: 0; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px;
     background: var(--card); color: var(--text); font-size: 13px; }
-  .setrow .clr { flex: 0 0 auto; font-size: 12px; display: flex; align-items: center; gap: 4px; color: var(--muted); }
+  .setrow .clr { position: static; right: auto; top: auto; transform: none; flex: 0 0 auto; font-size: 12px; display: inline-flex; align-items: center; gap: 4px; color: var(--muted); white-space: nowrap; }
+  .setrow #scdnds, .setrow #scdnde { flex: 0 1 76px; min-width: 60px; }
   .setrow .settest { flex: 0 0 auto; }
+  /* 通知推送：已配置列表 / 方案选择 / 第二层编辑弹层 */
+  .pushlist { display: flex; flex-direction: column; gap: 8px; margin: 6px 0 4px; }
+  .pushcard { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--bg); }
+  .pushcard--off { opacity: .62; }
+  .pushcard-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .pushcard-name { font-weight: 600; font-size: 13.5px; word-break: break-all; }
+  .pushbadge { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: rgba(127,127,127,.15); white-space: nowrap; }
+  .pushbadge.on { background: var(--badge-bg); color: var(--accent); }
+  .pushbadge.off { color: var(--muted); }
+  .pushcard-meta { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .pushcard-fields { font-size: 11.5px; color: var(--faint); margin-top: 2px; word-break: break-all; }
+  .pushcard-acts { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .pushempty { font-size: 12.5px; color: var(--muted); padding: 10px 0; }
+  .pushpicks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 6px 0 4px; }
+  .pushpick { border: 1px solid var(--border); background: var(--card); color: var(--text); border-radius: 10px;
+              padding: 12px 10px; font-size: 13px; cursor: pointer; min-height: 44px; }
+  .pushpick:hover { border-color: var(--accent); color: var(--accent); }
+  .pushchan { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px;
+              background: var(--badge-bg); color: var(--accent); margin-bottom: 6px; }
+  .pushmodal { z-index: 140; }
+  .pushsheet { max-width: 520px; max-height: 86vh; overflow: auto; }
+  .pushsheet .setrow > label { min-width: 72px; }
   .setnote { font-size: 12px; opacity: .65; line-height: 1.6; margin: 4px 0 8px; }
-  .tokwarn { color: #c0392b; font-size: 13px; font-weight: 600; margin: 10px 0; }
+  .tokwarn { color: var(--ds-color-danger); font-size: 13px; font-weight: 600; margin: 10px 0; }
   @media (min-width: 561px) {
     input[type=search], input[type=number], select { font-size: 14px; }
   }
@@ -2435,18 +2497,19 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     font-weight: var(--ds-weight-medium); padding: 1px 8px; border-radius: var(--ds-radius-pill);
     background: var(--ds-color-bg-subtle); color: var(--ds-color-text-secondary); white-space: nowrap; }
   .ds-badge--success { background: var(--ds-color-primary-subtle); color: var(--ds-color-success); }
-  .ds-badge--warning { background: rgba(180,83,9,.12); color: var(--ds-color-warning); }
-  .ds-badge--danger { background: rgba(185,28,28,.12); color: var(--ds-color-danger); }
+  .ds-badge--warning { background: rgba(234,88,12,.12); color: var(--ds-color-warning); }
+  .ds-badge--danger { background: rgba(220,38,38,.12); color: var(--ds-color-danger); }
   .ds-badge--info { background: rgba(37,99,235,.12); color: var(--ds-color-info); }
   /* 配置作用域徽章：全局 / 本浏览器（图标+文字，不只依赖颜色） */
   .ds-scope { display: inline-flex; align-items: center; gap: 4px; font-size: var(--ds-text-xs);
     padding: 1px 8px; border-radius: var(--ds-radius-pill); border: var(--ds-border-w) solid var(--ds-color-border); }
   .ds-scope--global { color: var(--ds-color-info); }
   .ds-scope--browser { color: var(--ds-color-warning); }
-  .ds-alert { display: flex; gap: var(--ds-space-2); align-items: flex-start; font-size: var(--ds-text-xs);
+  .ds-alert { display: block; font-size: var(--ds-text-xs);
     line-height: var(--ds-leading); padding: var(--ds-space-3) var(--ds-space-3);
     border-radius: var(--ds-radius-md); border-left: 3px solid var(--ds-color-info);
     background: var(--ds-color-bg-subtle); color: var(--ds-color-text-secondary); margin: var(--ds-space-3) 0; }
+  .ds-alert b { font-weight: 600; color: var(--ds-color-text); }
   .ds-alert--warning { border-left-color: var(--ds-color-warning); }
   .ds-alert--danger { border-left-color: var(--ds-color-danger); color: var(--ds-color-danger); }
   .ds-empty { text-align: center; color: var(--ds-color-text-tertiary); padding: var(--ds-space-7) var(--ds-space-4);
@@ -2459,6 +2522,18 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   input:checked + .ds-switch { background: var(--ds-color-primary); border-color: var(--ds-color-primary); }
   input:checked + .ds-switch::after { transform: translateX(18px); }
   .ds-check, .ds-radio { width: 16px; height: 16px; accent-color: var(--ds-color-primary); cursor: pointer; }
+  /* 重要操作密码确认层（独立于通用弹层，避免覆盖设置中心的未保存内容） */
+  .pwdmodal { position: fixed; inset: 0; background: rgba(0,0,0,.42); display: flex; align-items: center;
+    justify-content: center; z-index: 130; padding: var(--ds-space-5); }
+  .pwdmodal[hidden] { display: none; }
+  .pwdsheet { width: 100%; max-width: 380px; background: var(--ds-color-bg-surface); color: var(--ds-color-text);
+    border: var(--ds-border-w) solid var(--ds-color-border-subtle); border-radius: var(--ds-radius-lg);
+    padding: var(--ds-space-5); box-shadow: 0 12px 32px rgba(0,0,0,.18); }
+  .pwdsheet h3 { margin: 0 0 var(--ds-space-2); font-size: var(--ds-text-md); font-weight: var(--ds-weight-medium); }
+  .pwdhelp { margin: 0 0 var(--ds-space-3); font-size: var(--ds-text-sm); line-height: var(--ds-leading);
+    color: var(--ds-color-text-secondary); }
+  .pwderr { margin-top: var(--ds-space-2); font-size: var(--ds-text-xs); color: var(--ds-color-danger); }
+  .pwdacts { display: flex; justify-content: flex-end; gap: var(--ds-space-2); margin-top: var(--ds-space-4); }
   .ds-modal { position: fixed; inset: 0; background: rgba(0,0,0,.42); display: flex; align-items: center;
     justify-content: center; z-index: 100; padding: var(--ds-space-5); }
   .ds-modal[hidden] { display: none; }
@@ -2466,9 +2541,11 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     border-radius: var(--ds-radius-xl); width: 100%; max-width: 560px; max-height: 86vh; overflow: auto;
     padding: var(--ds-space-5); border: var(--ds-border-w) solid var(--ds-color-border); }
   .ds-dialog-actions { display: flex; flex-wrap: wrap; gap: var(--ds-space-3); justify-content: flex-end; margin-top: var(--ds-space-4); }
-  /* 设置中心：分组标签行与行内复选框（窄屏可横向滚动、不挤压） */
-  .ds-tabs { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 8px; margin-bottom: 8px;
+  /* 设置中心：分组标签行（独立胶囊，桌面横向滚动、窄屏两列网格，保证间距清晰可点） */
+  .ds-tabs { display: flex; gap: 8px; overflow-x: auto; padding: 2px 0 12px; margin-bottom: 12px;
+             border-bottom: 1px solid var(--ds-color-divider);
              -webkit-overflow-scrolling: touch; scrollbar-width: thin; }
+  .ds-tabs > .tab { min-height: 32px; padding: 5px 14px; }
   .ds-tabs::-webkit-scrollbar { height: 3px; }
   .ds-inline { display: inline-flex; align-items: center; gap: 4px; margin-right: 10px; font-size: var(--ds-text-sm); }
   /* 设置表单：字段行统一走令牌（标签在上、说明在下，窄屏自动堆叠） */
@@ -2544,7 +2621,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .phone { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
   .tag { font-size: 11px; border-radius: 5px; padding: 1px 7px; background: var(--bg); color: var(--muted); white-space: nowrap; }
   .tag.type { background: rgba(37,99,235,.10); color: var(--ds-color-info); }
-  .tag.unread-tag { background: rgba(180,83,9,.12); color: var(--ds-color-warning); }
+  .tag.unread-tag { background: var(--ds-color-primary-subtle); color: var(--ds-color-primary); }
   .tag.star-tag { color: var(--ds-color-warning); background: transparent; }
   .msg-time { margin-left: auto; color: var(--faint); font-size: 11px; white-space: nowrap; font-variant-numeric: tabular-nums; }
   .content.summary { margin: 0 0 7px; font-size: 13px; line-height: 1.6; color: var(--muted); white-space: pre-wrap; }
@@ -2583,14 +2660,14 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .side-title { font-weight: 700; font-size: 13px; margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
   .side-title .mini-link { font-size: 12px; font-weight: 500; color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; }
   .tabs { display: flex; flex-direction: column; gap: 0; overflow: visible; padding: 0; margin: 0; }
-  .tab { display: flex; align-items: center; gap: 8px; flex: none; padding: 8px 0; border: 0; border-bottom: 1px solid var(--row-border);
+  .tabs > .tab { display: flex; align-items: center; gap: 8px; flex: none; padding: 8px 0; border: 0; border-bottom: 1px solid var(--row-border);
          border-radius: 0; background: none; cursor: pointer; font-size: 12px; color: var(--text); white-space: normal; text-align: left; }
-  .tab:last-child { border-bottom: 0; }
-  .tab.active { background: none; color: var(--accent); font-weight: 600; }
-  .tab .tname { font-weight: 600; }
-  .tab .tsub { font-size: 11px; color: var(--faint); font-weight: 400; }
-  .tab .tcount { margin-left: auto; font-size: 11px; color: var(--faint); white-space: nowrap; }
-  .tab .tabop { margin-left: 0; font-size: 12px; padding: 2px 3px; }
+  .tabs > .tab:last-child { border-bottom: 0; }
+  .tabs > .tab.active { background: none; color: var(--accent); font-weight: 600; }
+  .tabs > .tab .tname { font-weight: 600; }
+  .tabs > .tab .tsub { font-size: 11px; color: var(--faint); font-weight: 400; }
+  .tabs > .tab .tcount { margin-left: auto; font-size: 11px; color: var(--faint); white-space: nowrap; }
+  .tabs > .tab .tabop { margin-left: 0; font-size: 12px; padding: 2px 3px; }
   .settings-rows, .side-rows { display: flex; flex-direction: column; gap: 2px; }
   .settings-mini, .side-row { display: flex; justify-content: space-between; align-items: center; gap: 8px;
                               padding: 7px 0; border-bottom: 1px solid var(--row-border); font-size: 12px; color: var(--muted); }
@@ -2663,12 +2740,39 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     .msg-actions { align-self: flex-end; }
     .code-chip .copy { min-height: 26px; padding: 3px 10px; }
     .filters .searchwrap { width: 100%; margin-left: 0; }
-    .selbar { padding: 8px 12px; }
-    .selbar .spacer { display: none; }
+    /* 批量操作条：宽度贴合列表、隐藏冗余提示、按钮等宽三列，避免参差换行 */
+    .selbar { width: auto; padding: 10px 12px; gap: 8px; }
+    .selbar .select-hint { display: none; }
+    .selbar .spacer { display: block; flex: 0 0 100%; height: 0; }
+    .selbar .count { margin-left: auto; }
+    .selbar .tbtn { flex: 1 1 calc(33.333% - 8px); min-width: 84px; min-height: 34px;
+                    display: inline-flex; align-items: center; justify-content: center; text-align: center; }
+    /* 设置分组标签：两列网格，间距与点击区域统一 */
+    .ds-tabs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px;
+               overflow: visible; padding: 0 0 12px; }
+    .ds-tabs > .tab { width: 100%; justify-content: center; text-align: center;
+                      min-height: 38px; padding: 7px 10px; }
     .modal { align-items: flex-end; padding: 0; }
     .sheet { border-radius: 18px 18px 0 0; max-height: 88dvh; }
-    .modal-foot { align-items: stretch; }
-    .modal-foot .foot-left, .modal-foot .foot-right { width: 100%; justify-content: flex-end; }
+    /* 详情弹窗按钮：统一等宽网格；删除占满一行，关闭/标记已读固定在底部 */
+    .modal-foot { flex-direction: column; align-items: stretch; gap: 10px;
+                  padding: 12px 14px calc(14px + env(safe-area-inset-bottom, 0px)); }
+    .modal-foot .foot-left, .modal-foot .foot-right { width: 100%; display: grid;
+                  grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; justify-content: stretch; }
+    .modal-foot .foot-left #ddel { grid-column: 1 / -1; }
+    .modal-foot .tbtn { width: 100%; min-height: 36px; display: inline-flex;
+                        align-items: center; justify-content: center; text-align: center; }
+    /* 设置底部操作：保存整行主按钮，恢复默认/取消并排（取消隐藏时不留空位） */
+    .ds-dialog-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-start; margin-top: 14px; }
+    .ds-dialog-actions .ds-btn { flex: 0 0 auto; min-height: 38px; }
+    .ds-dialog-actions #scrcancel { flex: 1 1 auto; }
+    .ds-dialog-actions #scrsave { flex: 1 1 100%; }
+    /* 推送卡片操作：两列等宽，避免按钮参差换行 */
+    .pushcard-acts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .pushcard-acts .tbtn { width: 100%; min-height: 36px; display: inline-flex;
+                           align-items: center; justify-content: center; text-align: center; }
+    .pushpicks { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .pushsheet { max-width: none; max-height: 88dvh; }
   }
 </style>
 </head>
@@ -2788,6 +2892,24 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     <div id="modalbody"></div>
   </div>
 </div>
+<div class="pwdmodal" id="pwdmodal" hidden>
+  <div class="pwdsheet" role="dialog" aria-modal="true" aria-labelledby="pwdtitle">
+    <h3 id="pwdtitle"></h3>
+    <p class="pwdhelp" id="pwdhelp"></p>
+    <input class="ds-input" id="pwdinput" type="password" autocomplete="current-password" style="width:100%">
+    <div class="pwderr" id="pwderr" hidden></div>
+    <div class="pwdacts">
+      <button class="ds-btn" id="pwdcancel" type="button"></button>
+      <button class="ds-btn ds-btn--primary" id="pwdok" type="button"></button>
+    </div>
+  </div>
+</div>
+<div class="pwdmodal pushmodal" id="pushmodal" hidden>
+  <div class="pwdsheet pushsheet" role="dialog" aria-modal="true" aria-labelledby="pushtitle">
+    <h3 id="pushtitle"></h3>
+    <div id="pushbody"></div>
+  </div>
+</div>
 <script>
 (function () {
   var SITE_NAME = __SITE_NAME_JSON__;
@@ -2806,6 +2928,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     inited: false, unread: 0, limit: 10, range: "", notifiedId: 0,
     cursor: "", seen: {}, loadingMore: false, loadMoreDepth: 0,
     selectMode: false, selected: {}, lastQ: "", starOnly: false, unreadOnly: false, readOnly: false, filterMode: "all", lastList: [],
+    pwdOn: true,
     labels: (function () { try { return JSON.parse(localStorage.getItem("sms_labels") || "{}") || {}; } catch (e) { return {}; } })(),
     autoCopy: (function () { try { return localStorage.getItem("sms_autocopy") !== "0"; } catch (e) { return true; } })(),
     notify: (function () { try { return localStorage.getItem("sms_notify") !== "0"; } catch (e) { return true; } })(),
@@ -2897,6 +3020,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       soundOnMsg: "已开启新消息提示音", soundOffMsg: "已关闭新消息提示音",
       clearedN: "已清空 {n} 条",
       confirmDelN: "确认删除选中的 {n} 条？",
+    pwdTitle: "验证登录密码",
+    pwdHelp: "该操作会修改敏感配置或删除数据，请输入登录密码确认。",
+    pwdPh: "登录密码",
+    pwdWrong: "密码不正确",
+    pwdNeed: "请输入密码",
+    pwdTooMany: "尝试次数过多，请稍后再试",
+    pwdVerify: "确认",
       scopeDevice: "当前设备的消息", scopeFilter: "当前筛选结果", scopeAll: "全部消息",
       confirmClear: "确认清空{scope}？将软删除匹配的所有消息（此操作不可撤销）。",
       confirmClear2: "再次确认：真的要清空{scope}吗？",
@@ -2958,6 +3088,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       soundOnMsg: "Sound enabled", soundOffMsg: "Sound disabled",
       clearedN: "Cleared {n}",
       confirmDelN: "Delete {n} selected message(s)?",
+    pwdTitle: "Verify login password",
+    pwdHelp: "This action changes sensitive settings or deletes data. Enter your login password to confirm.",
+    pwdPh: "Login password",
+    pwdWrong: "Incorrect password",
+    pwdNeed: "Password required",
+    pwdTooMany: "Too many attempts, try again later",
+    pwdVerify: "Confirm",
       scopeDevice: "this device's messages", scopeFilter: "the current filter", scopeAll: "all messages",
       confirmClear: "Clear {scope}? All matching messages will be soft-deleted (cannot be undone).",
       confirmClear2: "Really clear {scope}?",
@@ -3019,6 +3156,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       soundOnMsg: "已開啟新訊息提示音", soundOffMsg: "已關閉新訊息提示音",
       clearedN: "已清空 {n} 則",
       confirmDelN: "確認刪除選取的 {n} 則？",
+    pwdTitle: "驗證登入密碼",
+    pwdHelp: "此操作會修改敏感設定或刪除資料，請輸入登入密碼確認。",
+    pwdPh: "登入密碼",
+    pwdWrong: "密碼不正確",
+    pwdNeed: "請輸入密碼",
+    pwdTooMany: "嘗試次數過多，請稍後再試",
+    pwdVerify: "確認",
       scopeDevice: "此裝置的訊息", scopeFilter: "目前篩選結果", scopeAll: "全部訊息",
       confirmClear: "確認清空{scope}？將軟刪除符合的所有訊息（此操作無法復原）。",
       confirmClear2: "再次確認：真的要清空{scope}嗎？",
@@ -3080,6 +3224,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       soundOnMsg: "新着通知音を有効にしました", soundOffMsg: "新着通知音を無効にしました",
       clearedN: "{n} 件消去しました",
       confirmDelN: "選択した {n} 件を削除しますか？",
+    pwdTitle: "ログインパスワードの確認",
+    pwdHelp: "この操作は機密設定の変更やデータ削除を伴います。確認のためログインパスワードを入力してください。",
+    pwdPh: "ログインパスワード",
+    pwdWrong: "パスワードが正しくありません",
+    pwdNeed: "パスワードを入力してください",
+    pwdTooMany: "試行回数が多すぎます。しばらくしてから再試行してください",
+    pwdVerify: "確認",
       scopeDevice: "このデバイスのメッセージ", scopeFilter: "現在の絞り込み結果", scopeAll: "すべてのメッセージ",
       confirmClear: "{scope}を消去しますか？一致するすべてのメッセージがソフト削除されます（取り消せません）。",
       confirmClear2: "再確認：本当に{scope}を消去しますか？",
@@ -3141,6 +3292,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       soundOnMsg: "새 메시지 알림음 켜짐", soundOffMsg: "새 메시지 알림음 꺼짐",
       clearedN: "{n}건 비움",
       confirmDelN: "선택한 {n}건을 삭제할까요?",
+    pwdTitle: "로그인 비밀번호 확인",
+    pwdHelp: "이 작업은 민감한 설정을 변경하거나 데이터를 삭제합니다. 확인하려면 로그인 비밀번호를 입력하세요.",
+    pwdPh: "로그인 비밀번호",
+    pwdWrong: "비밀번호가 올바르지 않습니다",
+    pwdNeed: "비밀번호를 입력하세요",
+    pwdTooMany: "시도 횟수가 너무 많습니다. 잠시 후 다시 시도하세요",
+    pwdVerify: "확인",
       scopeDevice: "이 기기의 메시지", scopeFilter: "현재 필터 결과", scopeAll: "전체 메시지",
       confirmClear: "{scope}을(를) 비울까요? 일치하는 모든 메시지가 소프트 삭제됩니다(되돌릴 수 없습니다).",
       confirmClear2: "다시 확인: 정말 {scope}을(를) 비울까요?",
@@ -3202,6 +3360,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       soundOnMsg: "Sonido activado", soundOffMsg: "Sonido desactivado",
       clearedN: "{n} vaciados",
       confirmDelN: "¿Eliminar los {n} mensajes seleccionados?",
+    pwdTitle: "Verificar contraseña de acceso",
+    pwdHelp: "Esta acción modifica ajustes sensibles o elimina datos. Introduce la contraseña de acceso para confirmar.",
+    pwdPh: "Contraseña de acceso",
+    pwdWrong: "Contraseña incorrecta",
+    pwdNeed: "Introduce la contraseña",
+    pwdTooMany: "Demasiados intentos, inténtalo más tarde",
+    pwdVerify: "Confirmar",
       scopeDevice: "los mensajes de este dispositivo", scopeFilter: "el filtro actual", scopeAll: "todos los mensajes",
       confirmClear: "¿Vaciar {scope}? Todos los mensajes que coincidan se borrarán de forma suave (no se puede deshacer).",
       confirmClear2: "Confirmar de nuevo: ¿seguro que quieres vaciar {scope}?",
@@ -3263,6 +3428,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       soundOnMsg: "Son activé", soundOffMsg: "Son désactivé",
       clearedN: "{n} vidés",
       confirmDelN: "Supprimer les {n} messages sélectionnés ?",
+    pwdTitle: "Vérifier le mot de passe de connexion",
+    pwdHelp: "Cette action modifie des réglages sensibles ou supprime des données. Saisissez le mot de passe de connexion pour confirmer.",
+    pwdPh: "Mot de passe",
+    pwdWrong: "Mot de passe incorrect",
+    pwdNeed: "Mot de passe requis",
+    pwdTooMany: "Trop de tentatives, réessayez plus tard",
+    pwdVerify: "Confirmer",
       scopeDevice: "les messages de cet appareil", scopeFilter: "le filtre actuel", scopeAll: "tous les messages",
       confirmClear: "Vider {scope} ? Tous les messages correspondants seront supprimés logiquement (irréversible).",
       confirmClear2: "Confirmer à nouveau : vider vraiment {scope} ?",
@@ -3324,6 +3496,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       soundOnMsg: "Ton aktiviert", soundOffMsg: "Ton deaktiviert",
       clearedN: "{n} geleert",
       confirmDelN: "{n} ausgewählte Nachricht(en) löschen?",
+    pwdTitle: "Anmeldepasswort bestätigen",
+    pwdHelp: "Diese Aktion ändert sensible Einstellungen oder löscht Daten. Zur Bestätigung das Anmeldepasswort eingeben.",
+    pwdPh: "Anmeldepasswort",
+    pwdWrong: "Falsches Passwort",
+    pwdNeed: "Passwort erforderlich",
+    pwdTooMany: "Zu viele Versuche, später erneut versuchen",
+    pwdVerify: "Bestätigen",
       scopeDevice: "die Nachrichten dieses Geräts", scopeFilter: "den aktuellen Filter", scopeAll: "alle Nachrichten",
       confirmClear: "{scope} leeren? Alle passenden Nachrichten werden soft-gelöscht (kann nicht rückgängig gemacht werden).",
       confirmClear2: "Erneut bestätigen: {scope} wirklich leeren?",
@@ -3385,6 +3564,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       soundOnMsg: "Som ativado", soundOffMsg: "Som desativado",
       clearedN: "{n} limpas",
       confirmDelN: "Excluir as {n} mensagens selecionadas?",
+    pwdTitle: "Verificar senha de login",
+    pwdHelp: "Esta ação altera configurações sensíveis ou exclui dados. Informe a senha de login para confirmar.",
+    pwdPh: "Senha de login",
+    pwdWrong: "Senha incorreta",
+    pwdNeed: "Informe a senha",
+    pwdTooMany: "Muitas tentativas, tente novamente mais tarde",
+    pwdVerify: "Confirmar",
       scopeDevice: "as mensagens deste dispositivo", scopeFilter: "o filtro atual", scopeAll: "todas as mensagens",
       confirmClear: "Limpar {scope}? Todas as mensagens correspondentes serão excluídas de forma suave (não pode ser desfeito).",
       confirmClear2: "Confirmar novamente: realmente limpar {scope}?",
@@ -4700,7 +4886,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   /* 仪表盘新版界面文案（九语种） */
   var V2_I18N = {
     "zh-CN": {
-      brandSub: "消息中心", pageTitle: "消息中心", pageSub: "集中查看设备短信，快速处理未读消息",
+      brandSub: "消息中心", pageTitle: "消息中心", pageSub: "一驿过一驿，驿骑如星流",
       listTitle: "短信列表", refresh: "刷新", settingsOverview: "设置概览", openSettings: "打开设置中心",
       quickOverview: "快捷概览", viewStats: "查看统计", selectHint: "右键或长按消息可多选",
       selAllList: "选择当前列表", tagVerify: "验证码", allDevices: "全部设备",
@@ -4709,12 +4895,24 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scBrowserPrefs: "本浏览器偏好", scBrowserPrefsHelp: "消息开关与免打扰只影响当前浏览器，与全局通知规则互不影响。",
       scNotifyChannels: "通知渠道", scChannelsN: "已配置 {n} 个", scMinN: "{n} 分钟", scDaysN: "{n} 天", statToday: "今日接收",
       scTargetOff: "停用", scTargetRename: "重命名", scTargetLegacy: "该渠道已启用多目标，上面的单目标字段不再参与发送。",
-      scAddTarget: "添加目标", scTargetNamePh: "目标名称（如 值班群）", scTargetAdded: "已添加目标，保存后生效",
+      scAddTarget: "添加目标", scTargetNamePh: "推送名称（如 值班群）", scTargetAdded: "已添加目标，保存后生效",
       scTargetRemoved: "已移除目标，保存后生效", scTargetSaveFirst: "请先保存目标再发送测试", scMultiTarget: "多目标",
-      copyFail: "复制失败，请手动选择", exportHint: "导出当前筛选结果"
+      copyFail: "复制失败，请手动选择", exportHint: "导出当前筛选结果",
+      scAddPush: "添加推送", scPushList: "已配置推送",
+      scPushListHelp: "这里只显示已创建好的推送；点击「编辑」可修改名称、配置与接收类型。",
+      scPushEmpty: "还没有推送，点击「添加推送」创建第一条。",
+      scPickChannel: "选择推送方案", scPickChannelHelp: "先选择推送方案，选中后再填写对应的配置信息。",
+      scPushName: "推送名称", scPushEditor: "编辑推送", scPushTypes: "接收类型",
+      scPushTypesHelp: "只接收勾选的类型，与全局规则同时生效（默认全部接收）。",
+      scPushRulesHelp: "未填写的内容按「不修改」处理；已保存的敏感字段只显示脱敏结果。",
+      scPushNameRequired: "请填写推送名称", scPushNeedTypes: "请至少选择一种接收类型",
+      scPushFieldNeed: "请填写「{f}」", scPushAdded: "已添加推送，保存后生效", scPushUpdated: "已更新推送，保存后生效",
+      scEdit: "编辑", scBack: "上一步", scEnvChannels: "其他已配置渠道",
+      scEnvChannelsHelp: "这些渠道只有单份配置（未拆分为推送卡片），仍会按全局规则发送；可在此停用或测试。",
+      scImportEnvHelp: "把环境变量中已有的通知配置写入数据库，便于后续管理。"
     },
     "zh-TW": {
-      brandSub: "訊息中心", pageTitle: "訊息中心", pageSub: "集中查看裝置簡訊，快速處理未讀訊息",
+      brandSub: "訊息中心", pageTitle: "訊息中心", pageSub: "一驛過一驛，驛騎如星流",
       listTitle: "簡訊列表", refresh: "重新整理", settingsOverview: "設定概覽", openSettings: "開啟設定中心",
       quickOverview: "快捷概覽", viewStats: "查看統計", selectHint: "右鍵或長按訊息可多選",
       selAllList: "選擇目前清單", tagVerify: "驗證碼", allDevices: "全部裝置",
@@ -4723,12 +4921,24 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scBrowserPrefs: "本瀏覽器偏好", scBrowserPrefsHelp: "訊息開關與免打擾只影響目前瀏覽器，與全域通知規則互不影響。",
       scNotifyChannels: "通知管道", scChannelsN: "已設定 {n} 個", scMinN: "{n} 分鐘", scDaysN: "{n} 天", statToday: "今日接收",
       scTargetOff: "停用", scTargetRename: "重新命名", scTargetLegacy: "此管道已啟用多目標，上方的單目標欄位不再參與傳送。",
-      scAddTarget: "新增目標", scTargetNamePh: "目標名稱（例如 值班群）", scTargetAdded: "已新增目標，儲存後生效",
+      scAddTarget: "新增目標", scTargetNamePh: "推送名稱（例如 值班群）", scTargetAdded: "已新增目標，儲存後生效",
       scTargetRemoved: "已移除目標，儲存後生效", scTargetSaveFirst: "請先儲存目標再傳送測試", scMultiTarget: "多目標",
-      copyFail: "複製失敗，請手動選取", exportHint: "匯出目前篩選結果"
+      copyFail: "複製失敗，請手動選取", exportHint: "匯出目前篩選結果",
+      scAddPush: "新增推送", scPushList: "已設定的推送",
+      scPushListHelp: "這裡只顯示已建立好的推送；點「編輯」可修改名稱、設定與接收類型。",
+      scPushEmpty: "還沒有推送，點「新增推送」建立第一筆。",
+      scPickChannel: "選擇推送方案", scPickChannelHelp: "先選擇推送方案，選取後再填寫對應的設定資訊。",
+      scPushName: "推送名稱", scPushEditor: "編輯推送", scPushTypes: "接收類型",
+      scPushTypesHelp: "只接收勾選的類型，與全域規則同時生效（預設全部接收）。",
+      scPushRulesHelp: "未填寫的內容視為「不修改」；已儲存的機密欄位只顯示去識別化結果。",
+      scPushNameRequired: "請填寫推送名稱", scPushNeedTypes: "請至少選擇一種接收類型",
+      scPushFieldNeed: "請填寫「{f}」", scPushAdded: "已新增推送，儲存後生效", scPushUpdated: "已更新推送，儲存後生效",
+      scEdit: "編輯", scBack: "上一步", scEnvChannels: "其他已設定管道",
+      scEnvChannelsHelp: "這些管道只有單份設定（未拆分為推送卡片），仍會依全域規則傳送；可在此停用或測試。",
+      scImportEnvHelp: "把環境變數中既有的通知設定寫入資料庫，便於後續管理。"
     },
     en: {
-      brandSub: "Message center", pageTitle: "Message center", pageSub: "Review device SMS and clear unread messages quickly",
+      brandSub: "Message center", pageTitle: "Message center", pageSub: "From post to post, like shooting stars.",
       listTitle: "Messages", refresh: "Refresh", settingsOverview: "Settings overview", openSettings: "Open settings",
       quickOverview: "Quick overview", viewStats: "View stats", selectHint: "Right-click or long-press a message to multi-select",
       selAllList: "Select current list", tagVerify: "Verification code", allDevices: "All devices",
@@ -4737,12 +4947,24 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scBrowserPrefs: "Browser preferences", scBrowserPrefsHelp: "Message toggles and quiet hours only affect this browser; global notification rules are unchanged.",
       scNotifyChannels: "Notification channels", scChannelsN: "{n} configured", scMinN: "{n} min", scDaysN: "{n} days", statToday: "Received today",
       scTargetOff: "Disable", scTargetRename: "Rename", scTargetLegacy: "Multiple targets are enabled; the single-target fields above are no longer used for sending.",
-      scAddTarget: "Add target", scTargetNamePh: "Target name (e.g. on-call group)", scTargetAdded: "Target added; save to apply",
+      scAddTarget: "Add target", scTargetNamePh: "Push name (e.g. on-call group)", scTargetAdded: "Target added; save to apply",
       scTargetRemoved: "Target removed; save to apply", scTargetSaveFirst: "Save the target before sending a test", scMultiTarget: "Multi-target",
-      copyFail: "Copy failed. Please select it manually", exportHint: "Exports the current filter"
+      copyFail: "Copy failed. Please select it manually", exportHint: "Exports the current filter",
+      scAddPush: "Add push", scPushList: "Configured pushes",
+      scPushListHelp: "Only created pushes are listed. Click Edit to change the name, configuration or accepted types.",
+      scPushEmpty: "No pushes yet. Click \"Add push\" to create one.",
+      scPickChannel: "Choose a provider", scPickChannelHelp: "Pick a provider first; its configuration fields appear next.",
+      scPushName: "Push name", scPushEditor: "Edit push", scPushTypes: "Accepted types",
+      scPushTypesHelp: "Only ticked types are delivered, together with the global rules (all types by default).",
+      scPushRulesHelp: "Leave a field empty to keep the current value; stored sensitive fields show a masked value only.",
+      scPushNameRequired: "Enter a push name", scPushNeedTypes: "Select at least one accepted type",
+      scPushFieldNeed: "Enter \"{f}\"", scPushAdded: "Push added; save to apply", scPushUpdated: "Push updated; save to apply",
+      scEdit: "Edit", scBack: "Back", scEnvChannels: "Other configured channels",
+      scEnvChannelsHelp: "These channels have a single configuration (not split into push cards) and still follow the global rules. You can disable or test them here.",
+      scImportEnvHelp: "Import notification settings from environment variables into the database for easier management."
     },
     ja: {
-      brandSub: "メッセージセンター", pageTitle: "メッセージセンター", pageSub: "端末のSMSを一覧し、未読をすばやく処理",
+      brandSub: "メッセージセンター", pageTitle: "メッセージセンター", pageSub: "駅から駅へ、星のように駆け流れる",
       listTitle: "メッセージ一覧", refresh: "更新", settingsOverview: "設定の概要", openSettings: "設定センターを開く",
       quickOverview: "クイック概要", viewStats: "統計を見る", selectHint: "右クリックまたは長押しで複数選択",
       selAllList: "現在の一覧を選択", tagVerify: "認証コード", allDevices: "すべての端末",
@@ -4751,12 +4973,24 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scBrowserPrefs: "このブラウザの設定", scBrowserPrefsHelp: "メッセージの切り替えと邪魔しない時間はこのブラウザのみに影響します。",
       scNotifyChannels: "通知チャネル", scChannelsN: "{n} 件設定済み", scMinN: "{n} 分", scDaysN: "{n} 日", statToday: "本日の受信",
       scTargetOff: "無効化", scTargetRename: "名前変更", scTargetLegacy: "このチャネルは複数ターゲットが有効です。上の単一ターゲット項目は送信に使用されません。",
-      scAddTarget: "ターゲットを追加", scTargetNamePh: "ターゲット名（例：当番グループ）", scTargetAdded: "ターゲットを追加しました。保存後に有効になります",
+      scAddTarget: "ターゲットを追加", scTargetNamePh: "プッシュ名（例：当番グループ）", scTargetAdded: "ターゲットを追加しました。保存後に有効になります",
       scTargetRemoved: "ターゲットを削除しました。保存後に有効になります", scTargetSaveFirst: "テスト送信の前にターゲットを保存してください", scMultiTarget: "複数ターゲット",
-      copyFail: "コピーに失敗しました。手動で選択してください", exportHint: "現在の絞り込み結果を出力"
+      copyFail: "コピーに失敗しました。手動で選択してください", exportHint: "現在の絞り込み結果を出力",
+      scAddPush: "プッシュを追加", scPushList: "設定済みプッシュ",
+      scPushListHelp: "作成済みのプッシュのみ表示します。「編集」から名前・設定・受信タイプを変更できます。",
+      scPushEmpty: "プッシュはまだありません。「プッシュを追加」から作成してください。",
+      scPickChannel: "プッシュ方法を選択", scPickChannelHelp: "先に方法を選択すると、対応する設定項目が表示されます。",
+      scPushName: "プッシュ名", scPushEditor: "プッシュを編集", scPushTypes: "受信タイプ",
+      scPushTypesHelp: "チェックしたタイプのみ受信します。全体ルールと併用されます（既定はすべて）。",
+      scPushRulesHelp: "空欄は「変更なし」として扱われ、保存済みの機密項目は伏字のみ表示します。",
+      scPushNameRequired: "プッシュ名を入力してください", scPushNeedTypes: "受信タイプを1つ以上選択してください",
+      scPushFieldNeed: "「{f}」を入力してください", scPushAdded: "プッシュを追加しました。保存後に有効になります", scPushUpdated: "プッシュを更新しました。保存後に有効になります",
+      scEdit: "編集", scBack: "戻る", scEnvChannels: "その他の設定済みチャネル",
+      scEnvChannelsHelp: "これらのチャネルは単一設定（プッシュカード未分割）で、全体ルールに従って送信されます。ここで無効化やテストができます。",
+      scImportEnvHelp: "環境変数の通知設定をデータベースへ取り込み、後から管理しやすくします。"
     },
     ko: {
-      brandSub: "메시지 센터", pageTitle: "메시지 센터", pageSub: "기기 SMS를 모아 보고 읽지 않은 메시지를 빠르게 처리",
+      brandSub: "메시지 센터", pageTitle: "메시지 센터", pageSub: "역에서 역으로, 별처럼 흐르는 발걸음",
       listTitle: "메시지 목록", refresh: "새로고침", settingsOverview: "설정 개요", openSettings: "설정 센터 열기",
       quickOverview: "빠른 개요", viewStats: "통계 보기", selectHint: "마우스 오른쪽 버튼 또는 길게 눌러 여러 개 선택",
       selAllList: "현재 목록 선택", tagVerify: "인증 코드", allDevices: "모든 기기",
@@ -4765,12 +4999,24 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scBrowserPrefs: "이 브라우저 설정", scBrowserPrefsHelp: "메시지 스위치와 방해 금지 시간은 이 브라우저에만 적용됩니다.",
       scNotifyChannels: "알림 채널", scChannelsN: "{n}개 설정됨", scMinN: "{n}분", scDaysN: "{n}일", statToday: "오늘 수신",
       scTargetOff: "사용 안 함", scTargetRename: "이름 변경", scTargetLegacy: "이 채널은 다중 대상이 활성화되어 위의 단일 대상 필드는 전송에 사용되지 않습니다.",
-      scAddTarget: "대상 추가", scTargetNamePh: "대상 이름(예: 당직 그룹)", scTargetAdded: "대상이 추가되었습니다. 저장 후 적용됩니다",
+      scAddTarget: "대상 추가", scTargetNamePh: "푸시 이름(예: 당직 그룹)", scTargetAdded: "대상이 추가되었습니다. 저장 후 적용됩니다",
       scTargetRemoved: "대상이 제거되었습니다. 저장 후 적용됩니다", scTargetSaveFirst: "테스트 전에 대상을 저장하세요", scMultiTarget: "다중 대상",
-      copyFail: "복사에 실패했습니다. 직접 선택하세요", exportHint: "현재 필터 결과를 내보냅니다"
+      copyFail: "복사에 실패했습니다. 직접 선택하세요", exportHint: "현재 필터 결과를 내보냅니다",
+      scAddPush: "푸시 추가", scPushList: "설정된 푸시",
+      scPushListHelp: "생성된 푸시만 표시합니다. [편집]에서 이름, 설정, 수신 유형을 변경할 수 있습니다.",
+      scPushEmpty: "아직 푸시가 없습니다. [푸시 추가]로 첫 번째 푸시를 만드세요.",
+      scPickChannel: "푸시 방식 선택", scPickChannelHelp: "먼저 방식을 선택하면 해당 설정 항목이 표시됩니다.",
+      scPushName: "푸시 이름", scPushEditor: "푸시 편집", scPushTypes: "수신 유형",
+      scPushTypesHelp: "선택한 유형만 수신하며 전역 규칙과 함께 적용됩니다(기본값 전체).",
+      scPushRulesHelp: "빈 항목은 변경하지 않음으로 처리되며, 저장된 민감 항목은 마스킹된 값만 표시됩니다.",
+      scPushNameRequired: "푸시 이름을 입력하세요", scPushNeedTypes: "수신 유형을 하나 이상 선택하세요",
+      scPushFieldNeed: "「{f}」을(를) 입력하세요", scPushAdded: "푸시가 추가되었습니다. 저장 후 적용됩니다", scPushUpdated: "푸시가 업데이트되었습니다. 저장 후 적용됩니다",
+      scEdit: "편집", scBack: "이전", scEnvChannels: "기타 설정된 채널",
+      scEnvChannelsHelp: "이 채널들은 단일 설정(푸시 카드로 분리되지 않음)이며 전역 규칙에 따라 전송됩니다. 여기서 비활성화하거나 테스트할 수 있습니다.",
+      scImportEnvHelp: "환경 변수의 알림 설정을 데이터베이스로 가져와 이후 관리하기 쉽게 합니다."
     },
     es: {
-      brandSub: "Centro de mensajes", pageTitle: "Centro de mensajes", pageSub: "Revisa los SMS de tus dispositivos y resuelve los no leídos",
+      brandSub: "Centro de mensajes", pageTitle: "Centro de mensajes", pageSub: "De posta en posta, como estrellas fugaces.",
       listTitle: "Mensajes", refresh: "Actualizar", settingsOverview: "Resumen de ajustes", openSettings: "Abrir ajustes",
       quickOverview: "Resumen rápido", viewStats: "Ver estadísticas", selectHint: "Clic derecho o pulsación larga para seleccionar varios",
       selAllList: "Seleccionar lista actual", tagVerify: "Código de verificación", allDevices: "Todos los dispositivos",
@@ -4779,12 +5025,24 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scBrowserPrefs: "Preferencias del navegador", scBrowserPrefsHelp: "Los interruptores de mensajes y el horario de silencio solo afectan a este navegador.",
       scNotifyChannels: "Canales de notificación", scChannelsN: "{n} configurados", scMinN: "{n} min", scDaysN: "{n} días", statToday: "Recibidos hoy",
       scTargetOff: "Desactivar", scTargetRename: "Renombrar", scTargetLegacy: "Este canal tiene varios destinos; los campos de destino único de arriba ya no se usan para enviar.",
-      scAddTarget: "Añadir destino", scTargetNamePh: "Nombre del destino (p. ej. grupo de guardia)", scTargetAdded: "Destino añadido; guarda para aplicar",
+      scAddTarget: "Añadir destino", scTargetNamePh: "Nombre del envío (p. ej. grupo de guardia)", scTargetAdded: "Destino añadido; guarda para aplicar",
       scTargetRemoved: "Destino eliminado; guarda para aplicar", scTargetSaveFirst: "Guarda el destino antes de enviar una prueba", scMultiTarget: "Multi-destino",
-      copyFail: "Error al copiar. Selecciónalo manualmente", exportHint: "Exporta el filtro actual"
+      copyFail: "Error al copiar. Selecciónalo manualmente", exportHint: "Exporta el filtro actual",
+      scAddPush: "Añadir envío", scPushList: "Envíos configurados",
+      scPushListHelp: "Solo se muestran los envíos creados. Pulsa Editar para cambiar el nombre, la configuración o los tipos aceptados.",
+      scPushEmpty: "Aún no hay envíos. Pulsa «Añadir envío» para crear el primero.",
+      scPickChannel: "Elige el método de envío", scPickChannelHelp: "Elige primero un método; después aparecerán sus campos de configuración.",
+      scPushName: "Nombre del envío", scPushEditor: "Editar envío", scPushTypes: "Tipos aceptados",
+      scPushTypesHelp: "Solo se envían los tipos marcados, junto con las reglas globales (todos por defecto).",
+      scPushRulesHelp: "Dejar un campo vacío no lo modifica; los campos sensibles guardados solo muestran un valor enmascarado.",
+      scPushNameRequired: "Escribe un nombre para el envío", scPushNeedTypes: "Selecciona al menos un tipo",
+      scPushFieldNeed: "Escribe «{f}»", scPushAdded: "Envío añadido; guarda para aplicar", scPushUpdated: "Envío actualizado; guarda para aplicar",
+      scEdit: "Editar", scBack: "Atrás", scEnvChannels: "Otros canales configurados",
+      scEnvChannelsHelp: "Estos canales tienen una sola configuración (sin dividir en tarjetas) y siguen las reglas globales. Puedes desactivarlos o probarlos aquí.",
+      scImportEnvHelp: "Importa la configuración de notificaciones de las variables de entorno a la base de datos para gestionarla mejor."
     },
     fr: {
-      brandSub: "Centre de messages", pageTitle: "Centre de messages", pageSub: "Consultez les SMS des appareils et traitez rapidement les non lus",
+      brandSub: "Centre de messages", pageTitle: "Centre de messages", pageSub: "De relais en relais, comme un torrent d'étoiles.",
       listTitle: "Messages", refresh: "Actualiser", settingsOverview: "Aperçu des réglages", openSettings: "Ouvrir les réglages",
       quickOverview: "Aperçu rapide", viewStats: "Voir les statistiques", selectHint: "Clic droit ou appui long pour sélectionner plusieurs messages",
       selAllList: "Sélectionner la liste actuelle", tagVerify: "Code de vérification", allDevices: "Tous les appareils",
@@ -4793,12 +5051,24 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scBrowserPrefs: "Préférences du navigateur", scBrowserPrefsHelp: "Les interrupteurs de messages et les heures calmes n'affectent que ce navigateur.",
       scNotifyChannels: "Canaux de notification", scChannelsN: "{n} configurés", scMinN: "{n} min", scDaysN: "{n} jours", statToday: "Reçus aujourd'hui",
       scTargetOff: "Désactiver", scTargetRename: "Renommer", scTargetLegacy: "Ce canal utilise plusieurs cibles ; les champs de cible unique ci-dessus ne servent plus à l'envoi.",
-      scAddTarget: "Ajouter une cible", scTargetNamePh: "Nom de la cible (ex. groupe d'astreinte)", scTargetAdded: "Cible ajoutée ; enregistrez pour appliquer",
+      scAddTarget: "Ajouter une cible", scTargetNamePh: "Nom de l'envoi (ex. groupe d'astreinte)", scTargetAdded: "Cible ajoutée ; enregistrez pour appliquer",
       scTargetRemoved: "Cible supprimée ; enregistrez pour appliquer", scTargetSaveFirst: "Enregistrez la cible avant d'envoyer un test", scMultiTarget: "Multi-cible",
-      copyFail: "Échec de la copie. Sélectionnez-le manuellement", exportHint: "Exporte le filtre actuel"
+      copyFail: "Échec de la copie. Sélectionnez-le manuellement", exportHint: "Exporte le filtre actuel",
+      scAddPush: "Ajouter un envoi", scPushList: "Envois configurés",
+      scPushListHelp: "Seuls les envois créés sont affichés. Cliquez sur Modifier pour changer le nom, la configuration ou les types acceptés.",
+      scPushEmpty: "Aucun envoi pour l'instant. Cliquez sur « Ajouter un envoi » pour créer le premier.",
+      scPickChannel: "Choisir le moyen d'envoi", scPickChannelHelp: "Choisissez d'abord un moyen ; ses champs de configuration apparaîtront ensuite.",
+      scPushName: "Nom de l'envoi", scPushEditor: "Modifier l'envoi", scPushTypes: "Types acceptés",
+      scPushTypesHelp: "Seuls les types cochés sont envoyés, avec les règles globales (tous par défaut).",
+      scPushRulesHelp: "Laisser un champ vide ne le modifie pas ; les champs sensibles enregistrés n'affichent qu'une valeur masquée.",
+      scPushNameRequired: "Saisissez un nom d'envoi", scPushNeedTypes: "Sélectionnez au moins un type",
+      scPushFieldNeed: "Saisissez « {f} »", scPushAdded: "Envoi ajouté ; enregistrez pour appliquer", scPushUpdated: "Envoi mis à jour ; enregistrez pour appliquer",
+      scEdit: "Modifier", scBack: "Retour", scEnvChannels: "Autres canaux configurés",
+      scEnvChannelsHelp: "Ces canaux ont une configuration unique (non divisée en cartes) et suivent les règles globales. Vous pouvez les désactiver ou les tester ici.",
+      scImportEnvHelp: "Importez la configuration de notification des variables d'environnement dans la base pour la gérer plus facilement."
     },
     de: {
-      brandSub: "Nachrichtenzentrum", pageTitle: "Nachrichtenzentrum", pageSub: "Geräte-SMS ansehen und ungelesene Nachrichten schnell erledigen",
+      brandSub: "Nachrichtenzentrum", pageTitle: "Nachrichtenzentrum", pageSub: "Von Station zu Station, wie ein Sternenstrom.",
       listTitle: "Nachrichten", refresh: "Aktualisieren", settingsOverview: "Einstellungsübersicht", openSettings: "Einstellungen öffnen",
       quickOverview: "Kurzübersicht", viewStats: "Statistik ansehen", selectHint: "Rechtsklick oder langes Drücken für Mehrfachauswahl",
       selAllList: "Aktuelle Liste auswählen", tagVerify: "Bestätigungscode", allDevices: "Alle Geräte",
@@ -4807,12 +5077,24 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scBrowserPrefs: "Browser-Einstellungen", scBrowserPrefsHelp: "Nachrichtenschalter und Ruhezeiten gelten nur für diesen Browser.",
       scNotifyChannels: "Benachrichtigungskanäle", scChannelsN: "{n} konfiguriert", scMinN: "{n} Min.", scDaysN: "{n} Tage", statToday: "Heute erhalten",
       scTargetOff: "Deaktivieren", scTargetRename: "Umbenennen", scTargetLegacy: "Für diesen Kanal sind mehrere Ziele aktiv; die Einzelziel-Felder oben werden nicht mehr zum Senden verwendet.",
-      scAddTarget: "Ziel hinzufügen", scTargetNamePh: "Zielname (z. B. Bereitschaftsgruppe)", scTargetAdded: "Ziel hinzugefügt; zum Anwenden speichern",
+      scAddTarget: "Ziel hinzufügen", scTargetNamePh: "Push-Name (z. B. Bereitschaftsgruppe)", scTargetAdded: "Ziel hinzugefügt; zum Anwenden speichern",
       scTargetRemoved: "Ziel entfernt; zum Anwenden speichern", scTargetSaveFirst: "Ziel vor dem Testen speichern", scMultiTarget: "Mehrere Ziele",
-      copyFail: "Kopieren fehlgeschlagen. Bitte manuell markieren", exportHint: "Exportiert den aktuellen Filter"
+      copyFail: "Kopieren fehlgeschlagen. Bitte manuell markieren", exportHint: "Exportiert den aktuellen Filter",
+      scAddPush: "Push hinzufügen", scPushList: "Konfigurierte Pushes",
+      scPushListHelp: "Nur erstellte Pushes werden angezeigt. Über Bearbeiten lassen sich Name, Konfiguration und akzeptierte Typen ändern.",
+      scPushEmpty: "Noch keine Pushes. Klicke auf „Push hinzufügen“, um den ersten zu erstellen.",
+      scPickChannel: "Versandart wählen", scPickChannelHelp: "Wähle zuerst eine Versandart; danach erscheinen die passenden Konfigurationsfelder.",
+      scPushName: "Push-Name", scPushEditor: "Push bearbeiten", scPushTypes: "Akzeptierte Typen",
+      scPushTypesHelp: "Nur angehakte Typen werden zugestellt, zusammen mit den globalen Regeln (standardmäßig alle).",
+      scPushRulesHelp: "Ein leeres Feld bleibt unverändert; gespeicherte sensible Felder zeigen nur einen maskierten Wert.",
+      scPushNameRequired: "Bitte einen Push-Namen eingeben", scPushNeedTypes: "Mindestens einen Typ auswählen",
+      scPushFieldNeed: "„{f}“ eingeben", scPushAdded: "Push hinzugefügt; zum Anwenden speichern", scPushUpdated: "Push aktualisiert; zum Anwenden speichern",
+      scEdit: "Bearbeiten", scBack: "Zurück", scEnvChannels: "Weitere konfigurierte Kanäle",
+      scEnvChannelsHelp: "Diese Kanäle haben eine einzige Konfiguration (nicht in Push-Karten aufgeteilt) und folgen den globalen Regeln. Hier kannst du sie deaktivieren oder testen.",
+      scImportEnvHelp: "Benachrichtigungseinstellungen aus Umgebungsvariablen in die Datenbank importieren, um sie leichter zu verwalten."
     },
     "pt-BR": {
-      brandSub: "Central de mensagens", pageTitle: "Central de mensagens", pageSub: "Veja os SMS dos dispositivos e resolva os não lidos rapidamente",
+      brandSub: "Central de mensagens", pageTitle: "Central de mensagens", pageSub: "De estação em estação, como estrelas cadentes.",
       listTitle: "Mensagens", refresh: "Atualizar", settingsOverview: "Visão dos ajustes", openSettings: "Abrir ajustes",
       quickOverview: "Visão rápida", viewStats: "Ver estatísticas", selectHint: "Clique com o botão direito ou toque e segure para selecionar vários",
       selAllList: "Selecionar lista atual", tagVerify: "Código de verificação", allDevices: "Todos os dispositivos",
@@ -4821,9 +5103,21 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scBrowserPrefs: "Preferências do navegador", scBrowserPrefsHelp: "Os interruptores de mensagens e o horário de silêncio afetam apenas este navegador.",
       scNotifyChannels: "Canais de notificação", scChannelsN: "{n} configurados", scMinN: "{n} min", scDaysN: "{n} dias", statToday: "Recebidos hoje",
       scTargetOff: "Desativar", scTargetRename: "Renomear", scTargetLegacy: "Este canal tem vários destinos; os campos de destino único acima não são mais usados no envio.",
-      scAddTarget: "Adicionar destino", scTargetNamePh: "Nome do destino (ex. grupo de plantão)", scTargetAdded: "Destino adicionado; salve para aplicar",
+      scAddTarget: "Adicionar destino", scTargetNamePh: "Nome do envio (ex. grupo de plantão)", scTargetAdded: "Destino adicionado; salve para aplicar",
       scTargetRemoved: "Destino removido; salve para aplicar", scTargetSaveFirst: "Salve o destino antes de enviar um teste", scMultiTarget: "Multi-destino",
-      copyFail: "Falha ao copiar. Selecione manualmente", exportHint: "Exporta o filtro atual"
+      copyFail: "Falha ao copiar. Selecione manualmente", exportHint: "Exporta o filtro atual",
+      scAddPush: "Adicionar envio", scPushList: "Envios configurados",
+      scPushListHelp: "Apenas envios criados são listados. Clique em Editar para alterar o nome, a configuração ou os tipos aceitos.",
+      scPushEmpty: "Ainda não há envios. Clique em «Adicionar envio» para criar o primeiro.",
+      scPickChannel: "Escolha o meio de envio", scPickChannelHelp: "Escolha primeiro um meio; em seguida aparecem os campos de configuração.",
+      scPushName: "Nome do envio", scPushEditor: "Editar envio", scPushTypes: "Tipos aceitos",
+      scPushTypesHelp: "Apenas os tipos marcados são entregues, junto com as regras globais (todos por padrão).",
+      scPushRulesHelp: "Deixar um campo vazio não o altera; campos sensíveis salvos mostram apenas um valor mascarado.",
+      scPushNameRequired: "Informe um nome para o envio", scPushNeedTypes: "Selecione ao menos um tipo",
+      scPushFieldNeed: "Informe «{f}»", scPushAdded: "Envio adicionado; salve para aplicar", scPushUpdated: "Envio atualizado; salve para aplicar",
+      scEdit: "Editar", scBack: "Voltar", scEnvChannels: "Outros canais configurados",
+      scEnvChannelsHelp: "Esses canais têm configuração única (não dividida em cartões) e seguem as regras globais. Você pode desativá-los ou testá-los aqui.",
+      scImportEnvHelp: "Importe as configurações de notificação das variáveis de ambiente para o banco de dados para facilitar a gestão."
     }
   };
   (function () {
@@ -5284,13 +5578,15 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
             if (!(idx >= 1 && idx <= others.length)) { alert(T("invalidIdx")); return; }
             var target = others[idx - 1];
             if (!confirm(T("mergeConfirm", { a: d.display_name, b: target.display_name }))) return;
-            fetch("/api/devices/merge", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ from: d.id, to: target.id }) })
-              .then(function (r) { return r.json(); })
-              .then(function (res2) {
-                if (!res2.success) { alert(res2.error === "device not found" ? T("targetMissing") : (res2.error || T("mergeFail"))); return; }
-                if (state.device === d.id) { state.device = target.id; }
-                refreshAll();
-              });
+            askPassword(function () {
+              fetch("/api/devices/merge", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ from: d.id, to: target.id }) })
+                .then(function (r) { return r.json(); })
+                .then(function (res2) {
+                  if (!res2.success) { alert(res2.error === "device not found" ? T("targetMissing") : (res2.error || T("mergeFail"))); return; }
+                  if (state.device === d.id) { state.device = target.id; }
+                  refreshAll();
+                });
+            });
           };
           el.appendChild(mg);
         }
@@ -5303,16 +5599,18 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
           x.onclick = function (ev) {
             ev.stopPropagation();
             if (!confirm(T("delDevConfirm"))) return;
-            fetch("/api/devices/" + d.id, { method: "DELETE" })
-              .then(function (r) { return r.json(); })
-              .then(function (res2) {
-                if (!res2.success) {
-                  alert(res2.error === "has messages" ? T("hasMessages") : (res2.error || T("delFail")));
-                  return;
-                }
-                if (state.device === d.id) { state.device = 0; state.page = 1; }
-                refreshAll();
-              });
+            askPassword(function () {
+              fetch("/api/devices/" + d.id, { method: "DELETE" })
+                .then(function (r) { return r.json(); })
+                .then(function (res2) {
+                  if (!res2.success) {
+                    alert(res2.error === "has messages" ? T("hasMessages") : (res2.error || T("delFail")));
+                    return;
+                  }
+                  if (state.device === d.id) { state.device = 0; state.page = 1; }
+                  refreshAll();
+                });
+            });
           };
           el.appendChild(x);
         }
@@ -5608,6 +5906,54 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       SC.dirty = false;
     }
     $("modal").hidden = true; $("modalbody").innerHTML = ""; tokenSecret = null;
+    /* 关闭设置中心时同步收起第二层推送编辑器，避免残留遮罩 */
+    var pm = $("pushmodal"); if (pm) pm.hidden = true;
+  }
+  /* ---------------- 重要操作密码确认 ----------------
+     默认开启：危险/敏感操作执行前要求输入登录密码（即 ADMIN_PASSWORD），校验通过后才继续。
+     未开启登录（服务端无 ADMIN_PASSWORD）时 state.pwdOn 为 false，直接放行。 */
+  var pwdAfter = null;
+  function pwdShowErr(msg) { var e = $("pwderr"); if (!e) return; e.textContent = msg; e.hidden = false; }
+  function pwdClose() {
+    $("pwdmodal").hidden = true;
+    $("pwdinput").value = "";
+    $("pwderr").hidden = true;
+    pwdAfter = null;
+  }
+  function askPassword(onOk, help) {
+    if (!state.pwdOn) { onOk(); return; }
+    pwdAfter = onOk;
+    $("pwdtitle").textContent = T("pwdTitle");
+    $("pwdhelp").textContent = help || T("pwdHelp");
+    $("pwdinput").value = "";
+    $("pwdinput").placeholder = T("pwdPh");
+    $("pwderr").hidden = true;
+    $("pwdcancel").textContent = T("cancel");
+    $("pwdok").textContent = T("pwdVerify");
+    $("pwdok").disabled = false;
+    $("pwdmodal").hidden = false;
+    setTimeout(function () { try { $("pwdinput").focus(); } catch (e) {} }, 30);
+  }
+  function pwdSubmit() {
+    var pw = $("pwdinput").value;
+    if (!pw) { pwdShowErr(T("pwdNeed")); return; }
+    var btn = $("pwdok");
+    btn.disabled = true;
+    fetch("/api/verify-password", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: pw }),
+    }).then(function (r) {
+      return r.json().then(function (d) { return { s: r.status, d: d }; });
+    }).then(function (res) {
+      btn.disabled = false;
+      if (res.s === 200 && res.d && res.d.success) {
+        var cb = pwdAfter; pwdClose(); if (cb) cb();
+        return;
+      }
+      if (res.s === 429) { pwdShowErr(T("pwdTooMany")); return; }
+      if (res.s === 401) { location.reload(); return; }
+      pwdShowErr(T("pwdWrong"));
+    }).catch(function () { btn.disabled = false; pwdShowErr(T("pwdWrong")); });
   }
   function drow(label, val) {
     return '<div class="drow"><span>' + esc(label) + '</span><span>' + esc(val == null ? "" : val) + '</span></div>';
@@ -5892,21 +6238,25 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   }
   function revokeTokenUi(id) {
     if (!confirm("确认吊销令牌「" + tokNameOf(id) + "」？使用该令牌的接入将立即失效（403）。")) return;
-    tokApi("POST", "/api/tokens/revoke", { id: id }).then(function (res) {
-      if (res.s === 401) { location.reload(); return; }
-      if (res.d && res.d.success) { toast(res.d.revoked ? "已吊销" : "该令牌已是吊销状态"); loadTokens(); }
-      else if (res.d && res.d.error === "NOT_FOUND") { toast("令牌不存在"); loadTokens(); }
-      else toast("吊销失败");
-    }).catch(function () { toast("吊销失败"); });
+    askPassword(function () {
+      tokApi("POST", "/api/tokens/revoke", { id: id }).then(function (res) {
+        if (res.s === 401) { location.reload(); return; }
+        if (res.d && res.d.success) { toast(res.d.revoked ? "已吊销" : "该令牌已是吊销状态"); loadTokens(); }
+        else if (res.d && res.d.error === "NOT_FOUND") { toast("令牌不存在"); loadTokens(); }
+        else toast("吊销失败");
+      }).catch(function () { toast("吊销失败"); });
+    });
   }
   function rotateTokenUi(id) {
     if (!confirm("确认轮换令牌「" + tokNameOf(id) + "」？旧令牌立即吊销失效，并生成同名新令牌。")) return;
-    tokApi("POST", "/api/tokens/rotate", { id: id }).then(function (res) {
-      if (res.s === 401) { location.reload(); return; }
-      if (res.d && res.d.success) { showTokenSecret("令牌已轮换", tokNameOf(id), res.d.token); }
-      else if (res.d && res.d.error === "NOT_FOUND") { toast("令牌不存在"); loadTokens(); }
-      else toast("轮换失败");
-    }).catch(function () { toast("轮换失败"); });
+    askPassword(function () {
+      tokApi("POST", "/api/tokens/rotate", { id: id }).then(function (res) {
+        if (res.s === 401) { location.reload(); return; }
+        if (res.d && res.d.success) { showTokenSecret("令牌已轮换", tokNameOf(id), res.d.token); }
+        else if (res.d && res.d.error === "NOT_FOUND") { toast("令牌不存在"); loadTokens(); }
+        else toast("轮换失败");
+      }).catch(function () { toast("轮换失败"); });
+    });
   }
   function renameTokenUi(id) {
     var old = tokNameOf(id);
@@ -6243,6 +6593,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       /* 多目标通知：以后端返回的脱敏视图作为编辑模型（敏感字段不回传明文） */
       SC.targets = ((d.notify && d.notify.targets) || []).map(function (t) {
         return { id: t.id, channel: t.channel, name: t.name, enabled: !!t.enabled,
+          types: (t.types || ["verify", "sms", "notify"]).slice(),
           fields: t.fields || {}, configured: !!t.configured, _new: false };
       });
       scRenderShell();
@@ -6253,7 +6604,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       return '<button class="tab' + (x.key === SC.section ? " active" : "") + '" role="tab" data-sc-tab="' + x.key + '"'
         + ' aria-selected="' + (x.key === SC.section ? "true" : "false") + '">' + T(x.label) + '</button>';
     }).join("");
-    openModal('<h3>' + T("scTitle") + ' <span class="ds-badge ds-badge--warning" id="scdirty" hidden>' + T("scDirty") + '</span></h3>'
+    openModal('<h3>' + T("scTitle") + ' <span class="ds-badge" id="scdirty" hidden>' + T("scDirty") + '</span></h3>'
       + '<div class="ds-tabs" id="sctabs" role="tablist">' + tabs + '</div>'
       + '<div class="setform" id="scbody"></div>'
       + '<div class="ds-dialog-actions">'
@@ -6344,7 +6695,14 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       + '</div>';
   }
 
-  /* ---- 通知：多目标行 + 单目标兼容 ---- */
+  /* ---- 通知：已配置推送卡片 ---- */
+  function scTypeLabel(t) {
+    return t === "verify" ? T("scTypeVerify") : (t === "sms" ? T("scTypeSms") : T("scTypeNotify"));
+  }
+  function scChannelSpec(chKey) {
+    var list = ((SC.d && SC.d.notify_schema) || {}).channels || [];
+    return list.filter(function (c) { return c.key === chKey; })[0] || null;
+  }
   function scTargetRow(t, ch) {
     var parts = [];
     (ch.fields || []).forEach(function (f) {
@@ -6355,13 +6713,18 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         parts.push(nfLabel(f.key) + " " + v.value);
       }
     });
-    return '<div class="tokrow"><div class="tokmain"><div class="tokname">' + esc(t.name)
-      + ' <span class="tokbadge">' + esc(t.enabled ? T("scEnable") : T("scTargetOff")) + '</span></div>'
-      + '<div class="tokmeta">' + esc(parts.join(" · ") || T("scNotConfigured")) + '</div></div>'
-      + '<div class="tokacts">'
-      + '<button class="tbtn" type="button" data-tgact="test" data-tgid="' + esc(t.id) + '" data-tgch="' + ch.key + '">' + esc(T("scSendTest")) + '</button>'
+    var types = (t.types && t.types.length ? t.types : ["verify", "sms", "notify"]).map(scTypeLabel).join(" · ");
+    return '<div class="pushcard' + (t.enabled ? "" : " pushcard--off") + '">'
+      + '<div class="pushcard-head"><span class="pushcard-name">' + esc(t.name) + '</span>'
+      + '<span class="pushbadge">' + esc(scChannelName(ch)) + '</span>'
+      + '<span class="pushbadge ' + (t.enabled ? "on" : "off") + '">'
+      + esc(t.enabled ? T("scEnable") : T("scTargetOff")) + '</span></div>'
+      + '<div class="pushcard-meta">' + esc(types) + '</div>'
+      + '<div class="pushcard-fields">' + esc(parts.join(" · ") || T("scNotConfigured")) + '</div>'
+      + '<div class="pushcard-acts">'
+      + '<button class="tbtn" type="button" data-tgact="edit" data-tgid="' + esc(t.id) + '">' + esc(T("scEdit")) + '</button>'
+      + '<button class="tbtn" type="button" data-tgact="test" data-tgid="' + esc(t.id) + '" data-tgch="' + esc(ch.key) + '">' + esc(T("scSendTest")) + '</button>'
       + '<button class="tbtn" type="button" data-tgact="toggle" data-tgid="' + esc(t.id) + '">' + esc(t.enabled ? T("scTargetOff") : T("scEnable")) + '</button>'
-      + '<button class="tbtn" type="button" data-tgact="rename" data-tgid="' + esc(t.id) + '">' + esc(T("scTargetRename")) + '</button>'
       + '<button class="tbtn" type="button" data-tgact="del" data-tgid="' + esc(t.id) + '">' + esc(T("del")) + '</button>'
       + '</div></div>';
   }
@@ -6400,72 +6763,172 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       + '<input type="text" id="nflink" class="ds-input" placeholder="' + T("scLinkPh") + '" value="'
       + esc(cfg.link || "") + '"></div></div>';
 
-    (schema.channels || []).forEach(function (ch) {
-      var state = cfg.channels[ch.key] || { enabled: true, configured: false, source: "env", fields: {} };
-      var tgs = (SC.targets || []).filter(function (x) { return x.channel === ch.key; });
-      var isCfg = !!state.configured || tgs.length > 0;
-      html += '<div class="setgrp"><h4>' + esc(scChannelName(ch)) + scBadge("global")
-        + '<span class="ds-badge ' + (isCfg ? "ds-badge--success" : "") + '">'
-        + (isCfg ? T("scConfigured") : T("scNotConfigured"))
-        + (isCfg ? " · " + (tgs.length ? T("scMultiTarget") : (state.source === "db" ? T("scFromDb") : T("scFromEnv"))) : "")
-        + '</span></h4>'
-        + '<div class="setrow"><label for="nf_' + ch.key + '_enabled">' + T("scEnable") + '</label>'
-        + '<input type="checkbox" id="nf_' + ch.key + '_enabled" class="ds-check" ' + (state.enabled ? "checked" : "") + '></div>';
-      if (tgs.length) {
-        html += '<div class="toklist">' + tgs.map(function (tg) { return scTargetRow(tg, ch); }).join("") + '</div>'
-          + '<div class="ds-help">' + T("scTargetLegacy") + '</div>';
-      } else {
-        ch.fields.forEach(function (f) {
-          var id = "nf_" + ch.key + "_" + f.key;
-          var val = state.fields[f.key] || {};
-          if (f.sensitive) {
-            var ph = val.configured ? T("scSensitivePhCfg", { m: val.masked || "••••" }) : T("scSensitivePhNew");
-            html += '<div class="setrow"><label for="' + id + '">' + esc(nfLabel(f.key)) + '</label>'
-              + '<input type="text" id="' + id + '" class="ds-input" autocomplete="off" spellcheck="false" placeholder="' + esc(ph) + '">'
-              + '<label class="clr"><input type="checkbox" class="ds-check" id="clr_' + ch.key + '_' + f.key + '"> ' + T("scClear") + '</label></div>';
-          } else {
-            html += '<div class="setrow"><label for="' + id + '">' + esc(nfLabel(f.key)) + '</label>'
-              + '<input type="text" id="' + id + '" class="ds-input" autocomplete="off" value="' + esc(val.value || "") + '"></div>';
-          }
-        });
-        html += '<div class="setrow"><label>' + T("scTest") + '</label>'
-          + '<button class="ds-btn settest" id="nf_test_' + ch.key + '" type="button">' + T("scSendTest") + '</button></div>';
-      }
-      /* 添加目标：名称 + 该渠道全部字段（敏感字段仅新增时填写） */
-      html += '<div class="setrow"><label for="tgname_' + ch.key + '">' + T("scAddTarget") + '</label>'
-        + '<input type="text" id="tgname_' + ch.key + '" class="ds-input" placeholder="' + esc(T("scTargetNamePh")) + '" autocomplete="off"></div>';
-      ch.fields.forEach(function (f) {
-        html += '<div class="setrow"><label for="tgf_' + ch.key + '_' + f.key + '">' + esc(nfLabel(f.key)) + '</label>'
-          + '<input type="text" id="tgf_' + ch.key + '_' + f.key + '" class="ds-input" autocomplete="off"'
-          + (f.sensitive ? ' spellcheck="false" placeholder="' + esc(T("scSensitivePhNew")) + '"' : '') + '></div>';
-      });
-      html += '<div class="setrow"><label></label><button class="ds-btn" type="button" id="tgadd_' + ch.key + '">' + T("scAddTarget") + '</button></div></div>';
+    /* 已配置推送：只展示已经创建好的推送卡片，每张可编辑/测试/启停/删除 */
+    var targets = SC.targets || [];
+    var cards = "";
+    targets.forEach(function (tg) {
+      var ch = scChannelSpec(tg.channel);
+      if (ch) cards += scTargetRow(tg, ch);
     });
-    html += '<div class="ds-alert ds-alert--warning">' + T("scTestSaved") + '</div>'
-      + '<div class="setrow"><button class="ds-btn" id="nfimport" type="button">' + T("scImportEnv") + '</button></div>';
+    html += '<div class="setgrp"><h4>' + T("scPushList") + scBadge("global")
+      + '<span class="ds-badge">' + T("scChannelsN", { n: targets.length }) + '</span></h4>'
+      + scHelp(T("scPushListHelp"))
+      + (cards ? '<div class="pushlist">' + cards + '</div>' : '<div class="pushempty">' + T("scPushEmpty") + '</div>')
+      + '<div class="setrow"><label></label><button class="ds-btn ds-btn--primary" id="pushadd" type="button">'
+      + T("scAddPush") + '</button></div></div>';
+
+    /* 环境变量渠道：仅展示已配置且未被推送卡片覆盖的渠道（只读，可停用/测试） */
+    var envRows = "";
+    (schema.channels || []).forEach(function (ch) {
+      var st = cfg.channels[ch.key] || { enabled: true, configured: false };
+      var hasTg = targets.some(function (x) { return x.channel === ch.key; });
+      if (!st.configured || hasTg) return;
+      envRows += '<div class="setrow"><label>' + esc(scChannelName(ch)) + '</label>'
+        + '<span class="pushbadge">' + T(st.source === "db" ? "scFromDb" : "scFromEnv") + '</span>'
+        + '<label class="ds-inline"><input type="checkbox" id="nf_' + ch.key + '_enabled" class="ds-check" '
+        + (st.enabled ? "checked" : "") + '> ' + T("scEnable") + '</label>'
+        + '<button class="ds-btn settest" id="nf_test_' + ch.key + '" type="button">' + T("scSendTest") + '</button></div>';
+    });
+    if (envRows) {
+      html += '<div class="setgrp"><h4>' + T("scEnvChannels") + scBadge("global") + '</h4>'
+        + scHelp(T("scEnvChannelsHelp")) + envRows + '</div>';
+    }
+    html += '<div class="setgrp"><h4>' + T("scImportEnv") + scBadge("global") + '</h4>'
+      + scHelp(T("scImportEnvHelp"))
+      + '<div class="setrow"><button class="ds-btn" id="nfimport" type="button">' + T("scImportEnv") + '</button></div>'
+      + '<div class="ds-alert ds-alert--warning">' + T("scTestSaved") + '</div></div>';
     return html;
   }
-  function scAddTarget(chKey) {
-    var nameEl = $("tgname_" + chKey), name = nameEl ? nameEl.value.trim() : "";
-    if (!name) { toast(T("scTargetNamePh")); if (nameEl) nameEl.focus(); return; }
-    var ch = ((SC.d.notify_schema || {}).channels || []).filter(function (c) { return c.key === chKey; })[0];
-    if (!ch) return;
-    var fields = {};
-    ch.fields.forEach(function (f) {
-      var el = $("tgf_" + chKey + "_" + f.key);
-      var v = el ? el.value.trim() : "";
-      fields[f.key] = { sensitive: !!f.sensitive, value: v, configured: !!v };
+  /* ---- 推送编辑器：第二层独立弹层（先选方案 → 再填配置） ---- */
+  var PUSH = null;
+  function openPushEditor(t) {
+    if (t) {
+      PUSH = { mode: "edit", channel: t.channel, id: t.id, name: t.name,
+        types: (t.types || ["verify", "sms", "notify"]).slice(), enabled: !!t.enabled,
+        fields: t.fields || {}, _new: !!t._new };
+    } else {
+      PUSH = { mode: "pick", channel: "", id: "", name: "", types: ["verify", "sms", "notify"],
+        enabled: true, fields: {}, _new: true };
+    }
+    pushRender();
+    $("pushmodal").hidden = false;
+  }
+  function closePushEditor() { $("pushmodal").hidden = true; PUSH = null; }
+  function pushRender() {
+    if (!PUSH) return;
+    $("pushtitle").textContent = PUSH.mode === "edit" ? T("scPushEditor") : T("scAddPush");
+    $("pushbody").innerHTML = PUSH.mode === "pick" ? pushPickHtml() : pushFormHtml();
+  }
+  function pushPickHtml() {
+    var html = '<p class="pwdhelp">' + T("scPickChannelHelp") + '</p><div class="pushpicks">';
+    (((SC.d || {}).notify_schema || {}).channels || []).forEach(function (ch) {
+      html += '<button class="pushpick" type="button" data-pushch="' + esc(ch.key) + '">'
+        + esc(scChannelName(ch)) + '</button>';
     });
-    SC.tgSeq += 1;
-    /* 新目标用本地唯一临时 id 参与行内操作；保存时 _new 目标不回传 id，由服务端分配 */
-    SC.targets.push({ id: "__new" + SC.tgSeq, channel: chKey, name: name, enabled: true, fields: fields, configured: true, _new: true });
+    html += '</div><div class="pwdacts"><button class="ds-btn" type="button" data-pushact="cancel">'
+      + T("cancel") + '</button></div>';
+    return html;
+  }
+  function pushFormHtml() {
+    var ch = scChannelSpec(PUSH.channel);
+    if (!ch) return pushPickHtml();
+    var html = '<span class="pushchan">' + esc(scChannelName(ch)) + '</span>'
+      + '<div class="setrow"><label for="pfname">' + T("scPushName") + '</label>'
+      + '<input type="text" id="pfname" class="ds-input" maxlength="64" autocomplete="off" placeholder="'
+      + esc(T("scTargetNamePh")) + '" value="' + esc(PUSH.name) + '"></div>'
+      + '<div class="setrow"><label>' + T("scPushTypes") + '</label><span>';
+    ["verify", "sms", "notify"].forEach(function (t) {
+      html += '<label class="ds-inline"><input type="checkbox" class="ds-check" data-pftype="' + t + '" '
+        + (PUSH.types.indexOf(t) !== -1 ? "checked" : "") + '> ' + scTypeLabel(t) + '</label>';
+    });
+    html += '</span></div>' + scHelp(T("scPushTypesHelp"))
+      + '<div class="setrow"><label for="pfon">' + T("scEnable") + '</label>'
+      + '<input type="checkbox" id="pfon" class="ds-check" ' + (PUSH.enabled ? "checked" : "") + '></div>';
+    (ch.fields || []).forEach(function (f) {
+      var id = "pf_" + ch.key + "_" + f.key;
+      var old = (PUSH.fields && PUSH.fields[f.key]) || {};
+      if (f.sensitive) {
+        var ph = old.configured ? T("scSensitivePhCfg", { m: old.masked || "••••" }) : T("scSensitivePhNew");
+        html += '<div class="setrow"><label for="' + id + '">' + esc(nfLabel(f.key)) + '</label>'
+          + '<input type="text" id="' + id + '" class="ds-input" autocomplete="off" spellcheck="false" placeholder="'
+          + esc(ph) + '"></div>';
+      } else {
+        html += '<div class="setrow"><label for="' + id + '">' + esc(nfLabel(f.key)) + '</label>'
+          + '<input type="text" id="' + id + '" class="ds-input" autocomplete="off" value="'
+          + esc(old.value || "") + '"></div>';
+      }
+    });
+    html += '<div class="ds-help">' + T("scPushRulesHelp") + '</div>'
+      + '<div class="pwdacts">'
+      + (PUSH.mode === "new" ? '<button class="ds-btn" type="button" data-pushact="back">' + T("scBack") + '</button>' : '')
+      + '<button class="ds-btn" type="button" data-pushact="cancel">' + T("cancel") + '</button>'
+      + '<button class="ds-btn ds-btn--primary" type="button" data-pushact="save">' + T("save") + '</button></div>';
+    return html;
+  }
+  function pushSave() {
+    var ch = scChannelSpec(PUSH.channel);
+    if (!ch) { toast(T("scPickChannel")); return; }
+    var nameEl = $("pfname"), name = nameEl ? nameEl.value.trim() : "";
+    if (!name) { toast(T("scPushNameRequired")); if (nameEl) nameEl.focus(); return; }
+    var types = [];
+    var nodes = document.querySelectorAll("[data-pftype]");
+    for (var i = 0; i < nodes.length; i++) if (nodes[i].checked) types.push(nodes[i].getAttribute("data-pftype"));
+    if (!types.length) { toast(T("scPushNeedTypes")); return; }
+    var need = ch.need || [];
+    var fields = {}, ok = true;
+    (ch.fields || []).forEach(function (f) {
+      var el = $("pf_" + ch.key + "_" + f.key);
+      var v = el ? el.value.trim() : "";
+      var old = (PUSH.fields && PUSH.fields[f.key]) || {};
+      if (!v) {
+        if (f.sensitive && PUSH.mode === "edit" && old.configured) { fields[f.key] = old; return; }
+        if (need.indexOf(f.key) !== -1) { toast(T("scPushFieldNeed", { f: nfLabel(f.key) })); ok = false; return; }
+        fields[f.key] = { sensitive: !!f.sensitive, value: "", configured: false };
+        return;
+      }
+      fields[f.key] = { sensitive: !!f.sensitive, value: v, configured: true };
+    });
+    if (!ok) return;
+    var enabled = !!$("pfon").checked;
+    if (PUSH.mode === "edit") {
+      for (var j = 0; j < SC.targets.length; j++) {
+        if (SC.targets[j].id === PUSH.id) {
+          SC.targets[j] = { id: PUSH.id, channel: ch.key, name: name, enabled: enabled,
+            types: types, fields: fields, configured: true, _new: !!PUSH._new };
+          break;
+        }
+      }
+      toast(T("scPushUpdated"));
+    } else {
+      SC.tgSeq += 1;
+      /* 新推送用本地临时 id 参与行内操作；保存时 _new 不向上回传 id，由服务端分配 */
+      SC.targets.push({ id: "__new" + SC.tgSeq, channel: ch.key, name: name, enabled: enabled,
+        types: types, fields: fields, configured: true, _new: true });
+      toast(T("scPushAdded"));
+    }
     scMarkDirty(true);
+    closePushEditor();
     scRenderBody();
-    toast(T("scTargetAdded"));
+  }
+  /* 推送编辑器交互：选方案 / 返回 / 取消 / 保存（点遮罩关闭） */
+  function pushEditorAction(ev) {
+    var pick = ev.target && ev.target.closest ? ev.target.closest("[data-pushch]") : null;
+    if (pick) {
+      PUSH.channel = pick.getAttribute("data-pushch");
+      PUSH.mode = "new";
+      pushRender();
+      return;
+    }
+    var act = ev.target && ev.target.closest ? ev.target.closest("[data-pushact]") : null;
+    if (!act) return;
+    var a = act.getAttribute("data-pushact");
+    if (a === "cancel") { closePushEditor(); return; }
+    if (a === "back") { PUSH.mode = "pick"; PUSH.channel = ""; pushRender(); return; }
+    if (a === "save") pushSave();
   }
   function scTargetAction(ev) {
-    var addBtn = ev.target && ev.target.closest ? ev.target.closest("[id^='tgadd_']") : null;
-    if (addBtn) { scAddTarget(addBtn.id.slice(6)); return; }
+    var addBtn = ev.target && ev.target.closest ? ev.target.closest("#pushadd") : null;
+    if (addBtn) { openPushEditor(null); return; }
     var b = ev.target && ev.target.closest ? ev.target.closest("[data-tgact]") : null;
     if (!b) return;
     var act = b.getAttribute("data-tgact"), id = b.getAttribute("data-tgid");
@@ -6474,13 +6937,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (act === "toggle") {
       t.enabled = !t.enabled; scMarkDirty(true); scRenderBody(); return;
     }
-    if (act === "rename") {
-      var nm = prompt(T("scTargetRename"), t.name);
-      if (nm === null) return;
-      nm = String(nm).trim();
-      if (!nm) { toast(T("scTargetNamePh")); return; }
-      t.name = nm; scMarkDirty(true); scRenderBody(); return;
-    }
+    if (act === "edit") { openPushEditor(t); return; }
     if (act === "del") {
       if (!confirm(T("confirmDelN", { n: 1 }))) return;
       SC.targets = SC.targets.filter(function (x) { return x.id !== id; });
@@ -6584,32 +7041,39 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     else if (SC.section === "biz") what = T("scResetBiz");
     else { toast(T("scResetNoDefault")); return; }
     if (!window.confirm(T("scResetConfirm", { what: what }))) return;
-    if (SC.section === "session") {
-      try { localStorage.removeItem(TTL_LOCAL_KEY); } catch (e) {}
-      SC.d.session_ttl_minutes = 30;
-    } else if (SC.section === "notify") {
-      var schema = SC.d.notify_schema || { types: [] };
-      SC.d.notify = SC.d.notify || {};
-      SC.d.notify.enabled = true;
-      SC.d.notify.types = (schema.types || []).slice();
-      SC.d.notify.retry = 0;
-      SC.d.notify.link = "";
-    } else if (SC.section === "biz") {
-      SC.d.retention_days = 30;
-      SC.d.phone_area_enabled = true;
-      SC.d.phone_area_api = "";
-    }
-    scRenderBody();
-    scMarkDirty(true);
-    toast(T("scResetFilled"));
+    askPassword(function () {
+      if (SC.section === "session") {
+        try { localStorage.removeItem(TTL_LOCAL_KEY); } catch (e) {}
+        SC.d.session_ttl_minutes = 30;
+      } else if (SC.section === "notify") {
+        var schema = SC.d.notify_schema || { types: [] };
+        SC.d.notify = SC.d.notify || {};
+        SC.d.notify.enabled = true;
+        SC.d.notify.types = (schema.types || []).slice();
+        SC.d.notify.retry = 0;
+        SC.d.notify.link = "";
+      } else if (SC.section === "biz") {
+        SC.d.retention_days = 30;
+        SC.d.phone_area_enabled = true;
+        SC.d.phone_area_api = "";
+      }
+      scRenderBody();
+      scMarkDirty(true);
+      toast(T("scResetFilled"));
+    });
   }
 
   function scSave() {
     var btn = $("scrsave");
     if (SC.section === "security") { toast(T("scNoSave")); return; }
-    if (SC.section === "session") return scSaveSession(btn);
-    if (SC.section === "notify") return scSaveNotify(btn);
-    return scSaveBiz(btn);
+    /* 通知凭据与登录有效时间属敏感设置：保存前要求登录密码确认 */
+    var raw = function () {
+      if (SC.section === "session") return scSaveSession(btn);
+      if (SC.section === "notify") return scSaveNotify(btn);
+      return scSaveBiz(btn);
+    };
+    if (SC.section === "notify" || SC.section === "session") { askPassword(raw); return; }
+    return raw();
   }
   function scPut(body, btn, okMsg) {
     scBusy(btn, true);
@@ -6729,12 +7193,16 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
           fields[f.key] = v.value || "";
         }
       });
-      var out = { channel: tg.channel, name: tg.name, enabled: !!tg.enabled, fields: fields };
+      var out = { channel: tg.channel, name: tg.name, enabled: !!tg.enabled, fields: fields,
+        types: (tg.types && tg.types.length ? tg.types : ["verify", "sms", "notify"]).slice() };
       if (!tg._new && tg.id) out.id = tg.id;
       return out;
     });
+    /* 仅提交页面上实际存在的渠道开关（已配置推送卡片和环境变量渠道） */
     (schema.channels || []).forEach(function (ch) {
-      var c = { enabled: !!$("nf_" + ch.key + "_enabled").checked };
+      var en = $("nf_" + ch.key + "_enabled");
+      if (!en) return;
+      var c = { enabled: !!en.checked };
       ch.fields.forEach(function (f) {
         var el = $("nf_" + ch.key + "_" + f.key);
         if (!el) return;
@@ -6937,9 +7405,11 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var scope = state.device ? T("scopeDevice") : (state.src || state.range || state.q ? T("scopeFilter") : T("scopeAll"));
     if (!confirm(T("confirmClear", { scope: scope }))) return;
     if (!confirm(T("confirmClear2", { scope: scope }))) return;
-    fetch("/api/messages/clear", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ device_id: state.device, source: state.src, range: state.range, q: state.q }) })
-      .then(function (r) { return r.json(); })
-      .then(function (d) { if (d && d.success) { toast(T("clearedN", { n: d.removed })); state.selected = {}; load(); } });
+    askPassword(function () {
+      fetch("/api/messages/clear", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ device_id: state.device, source: state.src, range: state.range, q: state.q }) })
+        .then(function (r) { return r.json(); })
+        .then(function (d) { if (d && d.success) { toast(T("clearedN", { n: d.removed })); state.selected = {}; load(); } });
+    });
   };
   /* 主题三态：auto → light → dark */
   var THEMES = ["auto", "light", "dark"];
@@ -6969,6 +7439,23 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   /* 弹层 + PWA + 搜索历史 */
   $("modalx").onclick = closeModal;
   $("modal").addEventListener("click", function (ev) { if (ev.target === $("modal")) closeModal(); });
+  /* 重要操作密码确认：事件绑定 + 登录态探测（未开启登录则无需密码） */
+  (function initPwdGate() {
+    $("pwdcancel").onclick = pwdClose;
+    $("pwdok").onclick = pwdSubmit;
+    $("pwdinput").onkeydown = function (e) {
+      if (e.key === "Enter") { e.preventDefault(); pwdSubmit(); }
+      else if (e.key === "Escape") { e.preventDefault(); pwdClose(); }
+    };
+    $("pwdmodal").addEventListener("click", function (ev) { if (ev.target === $("pwdmodal")) pwdClose(); });
+    $("pushmodal").addEventListener("click", function (ev) {
+      if (ev.target === $("pushmodal")) { closePushEditor(); return; }
+      pushEditorAction(ev);
+    });
+    fetch("/api/auth-state").then(function (r) { return r.json(); }).then(function (d) {
+      state.pwdOn = !!(d && d.required);
+    }).catch(function () {});
+  })();
   loadQHist();
   registerSW();
   refreshAll();
@@ -7890,12 +8377,9 @@ function normalizeSettingValue(k, raw) {
       return v === null ? { ok: false } : { ok: true, value: v };
     }
     if (k === "notify.types") {
-      const arr = Array.isArray(raw) ? raw : String(raw === undefined || raw === null ? "" : raw).split(",");
-      const list = arr.map(function (s) { return String(s).trim(); })
-        .filter(function (t) { return NOTIFY_TYPES.indexOf(t) !== -1; });
-      if (!list.length) return { ok: false };
+      const uniq = normalizeNotifyTypeList(raw);
+      if (!uniq) return { ok: false };
       /* 去重且保持固定顺序，便于前后端一致比对 */
-      const uniq = NOTIFY_TYPES.filter(function (t) { return list.indexOf(t) !== -1; });
       return { ok: true, value: uniq.join(",") };
     }
     if (k === "notify.retry") {
@@ -7974,6 +8458,7 @@ function notifyTargetView(t) {
   }
   return {
     id: t.id, channel: t.channel, name: t.name, enabled: !!t.enabled,
+    types: (t.types || NOTIFY_TYPES).slice(),
     configured: spec.need.every(function (f) { return !!t.fields[f]; }),
     fields: fields,
   };
@@ -7992,6 +8477,13 @@ function normalizeNotifyTargets(raw, existing) {
     if (!spec) return { ok: false };
     const name = String(t.name === undefined || t.name === null ? "" : t.name).trim();
     if (!name || name.length > TOKEN_NAME_MAX) return { ok: false };
+    /* 卡片级接收类型：未传 → 默认全部（兼容旧客户端）；传入但无有效项 → 拒绝 */
+    let types = NOTIFY_TYPES.slice();
+    if (t.types !== undefined) {
+      const ty = normalizeNotifyTypeList(t.types);
+      if (!ty) return { ok: false };
+      types = ty;
+    }
     const id = String(t.id || "").trim() || ("nt_" + randHex(8));
     /* 同一批次内 id 必须唯一，避免一个 id 被多条目标复用 */
     if (seen[id]) return { ok: false };
@@ -8008,7 +8500,7 @@ function normalizeNotifyTargets(raw, existing) {
       if (!r.ok) return { ok: false };
       fields[f] = r.value;
     }
-    out.push({ id: id, channel: channel, name: name, enabled: t.enabled !== false, fields: fields });
+    out.push({ id: id, channel: channel, name: name, enabled: t.enabled !== false, types: types, fields: fields });
   }
   return { ok: true, value: JSON.stringify(out) };
 }
@@ -8044,6 +8536,8 @@ function notifySchemaView() {
     const spec = NOTIFY_CHANNELS[name];
     return {
       key: name, label: spec.label,
+      /* need：前端编辑器用于必填校验；fields 用于输入框渲染 */
+      need: spec.need.slice(),
       fields: Object.keys(spec.fields).map(function (f) {
         return { key: f, sensitive: !!spec.fields[f].sensitive };
       }),
@@ -8278,7 +8772,7 @@ async function handleTestNotify(request, env) {
     content: "这是一条设置页触发的测试通知；收到即表示该渠道配置可用。",
     time: new Date().toISOString().replace("T", " ").slice(0, 19) + " UTC",
     source: "notify", sender: "SMSToWeb", device: "设置页",
-  }, { only: channel, target_id: targetId, collect: true, config: cfg });
+  }, { only: channel, target_id: targetId, collect: true, config: cfg, _test: true });
   const r = results && results[0];
   if (!r) return json({ success: false, error: "NOT_CONFIGURED" }, 400);
   if (!r.ok) return json({ success: false, error: "SEND_FAILED", message: r.error || "" }, 502);
@@ -8336,7 +8830,7 @@ export default {
       /* 登录开关：开启后，除推送接口与登录/登出外，页面与管理 API 均需登录 */
       const isPage = path === "/" || path === "/index.html";
       const isPublicApi = path === "/api/receive" || path === "/api/push" || path === "/api/login" || path === "/api/logout" ||
-        path === "/api/cron" || path === "/manifest.webmanifest" || path === "/sw.js";
+        path === "/api/auth-state" || path === "/api/cron" || path === "/manifest.webmanifest" || path === "/sw.js";
       if (!isPublicApi && !(await isAuthed(request, env))) {
         if (isPage && request.method === "GET") {
           return new Response(renderHtml(LOGIN_HTML, env), {
@@ -8354,6 +8848,14 @@ export default {
       }
       if (path === "/api/login" && request.method === "POST") {
         return await handleLogin(request, env);
+      }
+      /* 登录态探测（公开，不含敏感值）：前端据此决定重要操作是否弹密码确认 */
+      if (path === "/api/auth-state" && request.method === "GET") {
+        return handleAuthState(env);
+      }
+      /* 重要操作密码校验：需已登录（不在公开白名单），校验通过仅返回 success，不签发会话 */
+      if (path === "/api/verify-password" && request.method === "POST") {
+        return await handleVerifyPassword(request, env);
       }
       if (path === "/api/logout" && request.method === "POST") {
         return handleLogout(request, env);
