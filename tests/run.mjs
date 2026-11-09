@@ -868,13 +868,13 @@ async function main() {
     const scLogic = stripComments(pgHtml.slice(pgHtml.indexOf("var SET_SECTIONS"), pgHtml.indexOf("function openSessTtl")));
     check(!/[\u4e00-\u9fff]/.test(scLogic), "设置中心逻辑区无硬编码中文文案（全部走 T() 键）");
     /* 消息列表第二阶段：渐进加载 / 未读入口 / 摘要详情 结构存在 */
-    check(pgHtml.includes('id="loadmore"') && pgHtml.includes('id="nomore"') && pgHtml.includes('id="unreadcount"'), "列表含加载更多、到底提示与未读入口");
-    const msgKeys = ["loadMore", "loadingMore", "noMore", "detailBtn", "detailTip", "detailFail", "readFail", "loadMoreFail"];
+    check(!pgHtml.includes('id="loadmore"') && !pgHtml.includes('id="nomore"') && pgHtml.includes('id="unreadcount"'), "列表仅保留分页、无加载更多，含未读入口");
+    const msgKeys = ["detailBtn", "detailTip", "detailFail", "readFail"];
     const msgMissing = msgKeys.filter((k) => (pgHtml.match(new RegExp("\\b" + k + ":", "g")) || []).length < 9);
-    check(msgMissing.length === 0, "列表新增文案九语种全覆盖（8 键各 9 处）" + (msgMissing.length ? "，缺：" + msgMissing.join(",") : ""));
+    check(msgMissing.length === 0, "列表文案九语种全覆盖（4 键各 9 处）" + (msgMissing.length ? "，缺：" + msgMissing.join(",") : ""));
     check(pgHtml.includes("p.set(\"slim\", \"1\")") && pgHtml.includes("m.summary"), "列表请求 slim=1 且卡片使用摘要字段");
     check(pgHtml.includes("state.loadMoreDepth") && pgHtml.includes("state.seen[m.id]"), "前端具备分页去重与历史位置保护");
-    check((pgHtml.match(/cursorStale:/g) || []).length >= 9 && pgHtml.includes("CURSOR_STALE"), "游标失效提示九语种齐备且前端处理 409");
+    check(pgHtml.includes('id="prev"') && pgHtml.includes('id="next"') && pgHtml.includes("function doJump"), "列表保留上一页/下一页与页码跳转");
     /* 本轮体验优化：两行摘要 / 单条已读 / 独立批量区 / 详情重构 */
     check(pgHtml.includes(".content.summary") && pgHtml.includes("-webkit-line-clamp: 2") && pgHtml.includes("markClipped"), "摘要按 CSS 两行截断并由 JS 实测溢出决定按钮");
     check(pgHtml.includes('id="selbar"') && pgHtml.includes('id="selread"') && pgHtml.includes("contextmenu") && pgHtml.includes("长按"), "多选默认隐藏，右键/长按进入批量操作");
@@ -2048,7 +2048,7 @@ async function main() {
     check(!copied, "拉丁系译文非 en 原样复制（违例：" + (copied || "无") + "）");
   }
   const pageHtml = await (await fetchApp(R("GET", "/", {}), e0)).text();
-  check(/data-i18n="pageTitle"/.test(pageHtml) && /data-i18n-ph="searchPh"/.test(pageHtml),
+  check(/data-i18n="pageSub"/.test(pageHtml) && /data-i18n-ph="searchPh"/.test(pageHtml),
     "管理页静态文案带 data-i18n 标注");
   check(/id="sclang"/.test(pageHtml) && /sms_lang/.test(pageHtml), "语言选择位于设置中心并本地记忆");
   check(/function applyI18n/.test(pageHtml) && /function T\(key, vars\)/.test(pageHtml), "i18n 运行时（T / applyI18n）已注入");

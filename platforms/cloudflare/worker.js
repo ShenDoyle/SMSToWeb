@@ -2243,9 +2243,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .recv:hover { color: var(--text); }
   .empty { text-align: center; color: var(--faint); padding: 40px 0; }
   .pager { display: flex; gap: 8px; justify-content: center; align-items: center; margin-top: 16px; }
-  /* 渐进加载：加载更多 + 到底提示（复用 DS 按钮，不新造视觉） */
-  .morewrap { display: flex; justify-content: center; margin-top: 14px; }
-  .nomore { color: var(--ds-color-text-tertiary); font-size: var(--ds-text-xs); padding: var(--ds-space-3) 0; }
   /* 未读入口：数量徽章 + 文字（不只靠颜色） */
   .unreadpill { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; }
   .unreadpill[data-on="1"] { border-color: var(--ds-color-primary); color: var(--ds-color-primary); background: var(--ds-color-primary-subtle); }
@@ -2280,7 +2277,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .langmenu { position: fixed; z-index: 200; background: var(--card); border: 1px solid var(--border);
               border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.14); padding: 4px; min-width: 150px; }
   .langitem { padding: 8px 14px; border-radius: 7px; cursor: pointer; font-size: 13px; white-space: nowrap; color: var(--text); }
-  .langitem:hover { background: rgba(127,127,127,.12); }
+  .langitem:hover { background: var(--ds-color-bg-subtle); }
   .langitem.cur { color: var(--accent); font-weight: 600; }
   .content.fold { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
   .more { border: none; background: none; color: var(--link); cursor: pointer; font-size: 12px; padding: 2px 0; }
@@ -2372,34 +2369,36 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .selbar { bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
   .newpill { bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
   /* 接入令牌面板（设置菜单入口 → 复用 .modal/.sheet 弹层，移动端自动底部抽屉） */
-  .tokrow { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid rgba(127,127,127,.18); flex-wrap: wrap; }
+  .tokrow { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--ds-color-divider); flex-wrap: wrap; }
   .tokmain { flex: 1 1 160px; min-width: 0; }
   .tokname { font-weight: 600; font-size: 14px; word-break: break-all; }
   .tokmeta { font-size: 12px; opacity: .65; margin-top: 2px; }
   .tokrow.revoked .tokname, .tokrow.revoked .tokmeta { opacity: .45; }
-  .tokbadge { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: rgba(127,127,127,.15); white-space: nowrap; }
+  .tokbadge { font-size: var(--ds-text-xs); padding: 1px 8px; border-radius: var(--ds-radius-pill);
+              background: var(--ds-color-bg-subtle); color: var(--ds-color-text-secondary); white-space: nowrap; }
   .tokrow.revoked .tokbadge { opacity: .6; }
   .tokacts { display: flex; gap: 6px; }
   .toknote { font-size: 12px; line-height: 1.6; padding: 8px 10px; border-radius: 8px;
              background: var(--ds-color-bg-subtle); border-left: 3px solid var(--ds-color-warning);
              color: var(--ds-color-text-secondary); margin: 0 0 10px; }
-  .toknewrow { display: flex; gap: 8px; margin: 12px 0 4px; flex-wrap: wrap; }
-  .toknewrow input { flex: 1; min-width: 0; }
-  .toknewrow select, .toknewrow input[type="date"] { flex: 1; min-width: 0; }
+  .toknewrow { display: flex; align-items: center; gap: 8px; margin: 12px 0 4px; flex-wrap: wrap; }
+  .toknewrow [hidden] { display: none !important; }
   .foot .ver { opacity: .6; }
-  .toksecret { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; word-break: break-all;
-               padding: 10px; border-radius: 8px; background: rgba(127,127,127,.12); user-select: all; }
+  .toksecret { font-family: var(--ds-font-mono); font-size: var(--ds-text-sm); word-break: break-all;
+               padding: 10px; border-radius: var(--ds-radius-md); background: var(--ds-color-bg-subtle); user-select: all; }
   /* 设置表单（通知设置 / 业务设置）：弹层内可滚动，沿用令牌面板的输入风格 */
   .setform { max-height: 62vh; overflow: auto; padding-right: 4px; }
-  .setgrp { padding: 10px 0 6px; border-top: 1px solid rgba(127,127,127,.18); }
+  .setgrp { padding: 10px 0 6px; border-top: 1px solid var(--ds-color-divider); }
   .setgrp:first-child { border-top: 0; }
   .setgrp h4 { margin: 0 0 6px; font-size: 14px; display: flex; align-items: center; gap: 8px; }
   .setgrp h4 .tokbadge { margin-left: auto; }
   .setrow { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 13px; flex-wrap: wrap; }
   .setrow > label { flex: 0 0 auto; min-width: 76px; color: var(--muted); }
-  .setrow input[type="text"], .setrow input[type="password"], .setrow input[type="number"], .setrow select {
-    flex: 1 1 140px; min-width: 0; padding: 6px 8px; border: 1px solid var(--border); border-radius: 8px;
-    background: var(--card); color: var(--text); font-size: 13px; }
+  .setrow input[type="text"], .setrow input[type="password"], .setrow input[type="number"], .setrow select,
+  .toknewrow input, .toknewrow select {
+    flex: 1 1 140px; min-width: 0; min-height: var(--ds-control-h-sm); padding: 6px 8px;
+    border: var(--ds-border-w) solid var(--ds-color-border); border-radius: var(--ds-radius-md);
+    background: var(--ds-color-bg-surface); color: var(--ds-color-text); font-size: var(--ds-text-sm); }
   .setrow .clr { position: static; right: auto; top: auto; transform: none; flex: 0 0 auto; font-size: 12px; display: inline-flex; align-items: center; gap: 4px; color: var(--muted); white-space: nowrap; }
   .setrow #scdnds, .setrow #scdnde { flex: 0 1 76px; min-width: 60px; }
   .setrow .settest { flex: 0 0 auto; }
@@ -2409,7 +2408,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .pushcard--off { opacity: .62; }
   .pushcard-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .pushcard-name { font-weight: 600; font-size: 13.5px; word-break: break-all; }
-  .pushbadge { font-size: 11px; padding: 2px 8px; border-radius: 10px; background: rgba(127,127,127,.15); white-space: nowrap; }
+  .pushbadge { font-size: var(--ds-text-xs); padding: 1px 8px; border-radius: var(--ds-radius-pill);
+               background: var(--ds-color-bg-subtle); color: var(--ds-color-text-secondary); white-space: nowrap; }
   .pushbadge.on { background: var(--badge-bg); color: var(--accent); }
   .pushbadge.off { color: var(--muted); }
   .pushcard-meta { font-size: 12px; color: var(--muted); margin-top: 4px; }
@@ -2564,8 +2564,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .brand { display: flex; align-items: center; gap: 11px; }
   .logo { width: 38px; height: 38px; border-radius: 11px; background: var(--accent); color: #fff;
           display: grid; place-items: center; font-weight: 800; font-size: 15px; box-shadow: var(--ds-shadow-1); }
-  .brand-name { font-size: 17px; font-weight: 700; letter-spacing: -.2px; }
-  .brand-sub { font-size: 12px; color: var(--muted); }
   .top-actions { display: flex; gap: 8px; align-items: center; }
   .top-actions .tbtn { padding: 7px 12px; min-height: 34px; font-size: 13px; border-radius: 8px; }
   .page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin: 0 0 14px; }
@@ -2687,9 +2685,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
                     background: var(--card); color: var(--text); font-size: 12px; min-height: 28px; }
   .jumpwrap button { border: 1px solid var(--border); background: var(--card); color: var(--text); border-radius: 6px;
                      padding: 3px 9px; font-size: 12px; min-height: 28px; cursor: pointer; }
-  .morewrap { display: flex; justify-content: center; margin: 0; padding: 12px 0; border-top: 1px solid var(--row-border); }
-  .morewrap .tbtn { font-size: 12px; }
-  .nomore { color: var(--faint); font-size: 11px; padding: 4px 0; }
   .selbar { position: static; transform: none; left: auto; bottom: auto; display: flex; align-items: center; gap: 8px;
             background: var(--ds-color-bg-subtle); border: 0; border-bottom: 1px solid var(--row-border); border-radius: 0;
             padding: 8px 16px; z-index: auto; flex-wrap: wrap; }
@@ -2729,7 +2724,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   @media (max-width: 960px) { .layout { grid-template-columns: 1fr; } .sidebar { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   @media (max-width: 660px) {
     .wrap { padding: 14px 12px 30px; }
-    .brand-sub { display: none; }
     .page-head h1 { font-size: 20px; }
     .sidebar { grid-template-columns: 1fr; }
     .list { padding: 0 12px; }
@@ -2784,10 +2778,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   <header class="topbar">
     <div class="brand">
       <div class="logo">SMS</div>
-      <div>
-        <div class="brand-name">__SITE_NAME__</div>
-        <div class="brand-sub" data-i18n="brandSub">消息中心</div>
-      </div>
     </div>
     <div class="top-actions">
       <button class="tbtn" id="themebtn" data-i18n-title="themeTip">自动</button>
@@ -2797,7 +2787,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
 
   <section class="page-head">
     <div>
-      <h1 data-i18n="pageTitle">消息中心</h1>
+      <h1>__SITE_NAME__</h1>
       <div class="subtitle" data-i18n="pageSub">集中查看设备短信，快速处理未读消息</div>
     </div>
   </section>
@@ -2848,10 +2838,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       </div>
 
       <div class="list" id="list"><div class="sk"><div class="skc"></div><div class="skc"></div><div class="skc"></div></div></div>
-      <div class="morewrap">
-        <button class="tbtn" id="loadmore" type="button" hidden data-i18n="loadMore">加载更多</button>
-        <div class="nomore" id="nomore" hidden data-i18n="noMore">没有更多了</div>
-      </div>
       <div class="pagination">
         <span id="pageinfo"></span>
         <div class="pages">
@@ -2926,7 +2912,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     device: 0, src: "", q: "", page: 1, pages: 1, total: 0, lastId: 0, deb: null,
     lastIdByDev: {},
     inited: false, unread: 0, limit: 10, range: "", notifiedId: 0,
-    cursor: "", seen: {}, loadingMore: false, loadMoreDepth: 0,
+    cursor: "", seen: {}, loadMoreDepth: 0,
     selectMode: false, selected: {}, lastQ: "", starOnly: false, unreadOnly: false, readOnly: false, filterMode: "all", lastList: [],
     pwdOn: true,
     labels: (function () { try { return JSON.parse(localStorage.getItem("sms_labels") || "{}") || {}; } catch (e) { return {}; } })(),
@@ -4625,90 +4611,54 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   /* 消息列表新增文案（九语种）；与 SC_I18N 同样以独立表合并，不改既有字典结构 */
   var MSG_I18N = {
     "zh-CN": {
-    loadMore: "加载更多",
-    loadingMore: "加载中…",
-    noMore: "没有更多了",
-    loadMoreFail: "加载更多失败，请重试",
     detailBtn: "查看详情",
     detailTip: "点击查看完整内容",
     detailFail: "无法打开消息详情",
     readFail: "标记已读失败"
     },
     "zh-TW": {
-    loadMore: "載入更多",
-    loadingMore: "載入中…",
-    noMore: "沒有更多了",
-    loadMoreFail: "載入更多失敗，請重試",
     detailBtn: "查看詳情",
     detailTip: "點擊查看完整內容",
     detailFail: "無法開啟訊息詳情",
     readFail: "標記已讀失敗"
     },
     "en": {
-    loadMore: "Load more",
-    loadingMore: "Loading…",
-    noMore: "No more messages",
-    loadMoreFail: "Failed to load more — retry",
     detailBtn: "Details",
     detailTip: "Tap to view the full message",
     detailFail: "Could not open the message",
     readFail: "Failed to mark as read"
     },
     "ja": {
-    loadMore: "さらに読み込む",
-    loadingMore: "読み込み中…",
-    noMore: "これ以上ありません",
-    loadMoreFail: "追加の読み込みに失敗しました。再試行してください",
     detailBtn: "詳細",
     detailTip: "タップして全文を表示",
     detailFail: "メッセージを開けませんでした",
     readFail: "既読の更新に失敗しました"
     },
     "ko": {
-    loadMore: "더 불러오기",
-    loadingMore: "불러오는 중…",
-    noMore: "더 이상 없습니다",
-    loadMoreFail: "더 불러오기 실패 — 다시 시도하세요",
     detailBtn: "상세 보기",
     detailTip: "탭하여 전체 보기",
     detailFail: "메시지를 열 수 없습니다",
     readFail: "읽음 표시 실패"
     },
     "es": {
-    loadMore: "Cargar más",
-    loadingMore: "Cargando…",
-    noMore: "No hay más",
-    loadMoreFail: "Error al cargar más — reintentar",
     detailBtn: "Ver detalles",
     detailTip: "Toca para ver el mensaje completo",
     detailFail: "No se pudo abrir el mensaje",
     readFail: "No se pudo marcar como leído"
     },
     "fr": {
-    loadMore: "Charger plus",
-    loadingMore: "Chargement…",
-    noMore: "Plus rien",
-    loadMoreFail: "Échec du chargement — réessayer",
     detailBtn: "Voir le détail",
     detailTip: "Touchez pour voir le message complet",
     detailFail: "Impossible d'ouvrir le message",
     readFail: "Échec du marquage comme lu"
     },
     "de": {
-    loadMore: "Mehr laden",
-    loadingMore: "Wird geladen…",
-    noMore: "Keine weiteren",
-    loadMoreFail: "Mehr laden fehlgeschlagen – erneut versuchen",
     detailBtn: "Details",
     detailTip: "Tippen für die vollständige Nachricht",
     detailFail: "Nachricht konnte nicht geöffnet werden",
     readFail: "Als gelesen markieren fehlgeschlagen"
     },
     "pt-BR": {
-    loadMore: "Carregar mais",
-    loadingMore: "Carregando…",
-    noMore: "Não há mais",
-    loadMoreFail: "Falha ao carregar mais — tentar novamente",
     detailBtn: "Ver detalhes",
     detailTip: "Toque para ver a mensagem completa",
     detailFail: "Não foi possível abrir a mensagem",
@@ -4719,24 +4669,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     for (var _ml in MSG_I18N) {
       if (!I18N[_ml]) I18N[_ml] = {};
       for (var _mk in MSG_I18N[_ml]) I18N[_ml][_mk] = MSG_I18N[_ml][_mk];
-    }
-  })();
-  /* 分页会话失效提示（九语种） */
-  var MISC_I18N = {
-    "zh-CN": { cursorStale: "列表已更新（星标变化），已回到顶部重新加载" },
-    "zh-TW": { cursorStale: "清單已更新（星標變化），已回到頂端重新載入" },
-    "en": { cursorStale: "The list changed (star update) — reloaded from the top" },
-    "ja": { cursorStale: "スター変更のため一覧を更新し、先頭から再読み込みしました" },
-    "ko": { cursorStale: "별표 변경으로 목록이 갱신되어 맨 위에서 다시 불러왔습니다" },
-    "es": { cursorStale: "La lista cambió (favoritos); se recargó desde el inicio" },
-    "fr": { cursorStale: "La liste a changé (favoris) ; rechargée depuis le début" },
-    "de": { cursorStale: "Liste geändert (Markierung) – von oben neu geladen" },
-    "pt-BR": { cursorStale: "A lista mudou (favoritos) — recarregada do topo" }
-  };
-  (function () {
-    for (var _ql in MISC_I18N) {
-      if (!I18N[_ql]) I18N[_ql] = {};
-      for (var _qk in MISC_I18N[_ql]) I18N[_ql][_qk] = MISC_I18N[_ql][_qk];
     }
   })();
   /* 消息列表/详情新增文案（九语种） */
@@ -4886,7 +4818,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   /* 仪表盘新版界面文案（九语种） */
   var V2_I18N = {
     "zh-CN": {
-      brandSub: "消息中心", pageTitle: "消息中心", pageSub: "一驿过一驿，驿骑如星流",
+      pageSub: "一驿过一驿，驿骑如星流",
       listTitle: "短信列表", refresh: "刷新", settingsOverview: "设置概览", openSettings: "打开设置中心",
       quickOverview: "快捷概览", viewStats: "查看统计", selectHint: "右键或长按消息可多选",
       selAllList: "选择当前列表", tagVerify: "验证码", allDevices: "全部设备",
@@ -4912,7 +4844,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scImportEnvHelp: "把环境变量中已有的通知配置写入数据库，便于后续管理。"
     },
     "zh-TW": {
-      brandSub: "訊息中心", pageTitle: "訊息中心", pageSub: "一驛過一驛，驛騎如星流",
+      pageSub: "一驛過一驛，驛騎如星流",
       listTitle: "簡訊列表", refresh: "重新整理", settingsOverview: "設定概覽", openSettings: "開啟設定中心",
       quickOverview: "快捷概覽", viewStats: "查看統計", selectHint: "右鍵或長按訊息可多選",
       selAllList: "選擇目前清單", tagVerify: "驗證碼", allDevices: "全部裝置",
@@ -4938,7 +4870,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scImportEnvHelp: "把環境變數中既有的通知設定寫入資料庫，便於後續管理。"
     },
     en: {
-      brandSub: "Message center", pageTitle: "Message center", pageSub: "From post to post, like shooting stars.",
+      pageSub: "From post to post, like shooting stars.",
       listTitle: "Messages", refresh: "Refresh", settingsOverview: "Settings overview", openSettings: "Open settings",
       quickOverview: "Quick overview", viewStats: "View stats", selectHint: "Right-click or long-press a message to multi-select",
       selAllList: "Select current list", tagVerify: "Verification code", allDevices: "All devices",
@@ -4964,7 +4896,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scImportEnvHelp: "Import notification settings from environment variables into the database for easier management."
     },
     ja: {
-      brandSub: "メッセージセンター", pageTitle: "メッセージセンター", pageSub: "駅から駅へ、星のように駆け流れる",
+      pageSub: "駅から駅へ、星のように駆け流れる",
       listTitle: "メッセージ一覧", refresh: "更新", settingsOverview: "設定の概要", openSettings: "設定センターを開く",
       quickOverview: "クイック概要", viewStats: "統計を見る", selectHint: "右クリックまたは長押しで複数選択",
       selAllList: "現在の一覧を選択", tagVerify: "認証コード", allDevices: "すべての端末",
@@ -4990,7 +4922,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scImportEnvHelp: "環境変数の通知設定をデータベースへ取り込み、後から管理しやすくします。"
     },
     ko: {
-      brandSub: "메시지 센터", pageTitle: "메시지 센터", pageSub: "역에서 역으로, 별처럼 흐르는 발걸음",
+      pageSub: "역에서 역으로, 별처럼 흐르는 발걸음",
       listTitle: "메시지 목록", refresh: "새로고침", settingsOverview: "설정 개요", openSettings: "설정 센터 열기",
       quickOverview: "빠른 개요", viewStats: "통계 보기", selectHint: "마우스 오른쪽 버튼 또는 길게 눌러 여러 개 선택",
       selAllList: "현재 목록 선택", tagVerify: "인증 코드", allDevices: "모든 기기",
@@ -5016,7 +4948,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scImportEnvHelp: "환경 변수의 알림 설정을 데이터베이스로 가져와 이후 관리하기 쉽게 합니다."
     },
     es: {
-      brandSub: "Centro de mensajes", pageTitle: "Centro de mensajes", pageSub: "De posta en posta, como estrellas fugaces.",
+      pageSub: "De posta en posta, como estrellas fugaces.",
       listTitle: "Mensajes", refresh: "Actualizar", settingsOverview: "Resumen de ajustes", openSettings: "Abrir ajustes",
       quickOverview: "Resumen rápido", viewStats: "Ver estadísticas", selectHint: "Clic derecho o pulsación larga para seleccionar varios",
       selAllList: "Seleccionar lista actual", tagVerify: "Código de verificación", allDevices: "Todos los dispositivos",
@@ -5042,7 +4974,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scImportEnvHelp: "Importa la configuración de notificaciones de las variables de entorno a la base de datos para gestionarla mejor."
     },
     fr: {
-      brandSub: "Centre de messages", pageTitle: "Centre de messages", pageSub: "De relais en relais, comme un torrent d'étoiles.",
+      pageSub: "De relais en relais, comme un torrent d'étoiles.",
       listTitle: "Messages", refresh: "Actualiser", settingsOverview: "Aperçu des réglages", openSettings: "Ouvrir les réglages",
       quickOverview: "Aperçu rapide", viewStats: "Voir les statistiques", selectHint: "Clic droit ou appui long pour sélectionner plusieurs messages",
       selAllList: "Sélectionner la liste actuelle", tagVerify: "Code de vérification", allDevices: "Tous les appareils",
@@ -5068,7 +5000,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scImportEnvHelp: "Importez la configuration de notification des variables d'environnement dans la base pour la gérer plus facilement."
     },
     de: {
-      brandSub: "Nachrichtenzentrum", pageTitle: "Nachrichtenzentrum", pageSub: "Von Station zu Station, wie ein Sternenstrom.",
+      pageSub: "Von Station zu Station, wie ein Sternenstrom.",
       listTitle: "Nachrichten", refresh: "Aktualisieren", settingsOverview: "Einstellungsübersicht", openSettings: "Einstellungen öffnen",
       quickOverview: "Kurzübersicht", viewStats: "Statistik ansehen", selectHint: "Rechtsklick oder langes Drücken für Mehrfachauswahl",
       selAllList: "Aktuelle Liste auswählen", tagVerify: "Bestätigungscode", allDevices: "Alle Geräte",
@@ -5094,7 +5026,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scImportEnvHelp: "Benachrichtigungseinstellungen aus Umgebungsvariablen in die Datenbank importieren, um sie leichter zu verwalten."
     },
     "pt-BR": {
-      brandSub: "Central de mensagens", pageTitle: "Central de mensagens", pageSub: "De estação em estação, como estrelas cadentes.",
+      pageSub: "De estação em estação, como estrelas cadentes.",
       listTitle: "Mensagens", refresh: "Atualizar", settingsOverview: "Visão dos ajustes", openSettings: "Abrir ajustes",
       quickOverview: "Visão rápida", viewStats: "Ver estatísticas", selectHint: "Clique com o botão direito ou toque e segure para selecionar vários",
       selAllList: "Selecionar lista atual", tagVerify: "Código de verificação", allDevices: "Todos os dispositivos",
@@ -5514,7 +5446,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       if (window.scrollY > 260) showNewPill(fresh.length);
     }
   }
-  function qs(cur) {
+  function qs() {
     var p = new URLSearchParams();
     if (state.device) p.set("device_id", state.device);
     if (state.src) p.set("source", state.src);
@@ -5523,8 +5455,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (state.starOnly) p.set("starred", "1");
     if (state.unreadOnly) p.set("unread", "1");
     if (state.readOnly) p.set("read", "1");
-    /* 游标仅用于“加载更多”；首屏/刷新一律按 page，避免历史游标污染筛选条件 */
-    if (cur) p.set("cursor", cur); else p.set("page", state.page);
+    p.set("page", state.page);
     p.set("limit", state.limit);
     /* 列表只取摘要（约 20 字），完整正文由详情接口按需取 */
     p.set("slim", "1");
@@ -5741,38 +5672,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   /* 仅单页模式（未加载历史）时裁剪轮询新增，避免列表无限增长；
      一旦用过游标加载历史，则保留已加载内容，避免丢弃历史后游标错位 */
   function trimToLimitIfSinglePage(listEl) { if (!state.cursor) trimToLimit(listEl); }
-  /* 加载更多：只取下一批（游标），追加而非覆盖；同一 id 去重 */
-  function updateLoadMore(hasMore) {
-    var b = $("loadmore"), end = $("nomore");
-    if (b) {
-      b.hidden = !hasMore;
-      b.disabled = !!state.loadingMore;
-      b.setAttribute("data-loading", state.loadingMore ? "1" : "0");
-      b.textContent = state.loadingMore ? T("loadingMore") : T("loadMore");
-    }
-    if (end) end.hidden = !!hasMore;
-  }
-  function appendCards(items) {
-    var listEl = $("list");
-    if (!listEl) return;
-    var prevDay = "";
-    var cards = listEl.querySelectorAll(".card");
-    if (cards.length) {
-      var last = cards[cards.length - 1];
-      var lb = last.querySelector(".time-line");
-      prevDay = last.getAttribute("data-day") || "";
-    }
-    var html = "", day = prevDay;
-    items.forEach(function (m) {
-      var d = dayLabel(m.received_at);
-      if (d !== day) { html += '<div class="daysep">' + esc(d) + '</div>'; day = d; }
-      html += cardHtml(m, false);
-    });
-    listEl.insertAdjacentHTML("beforeend", html);
-    fillAreas();
-    syncSelBoxes();
-    markClipped(listEl);
-  }
   /* 两行截断的真实溢出判定：按实际行数（自然高度 / 行高）决定是否显示「查看全文」，
      不依赖字数或服务器截断标记，兼容中英文/数字/URL/混合字符与任意宽度 */
   function markClipped(root) {
@@ -5797,47 +5696,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       el.style.display = oldDisplay;
       btn.hidden = lines <= 2;
     }
-  }
-  function loadMore() {
-    if (state.loadingMore || !state.cursor) return;
-    state.loadingMore = true;
-    updateLoadMore(true);
-    fetch("/api/messages?" + qs(state.cursor))
-      .then(function (r) {
-        if (r.status === 401) { location.reload(); return new Promise(function () {}); }
-        return r.json();
-      })
-      .then(function (res) {
-        if (!res || !res.success) {
-          if (res && res.error === "CURSOR_STALE") {
-            /* 分页会话期间星标集合变化：后台已拒绝续页，回到首屏重载，保证不漏不重 */
-            state.loadingMore = false;
-            state.cursor = "";
-            state.loadMoreDepth = 0;
-            toast(T("cursorStale"));
-            load();
-            return;
-          }
-          throw new Error((res && res.error) || "load failed");
-        }
-        var added = [];
-        (res.list || []).forEach(function (m) {
-          if (state.seen[m.id]) return;
-          state.seen[m.id] = true;
-          state.lastList.push(m);
-          added.push(m);
-        });
-        if (added.length) appendCards(added);
-        state.loadingMore = false;
-        state.cursor = res.next_cursor || "";
-        state.loadMoreDepth += 1;
-        updateLoadMore(!!res.next_cursor);
-      })
-      .catch(function () {
-        state.loadingMore = false;
-        updateLoadMore(true);
-        toast(T("loadMoreFail"));
-      });
   }
   function prependFresh(fresh, res) {
     var listEl = $("list");
@@ -6140,8 +5998,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       '<h3>接入令牌</h3>' +
       '<div class="toknote" id="toknote" hidden>当前仍可用部署时环境变量令牌接入；建议创建命名令牌后停用引导令牌（设置 DISABLE_RECEIVE_TOKEN=true）。</div>' +
       '<div id="toklist"><div class="tokmeta">加载中…</div></div>' +
-      '<div class="toknewrow"><input type="text" id="tokname" maxlength="64" placeholder="令牌名称（字母/数字/_/-）" autocomplete="off" aria-label="令牌名称"><button class="tbtn" id="tokcreate">＋ 新建令牌</button></div>' +
-      '<div class="toknewrow"><select id="tokexp" aria-label="有效期"><option value="0">永久有效</option><option value="7">7 天后到期</option><option value="30">30 天后到期</option><option value="90">90 天后到期</option><option value="365">365 天后到期</option><option value="custom">自定义到期日…</option></select><input type="date" id="tokexpdate" hidden aria-label="到期日期"><input type="text" id="toknotenew" maxlength="200" placeholder="备注（可选，便于区分用途）" autocomplete="off" aria-label="备注"></div>'
+      '<div class="toknewrow"><input class="ds-input" type="text" id="tokname" maxlength="64" placeholder="令牌名称（字母/数字/_/-）" autocomplete="off" aria-label="令牌名称"><button class="tbtn" id="tokcreate">＋ 新建令牌</button></div>' +
+      '<div class="toknewrow"><select class="ds-select" id="tokexp" aria-label="有效期"><option value="0">永久有效</option><option value="7">7 天后到期</option><option value="30">30 天后到期</option><option value="90">90 天后到期</option><option value="365">365 天后到期</option><option value="custom">自定义到期日…</option></select><input class="ds-input" type="date" id="tokexpdate" hidden aria-label="到期日期"><input class="ds-input" type="text" id="toknotenew" maxlength="200" placeholder="备注（可选，便于区分用途）" autocomplete="off" aria-label="备注"></div>'
     );
     $("tokcreate").onclick = createTokenUi;
     $("tokname").onkeydown = function (ev) { if (ev.key === "Enter") createTokenUi(); };
@@ -6310,7 +6168,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         list.forEach(function (m) { state.seen[m.id] = true; });
         state.cursor = res.next_cursor || "";
         state.loadMoreDepth = 0;
-        updateLoadMore(!!res.next_cursor);
         if (typeof res.unread === "number") { state.unread = res.unread; }
         refreshUnreadCount();
         var freshSet = {};
@@ -6429,7 +6286,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var v = parseInt(localStorage.getItem("sms_perpage"), 10);
     state.limit = [10, 20, 50, 100].indexOf(v) !== -1 ? v : 10;
   })();
-  if ($("loadmore")) $("loadmore").onclick = loadMore;
   /* 筛选：全部 / 未读 / 已读 / 星标（单选，与原型筛选 chips 一致） */
   function applyFilterUI(mode) {
     var map = { fall: "all", funread: "unread", fread: "read", fstar: "starred" };
@@ -7504,7 +7360,7 @@ const LOGIN_HTML = String.raw`<!DOCTYPE html>
               border-radius: var(--ds-radius-lg); box-shadow: var(--ds-shadow-2); padding: 4px; min-width: 150px; }
   .langitem { padding: 8px 14px; border-radius: 7px; cursor: pointer; font-size: var(--ds-text-sm); white-space: nowrap;
               color: var(--ds-color-text); }
-  .langitem:hover { background: rgba(127,127,127,.12); }
+  .langitem:hover { background: var(--ds-color-bg-subtle); }
   .langitem.cur { color: var(--ds-color-link); font-weight: var(--ds-weight-medium); }
   .foot { color: var(--ds-color-text-tertiary); font-size: var(--ds-text-xs); margin-top: 14px; }
   .foot a { color: var(--ds-color-text-tertiary); }
