@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | **Português (BR)**
 
-> Sincronizado do original em inglês (pt-BR)
-
 Esta é a versão principal do projeto: SMS/notificações do celular → Cloudflare Worker → banco D1 → página web de administração.
 Sem servidor, cota gratuito generoso, tudo feito com o mouse no navegador — sem instalar nenhuma ferramenta.
 

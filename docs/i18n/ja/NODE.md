@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | **日本語** | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> 英語原文から同期（日本語版）
-
 SMSToWeb を Docker コンテナとしてセルフホストします。プロセスが常駐し関数の実行時間制限がなく、ロングポーリングのリアルタイム性が最良です。既存サーバーがあるユーザーや Fly.io / Railway へデプロイしたいユーザーに適しています（無料枠の状況は下記「プラットフォームの説明」参照）。
 
 **このディレクトリのファイル**：`server.mjs`（Node 18+ 依存ゼロのエントリ、内蔵の毎日クリーンアップを含む）、`app.js`（コアアプリ）、`db.js`（Turso / ローカル SQLite デュアルモードアダプタ）、`schema.sql`（テーブル作成）、`Dockerfile`、`package.json`。

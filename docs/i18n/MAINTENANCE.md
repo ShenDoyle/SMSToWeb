@@ -18,17 +18,11 @@ When a doc-affecting change lands in the English primary:
 3. If a section changed structurally (new/removed tables, renamed env vars), update all eight translations before the next release. For day-to-day edits, mark stale files in the translation's front-matter note instead of leaving silently outdated content.
 4. Run a link check on changed files: every `](...)` target must exist in the repo.
 
-## Sync stamp
+## Translation sync tracking
 
-The first line after the language switcher in every translated file records what it was synced from:
-
-```
-> Synced from English primary @ 2026-10-27
-```
+Sync stamps and "Sync notice" blocks are no longer written into translated files. Which English-primary revision a mirror corresponds to is tracked in Git history instead.
 
 Reviewers reject translation PRs that change technical facts without a matching English-primary change.
-
-**Current form of the stamp (M-2, 2026-11-09):** the one-line `Synced from English primary @ <date>` stamp described above was never actually present in the mirrors. Rather than fabricate historical dates, the M-2 pass inserted a **"Sync notice (2026-11-09)"** block at the top of every mirrored `README.md` / `ARCHITECTURE.md`. It serves the same purpose (naming the sync date and the authoritative source) and additionally lists the verified current facts that supersede stale statements in the mirror body. A future full re-translation should replace that block with a real one-line stamp.
 
 **Do not rely on `gen_app.py --check` for doc/UI drift.** The generator's `--check` verifies only the embedded `SCHEMA_SQL` block and SQL references; it does not compare the six platform `app.js` / `worker.js` copies. Editing UI strings inside `src/worker.js` therefore requires the full generator **write mode** plus a byte comparison of all six copies — a docs-only change never needs that, but a UI copy change always does.
 

@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | **繁體中文** | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> 自英語主版同步（繁體中文版）
-
 這是專案的主版本：手機簡訊/通知 → Cloudflare Worker → D1 資料庫 → 網頁管理頁。
 無需伺服器、免費額度充足、全程網頁點選即可完成，無需安裝任何工具。
 

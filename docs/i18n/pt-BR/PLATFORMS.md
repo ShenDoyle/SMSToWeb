@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | **Português (BR)**
 
-> Sincronizado do original em inglês (pt-BR)
-
 As seis plataformas do SMSToWeb (versão principal do Cloudflare + cinco plataformas portadas) ficam neste diretório. **Cada subdiretório de plataforma é totalmente autônomo**:
 código (entrada + aplicação central + adaptador de banco) + `schema.sql` + o guia de implantação detalhado da plataforma (README.md).
 

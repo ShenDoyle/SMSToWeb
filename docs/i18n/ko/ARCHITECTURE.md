@@ -1,13 +1,6 @@
 # 아키텍처 문서(ARCHITECTURE)
 
-> **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = **850 passing assertions** (plus the separate M-1 suite `tests/m1-lifecycle.mjs` = 32); `ENV_KEYS` = **33** variables; **all six platform entries pass a `waitUntil`-style `ctx`** (inline `await` is only a *runtime-capability* fallback, not an entry-point behaviour); Node shutdown grace = **80s** and the container/service stop grace must be **>= 90s** (Docker default 10s SIGKILLs first); `gen_app.py --check` verifies **only** the embedded `SCHEMA_SQL` block and SQL references, **not** platform-copy drift. Any statement in this mirror about "667/814/573 assertions", "31 variables", "other platforms finish notifications before the response", "8-second forced exit", "the deploy button creates the tables", or "one-click and you are live" is **outdated**. Read the [English primary](../../../README.md), [ARCHITECTURE](../../ARCHITECTURE.md), or the [Chinese user guide](../../guide/README.md) instead.
->
-> **同步提示（2026-11-09）**：本镜像属滞后翻译，上述事实以英文主版与中文主文档为准；本文件内关于测试数量、环境变量数量、「其他平台响应前发完通知」、8 秒强制退出、按钮自动建表等旧表述均已过时，请勿据此部署或验收。源码 `v1.1.0` 已固化至 `main`（`43aaecf`）；未创建 GitHub Release、未打 tag、未部署。
-
-
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | **한국어** | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
-
-> 영어 원본에서 동기화됨（한국어판）
 
 SMSToWeb은 "단일 코어 + 멀티플랫폼 엔트리" 구조의 SMS/알림 통합 시스템입니다: npm 의존성 0의 비즈니스 코어(`src/worker.js`) 하나를 생성 스크립트로 여섯 배포 플랫폼에 동기화하고, 각 플랫폼은 자체 런타임과 데이터베이스에 연결하는 얇은 어댑터 계층만 유지합니다.
 

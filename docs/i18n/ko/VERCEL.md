@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | **한국어** | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> 영어 원본에서 동기화됨（한국어판）
-
 SMSToWeb을 Vercel(Edge Function + Turso 데이터베이스)에 배포합니다. 무료 할당량으로 개인 사용에 충분하며 전체 약 15분입니다.
 
 **이 디렉터리의 파일**: `api/[[...route]].js`(엔트리), `app.js`(코어 애플리케이션), `db.js`(Turso 어댑터 계층), `schema.sql`(테이블 생성), `vercel.json`(예약 작업 설정 포함).

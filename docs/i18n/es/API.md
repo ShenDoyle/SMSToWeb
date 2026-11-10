@@ -1,6 +1,5 @@
 # Documentación de la API (API)
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | **Español** | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
-> Sincronizado del original en inglés (es)
 
 Todas las rutas toman `/` como raíz, responden en JSON (`Content-Type: application/json`) y soportan CORS. Salvo las «rutas públicas», están protegidas por el interruptor de login (las recomendaciones de configuración de seguridad están en el README raíz, «Recomendaciones de seguridad»).
 

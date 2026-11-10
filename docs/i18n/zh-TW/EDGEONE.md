@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | **繁體中文** | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> 自英語主版同步（繁體中文版）
-
 把 SMSToWeb 部署到騰訊 EdgeOne Pages Makers 版（Functions + Turso 資料庫）。**中國大陸存取體驗最好**的選擇（自訂網域需備案），全程約 15 分鐘。
 
 **本目錄檔案**：`functions/index.js`（根路徑入口，EdgeOne 必須叫這個名）、`functions/[[default]].js`（捕獲全部路由）、`app.js`（核心應用）、`db.js`（Turso 介接層）、`schema.sql`（建表）。

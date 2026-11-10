@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | **한국어** | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> 영어 원본에서 동기화됨（한국어판）
-
 SMSToWeb을 Netlify(Functions v2 + Turso 데이터베이스)에 배포합니다. 전체 약 15분입니다.
 
 **이 디렉터리의 파일**: `functions/api.mjs`(엔트리, `path: "/*"`로 전체 라우트 캡처), `functions/cron.mjs`(예약 정리 Scheduled Function), `app.js`(코어 애플리케이션), `db.js`(Turso 어댑터 계층), `schema.sql`(테이블 생성), `netlify.toml`(사이트 설정).

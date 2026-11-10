@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | **Português (BR)**
 
-> Sincronizado do original em inglês (pt-BR)
-
 O SMSToWeb equaliza, por uma camada única de adaptador de banco (os quatro métodos `prepare/bind/first/all/run`, totalmente idêntica à API D1 do Cloudflare), três backends de armazenamento, de modo que o código de negócio não tenha nenhuma diferença de dialeto SQL.
 
 ## 1. Matriz de backends

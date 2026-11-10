@@ -1,13 +1,6 @@
 # Architekturdokumentation (ARCHITECTURE)
 
-> **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = **850 passing assertions** (plus the separate M-1 suite `tests/m1-lifecycle.mjs` = 32); `ENV_KEYS` = **33** variables; **all six platform entries pass a `waitUntil`-style `ctx`** (inline `await` is only a *runtime-capability* fallback, not an entry-point behaviour); Node shutdown grace = **80s** and the container/service stop grace must be **>= 90s** (Docker default 10s SIGKILLs first); `gen_app.py --check` verifies **only** the embedded `SCHEMA_SQL` block and SQL references, **not** platform-copy drift. Any statement in this mirror about "667/814/573 assertions", "31 variables", "other platforms finish notifications before the response", "8-second forced exit", "the deploy button creates the tables", or "one-click and you are live" is **outdated**. Read the [English primary](../../../README.md), [ARCHITECTURE](../../ARCHITECTURE.md), or the [Chinese user guide](../../guide/README.md) instead.
->
-> **同步提示（2026-11-09）**：本镜像属滞后翻译，上述事实以英文主版与中文主文档为准；本文件内关于测试数量、环境变量数量、「其他平台响应前发完通知」、8 秒强制退出、按钮自动建表等旧表述均已过时，请勿据此部署或验收。源码 `v1.1.0` 已固化至 `main`（`43aaecf`）；未创建 GitHub Release、未打 tag、未部署。
-
-
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | **Deutsch** | [Português (BR)](../pt-BR/README.md)
-
-> Synct mit dem englischen Original (de)
 
 SMSToWeb ist ein „ein Kern + mehrere Plattformeinstiege“-System zur Aggregation von SMS/Benachrichtigungen: ein npm-freier Geschäftskern (`src/worker.js`), der über ein Generierungsskript auf sechs Bereitstellungsplattformen synchronisiert wird; jede Plattform behält nur einen dünnen Adapter für ihre Runtime und Datenbank.
 
@@ -54,7 +47,7 @@ Jedes Plattformverzeichnis ist **vollständig in sich geschlossen**: Der Einstie
 
 1. Nimmt `src/worker.js` als einzige Quelle, schneidet den gesamten Geschäftscode vor `export default {` ab, ergänzt den generischen Export-Schwanz (`fetchApp` / `runCron` / `handleCronRequest`) und schreibt das Ergebnis nach `platforms/shared/app.js`;
 2. kopiert die shared-Kopie zusammen mit `shared/db.js` und der Root-`schema.sql` in die Plattformverzeichnisse (`node/db.js` ausgenommen — separat gepflegt);
-3. ersetzt mit der im Skript eingebauten **ENV_KEYS-Whitelist** (eine einzige Liste mit 31 Umgebungsvariablen) den Inhalt zwischen den Markierungen `/* ==== ENV_KEYS BEGIN ==== */ … /* ==== ENV_KEYS END ==== */` der jeweiligen Einstiegsdatei — so bleibt die Menge der übergebenen Umgebungsvariablen über alle sechs Plattformen identisch und driftet nicht.
+3. ersetzt mit der im Skript eingebauten **ENV_KEYS-Whitelist** (eine einzige Liste mit 33 Umgebungsvariablen) den Inhalt zwischen den Markierungen `/* ==== ENV_KEYS BEGIN ==== */ … /* ==== ENV_KEYS END ==== */` der jeweiligen Einstiegsdatei — so bleibt die Menge der übergebenen Umgebungsvariablen über alle sechs Plattformen identisch und driftet nicht.
 
 Eiserne Regel: **Jede Geschäftsänderung nur in `src/worker.js` (sowie der ENV_KEYS-Liste in gen_app.py); danach zwingend gen_app.py erneut ausführen**; es ist verboten, generierte Artefakte unter platforms/ von Hand zu ändern (Ausnahmen: node/db.js und wrangler.toml).
 

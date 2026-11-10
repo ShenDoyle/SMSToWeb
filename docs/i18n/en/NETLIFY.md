@@ -2,8 +2,6 @@
 
 **English** | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> Synced from the English primary where applicable
-
 Deploy SMSToWeb to Netlify (Functions v2 + Turso database). About 15 minutes end to end.
 
 **Files in this directory**: `functions/api.mjs` (entry, `path: "/*"` catches all routes), `functions/cron.mjs` (scheduled cleanup Scheduled Function), `app.js` (core app), `db.js` (Turso adapter layer), `schema.sql` (table creation), `netlify.toml` (site configuration).

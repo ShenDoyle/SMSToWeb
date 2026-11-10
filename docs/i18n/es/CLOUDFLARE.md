@@ -1,6 +1,5 @@
 # Guía de despliegue en Cloudflare (versión principal, todo desde el navegador)
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | **Español** | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
-> Sincronizado del original en inglés (es)
 
 Esta es la versión principal del proyecto: SMS/notificaciones del móvil → Cloudflare Worker → base de datos D1 → página web de administración.
 Sin servidor, cuota gratuita de sobra, todo se hace con clics en el navegador, sin instalar ninguna herramienta.

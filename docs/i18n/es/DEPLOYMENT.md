@@ -1,6 +1,5 @@
 # SMSToWeb – Guía de despliegue y conexión multiplataforma
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | **Español** | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
-> Sincronizado del original en inglés (es)
 
 Este sistema se compone de dos partes: **lado de recepción** (clientes de push de cada plataforma) + **pasarela en la nube** (elige una de seis plataformas: Cloudflare / Vercel / Deno / Netlify / EdgeOne Makers / Docker autohospedado, ver [PLATFORMS.md](./PLATFORMS.md); la forma de conexión es idéntica en todas).
 Los SMS son solo una de las vías de entrada: cualquier dispositivo o script que pueda enviar peticiones HTTP puede enviar notificaciones a la misma página web para consultarlas.

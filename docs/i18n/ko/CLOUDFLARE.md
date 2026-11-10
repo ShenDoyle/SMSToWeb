@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | **한국어** | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> 영어 원본에서 동기화됨（한국어판）
-
 이 프로젝트의 메인 버전입니다: 휴대폰 SMS/알림 → Cloudflare Worker → D1 데이터베이스 → 웹 관리 페이지.
 서버 불필요, 무료 할당량 충분, 전 과정이 웹 클릭만으로 완료되며 어떤 도구도 설치할 필요가 없습니다.
 

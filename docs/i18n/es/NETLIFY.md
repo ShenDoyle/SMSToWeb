@@ -1,6 +1,5 @@
 # Guía de despliegue en Netlify
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | **Español** | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
-> Sincronizado del original en inglés (es)
 
 Despliega SMSToWeb en Netlify (Functions v2 + base de datos Turso). Unos 15 minutos en total.
 

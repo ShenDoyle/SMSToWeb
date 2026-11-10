@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | **Português (BR)**
 
-> Sincronizado do original em inglês (pt-BR)
-
 Todos os endpoints ficam sob a raiz `/`, as respostas são JSON (`Content-Type: application/json`) com suporte a CORS. Exceto os "endpoints públicos", todos são protegidos pela alternância de login (recomendações de configuração de segurança: veja o README da raiz, seção "Recomendações de segurança").
 
 ## Formas de autenticação

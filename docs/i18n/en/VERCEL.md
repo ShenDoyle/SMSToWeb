@@ -2,8 +2,6 @@
 
 **English** | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> Synced from the English primary where applicable
-
 Deploy SMSToWeb to Vercel (Edge Function + Turso database). The free tier is enough for personal use; about 15 minutes end to end.
 
 **Files in this directory**: `api/[[...route]].js` (entry), `app.js` (core app), `db.js` (Turso adapter layer), `schema.sql` (table creation), `vercel.json` (includes the scheduled task configuration).

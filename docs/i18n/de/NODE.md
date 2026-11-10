@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | **Deutsch** | [Português (BR)](../pt-BR/README.md)
 
-> Synct mit dem englischen Original (de)
-
 SMSToWeb als Docker-Container selbst hosten. Dauerhaft laufender Prozess, kein Funktionsdauer-Limit, beste Long-Polling-Echtzeit — geeignet für Nutzer mit vorhandenem Server oder mit Fly.io / Railway (zum Free-Kontingent siehe unten „Hinweise zur Plattform“).
 
 **Dateien in diesem Verzeichnis**: `server.mjs` (einstiegsfähig ab Node 18+, ohne Abhängigkeiten, mit eingebauter täglicher Bereinigung), `app.js` (Kernanwendung), `db.js` (Dual-Adapter für Turso / lokales SQLite), `schema.sql` (Tabellen anlegen), `Dockerfile`, `package.json`.

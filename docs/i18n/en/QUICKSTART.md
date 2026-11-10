@@ -2,8 +2,6 @@
 
 > This is the short English path. The [complete Chinese user guide](../../guide/README.md) has per-platform click-by-click steps, screenshots references, and a fuller FAQ.
 
-**Version status**: source `v1.1.0` is finalized on `main` (commit `43aaecf`); **no GitHub Release, no tag, no deployment** — six-platform runtime validation is 0/6. The version shown in the page footer is authoritative.
-
 ## What you need
 
 1. A platform account — **Cloudflare recommended** (free, no server, no credit card).
@@ -53,6 +51,6 @@ You do **not** need to buy a server or a domain. Platforms give you a free URL.
 
 ## Honest limitations
 
-- The deploy buttons deploy the **public `main` branch**, which may lag behind this working tree. Check the footer version.
+- The deploy buttons deploy the **public `main` branch**. Check the footer version for the code actually running in your instance.
 - No serverless platform was deployed for real in this pass; platform capabilities come from official documentation, not measurement.
 - Local verification: 850 automated tests and five real Docker shutdown scenarios (WSL2). Production stop-grace configuration is **your** responsibility.

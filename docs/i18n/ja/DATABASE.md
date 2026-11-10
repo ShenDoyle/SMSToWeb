@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | **日本語** | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> 英語原文から同期（日本語版）
-
 SMSToWeb は統一されたデータベースアダプタ層（`prepare/bind/first/all/run` の 4 メソッド。Cloudflare D1 API と完全に一致）によって 3 つのストレージバックエンドの差異を吸収し、ビジネスコードには SQL 方言の差異がまったくありません。
 
 ## 1. バックエンドマトリクス

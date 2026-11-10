@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | **日本語** | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> 英語原文から同期（日本語版）
-
 SMSToWeb の 6 つのプラットフォームすべて（Cloudflare 主力版 + 5 つの移植版）がこのディレクトリにあります。**各プラットフォームのサブディレクトリは完全に自己完結**しています：
 コード（エントリ + コアアプリ + データベースアダプタ）+ `schema.sql` + そのプラットフォームの詳細なデプロイチュートリアル（README.md）。
 

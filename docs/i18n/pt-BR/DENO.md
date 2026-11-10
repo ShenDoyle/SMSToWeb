@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | **Português (BR)**
 
-> Sincronizado do original em inglês (pt-BR)
-
 Implantar o SMSToWeb no Deno Deploy (runtime Deno nativa + banco Turso). O mais próximo em semântica do Cloudflare Worker, 1 milhão de requisições por mês no plano gratuito, cerca de 15 minutos no total.
 
 > Nota sobre a plataforma: o Deno Deploy migrou para uma nova geração de plataforma; o console é o [console.deno.com](https://console.deno.com) (o antigo dash.deno.com foi desativado), com um modo de build via Git semelhante a CI.

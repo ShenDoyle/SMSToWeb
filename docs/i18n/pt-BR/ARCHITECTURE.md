@@ -1,13 +1,6 @@
 # Documentação de arquitetura
 
-> **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = **850 passing assertions** (plus the separate M-1 suite `tests/m1-lifecycle.mjs` = 32); `ENV_KEYS` = **33** variables; **all six platform entries pass a `waitUntil`-style `ctx`** (inline `await` is only a *runtime-capability* fallback, not an entry-point behaviour); Node shutdown grace = **80s** and the container/service stop grace must be **>= 90s** (Docker default 10s SIGKILLs first); `gen_app.py --check` verifies **only** the embedded `SCHEMA_SQL` block and SQL references, **not** platform-copy drift. Any statement in this mirror about "667/814/573 assertions", "31 variables", "other platforms finish notifications before the response", "8-second forced exit", "the deploy button creates the tables", or "one-click and you are live" is **outdated**. Read the [English primary](../../../README.md), [ARCHITECTURE](../../ARCHITECTURE.md), or the [Chinese user guide](../../guide/README.md) instead.
->
-> **同步提示（2026-11-09）**：本镜像属滞后翻译，上述事实以英文主版与中文主文档为准；本文件内关于测试数量、环境变量数量、「其他平台响应前发完通知」、8 秒强制退出、按钮自动建表等旧表述均已过时，请勿据此部署或验收。源码 `v1.1.0` 已固化至 `main`（`43aaecf`）；未创建 GitHub Release、未打 tag、未部署。
-
-
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | **Português (BR)**
-
-> Sincronizado do original em inglês (pt-BR)
 
 O SMSToWeb é um sistema de "um núcleo + múltiplas entradas de plataforma" para agregar SMS/notificações: um núcleo de negócio sem npm (`src/worker.js`), sincronizado por um script gerador para seis plataformas de implantação; cada plataforma mantém apenas um adaptador fino para a sua runtime e banco de dados.
 
@@ -54,7 +47,7 @@ Cada diretório de plataforma é **totalmente autônomo**: a entrada referencia 
 
 1. Toma `src/worker.js` como fonte única, recorta todo o código de negócio antes de `export default {`, acrescenta a cauda de exportação genérica (`fetchApp` / `runCron` / `handleCronRequest`) e grava o resultado em `platforms/shared/app.js`;
 2. copia a cópia shared junto com o `shared/db.js` e o `schema.sql` da raiz para os diretórios de plataforma (exceto o `node/db.js` — mantido separadamente);
-3. substitui, com a **whitelist ENV_KEYS** embutida no script (uma única lista de 31 variáveis de ambiente), o conteúdo entre as marcações `/* ==== ENV_KEYS BEGIN ==== */ … /* ==== ENV_KEYS END ==== */` de cada arquivo de entrada — assim o conjunto de variáveis de ambiente repassadas é idêntico nas seis plataformas e não desvia.
+3. substitui, com a **whitelist ENV_KEYS** embutida no script (uma única lista de 33 variáveis de ambiente), o conteúdo entre as marcações `/* ==== ENV_KEYS BEGIN ==== */ … /* ==== ENV_KEYS END ==== */` de cada arquivo de entrada — assim o conjunto de variáveis de ambiente repassadas é idêntico nas seis plataformas e não desvia.
 
 Regra de ferro: **toda mudança de negócio só em `src/worker.js` (e na lista ENV_KEYS do gen_app.py); depois, rode obrigatoriamente o gen_app.py de novo**; é proibido alterar à mão os artefatos gerados sob platforms/ (exceções: node/db.js e wrangler.toml).
 

@@ -1,17 +1,10 @@
 # SMSToWeb — 簡訊/通知雲端閘道
 
-> **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = **850 passing assertions** (plus the separate M-1 suite `tests/m1-lifecycle.mjs` = 32); `ENV_KEYS` = **33** variables; **all six platform entries pass a `waitUntil`-style `ctx`** (inline `await` is only a *runtime-capability* fallback, not an entry-point behaviour); Node shutdown grace = **80s** and the container/service stop grace must be **>= 90s** (Docker default 10s SIGKILLs first); `gen_app.py --check` verifies **only** the embedded `SCHEMA_SQL` block and SQL references, **not** platform-copy drift. Any statement in this mirror about "667/814/573 assertions", "31 variables", "other platforms finish notifications before the response", "8-second forced exit", "the deploy button creates the tables", or "one-click and you are live" is **outdated**. Read the [English primary](../../../README.md), [ARCHITECTURE](../../ARCHITECTURE.md), or the [Chinese user guide](../../guide/README.md) instead.
->
-> **同步提示（2026-11-09）**：本镜像属滞后翻译，上述事实以英文主版与中文主文档为准；本文件内关于测试数量、环境变量数量、「其他平台响应前发完通知」、8 秒强制退出、按钮自动建表等旧表述均已过时，请勿据此部署或验收。源码 `v1.1.0` 已固化至 `main`（`43aaecf`）；未创建 GitHub Release、未打 tag、未部署。
-
-
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | **繁體中文** | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> 本倉庫文件以英語為主要維護版本；本繁體中文版與其他語言譯文存放於 `docs/i18n/`，可能落後於英語主版。
+把來自各個管道的訊息（簡訊轉發、應用程式通知、指令碼、Webhook、自訂接入）透過統一的 HTTP 介面與訊息格式匯集到一處，在同一個網頁中查看、搜尋並轉發。
 
-把 Android 手機的簡訊和各類裝置的通知即時推播到雲端，隨時透過網頁查看。
-
-- **多平台部署**：Cloudflare（主版本）/ Vercel / Deno Deploy / Netlify / 騰訊 EdgeOne Makers / Docker 自架，六擇一，功能完全一致
+- **多平台支援**：Cloudflare Workers / Vercel / Deno Deploy / Netlify / 騰訊 EdgeOne Makers / Docker 自架，依自己的環境選擇合適的平台部署。
 - **即時接收**：Webhook 秒級寫入資料庫，網頁自動重新整理，無需手動操作
 - **通用推播**：任何能發 HTTP 請求的裝置（Linux / Windows / macOS / iOS / NAS / 指令碼）都能把通知推進同一個頁面
 - **來源與篩選**：依來源動態篩選（自動聚合簡訊 / 通知及自訂來源），疊加關鍵字搜尋與今天 / 近 7 天 / 近 30 天時間範圍，分頁筆數可調
@@ -31,7 +24,7 @@
                                                   瀏覽器 ◀── 網頁管理頁（閘道內嵌）
 ```
 
-**一鍵部署（Cloudflare 主版本，約 2 分鐘）**：
+**一鍵部署到 Cloudflare**：
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ShenDoyle/SMSToWeb/tree/main/platforms/cloudflare)
 
@@ -48,23 +41,6 @@
 
 > 每個平台目錄**完全自包含**（程式碼 + schema + 獨立文件，零 npm 依賴、無需建置），點上表「詳細教學」即可按步驟部署。功能與資料表結構全平台一致，可隨時互相遷移。
 > 平台比較與通用準備（Turso 資料庫）見 [PLATFORMS.md](./PLATFORMS.md)。
-
-### 各平台執行階段差異（部署前先看一下）
-
-業務程式碼六平台逐位元組一致，但**執行階段的逾時/背景工作/定時器**能力不同，必要時用環境變數調整：
-
-| 平台 | 函式逾時 | 背景通知 | 定時清理 | 建議 |
-|---|---|---|---|---|
-| Cloudflare | 無固定實際時間上限（CPU 受限） | `ctx.waitUntil` 回應後繼續 | 平台 cron | 預設設定即可 |
-| Vercel Edge | 單次請求約 25 秒上限 | 於回應前以行內方式完成 | 平台 cron | `WAIT_MAX_SECONDS=20` |
-| Netlify Functions | 60s（各方案一致） | 於回應前以行內方式完成 | scheduled function | 入口預設 `WAIT_MAX_SECONDS=8` |
-| Deno Deploy | 視方案 | 於回應前以行內方式完成 | 需外部觸發 | 外部 cron 呼叫 `/api/cron?token=` |
-| EdgeOne Makers | 視方案 | 於回應前以行內方式完成 | 需外部觸發 | `WAIT_MAX_SECONDS` 依方案調低 |
-| Node / Docker | 自訂 | 於回應前以行內方式完成 | 需外部觸發 | 本機 SQLite 需 Node ≥ 22.13 |
-
-> - **長輪詢**：前端對失敗自動**指數退避**（2→30s），並在頁面重新可見時立即補拉，平台強制終止請求也不會灌爆函式。
-> - **通知轉發**：Cloudflare 走 `waitUntil`；其餘平台為「回應前把通知發完」（單一渠道 10s 逾時），因此設定很多慢速渠道時會略為增加端點延遲。
-> - **定時清理**：無平台 cron 的部署，用任意定時器請求 `GET /api/cron?token=<RECEIVE_TOKEN>` 即可。
 
 ---
 
@@ -103,24 +79,6 @@ Cloudflare 平台額外需要 `DB`（D1 綁定）；其餘平台需要 `TURSO_DA
 > **安全強烈建議**
 > 1. **開啟管理頁登入**（`ENABLE_AUTH="true"` + `ADMIN_PASSWORD`）：管理頁承載簡訊驗證碼等敏感內容，預設免登入意味著知道網域的人都能查看全部訊息並刪除資料。登入端點已內建速率限制（同 IP 連續失敗 5 次鎖定 10 分鐘）；`/api/receive`、`/api/push` 另有每 IP 每分鐘 120 次的寫入速率限制（超限回傳 429）。
 > 2. **推送 token 走 URL query 的取捨**：為相容 SmsForwarder 等用戶端，`/api/receive`、`/api/push` 支援 `?token=` 查詢參數傳驗證——token 會出現在 URL 中，可能進入平台存取日誌、瀏覽器歷史。若在意的話請改用 POST + 請求標頭 `Authorization: Bearer <RECEIVE_TOKEN>` 傳遞（兩種方式都支援）。
-
-## 常見問題（通用）
-
-- **標籤顯示 `{{XXX}}` 字面值** → 不會發生：閘道偵測到 `{{` 字面值會自動置空，標籤回退顯示 `sim`；標籤名請在範本 `name` 欄位直接填自訂名稱
-- **端點回應 401/403** → 檢查 URL 裡 `token=` 與 `RECEIVE_TOKEN` 是否一致；`/api/receive`、`/api/push` 不受登入開關影響
-- **端點回應 429** → 觸發寫入速率限制（每 IP 每分鐘 120 次），等 1 分鐘自動恢復；正常使用不會碰到，若出現代表 token 可能已洩漏或有程式在灌寫資料庫
-- **超長訊息** → 單則內文最多儲存 8000 字元，超出部分自動截斷
-- **裝置標籤改名** → 標籤名由訊息範本 `name` 欄位決定，改 `name` 會產生新標籤；在網頁上點標籤後的「✎」可重新命名、「⇄」可把該標籤的訊息合併到另一裝置，無訊息的標籤可直接「×」刪除
-- **從舊版升級（新增欄位）** → 舊資料庫需執行：`ALTER TABLE messages ADD COLUMN deleted_at TEXT;`、`ALTER TABLE messages ADD COLUMN starred INTEGER NOT NULL DEFAULT 0;`、`ALTER TABLE messages ADD COLUMN read_at TEXT;`（新資料庫建表時已包含；node 本機 SQLite 啟動時自動補欄位）
-
-## 開發說明
-
-- `src/worker.js`：核心原始碼（Cloudflare Worker 形態）
-- `platforms/gen_app.py`：從 `src/worker.js` 產生平台無關的 `app.js` 同步到五個移植平台，並同步 Cloudflare 獨立副本 `worker.js`（確保六平台業務程式碼逐位元組一致）；同時把 31 項環境變數白名單（ENV_KEYS，含驗證項）同步到六個平台入口，防止各平台透傳漂移（node 的 db.js 為 Turso+本機 SQLite 雙介接，獨立維護不參與同步）
-- `platforms/*/`：各平台自包含部署目錄（入口 + app.js + db.js 介接層 + schema.sql + 本平台教學）
-- `docs/i18n/en/`：英語文件集（部署/API/架構/資料庫）；其他語言見 `docs/i18n/<lang>/`，導覽見 [docs/i18n/README.md](../README.md)
-- `tests/run.mjs`：零依賴測試套件（需 Node 22.13+，204 項測試）：`node tests/run.mjs`
-- 修改核心程式碼後：`python platforms/gen_app.py` 重新同步全部平台，再執行 `node tests/run.mjs`；CI 會校驗同步零漂移 + 語法 + 測試
 
 ## License
 

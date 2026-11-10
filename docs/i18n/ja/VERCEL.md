@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | **日本語** | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> 英語原文から同期（日本語版）
-
 SMSToWeb を Vercel（Edge Function + Turso データベース）へデプロイします。無料枠で個人利用には十分で、全体の所要時間は約 15 分です。
 
 **このディレクトリのファイル**：`api/[[...route]].js`（エントリ）、`app.js`（コアアプリ）、`db.js`（Turso アダプタ）、`schema.sql`（テーブル作成）、`vercel.json`（定時タスクの設定を含む）。

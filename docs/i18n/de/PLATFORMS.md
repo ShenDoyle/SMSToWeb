@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | **Deutsch** | [Português (BR)](../pt-BR/README.md)
 
-> Synct mit dem englischen Original (de)
-
 Alle sechs Plattformen von SMSToWeb (Cloudflare-Hauptversion + fünf portierte Plattformen) liegen in diesem Verzeichnis. **Jedes Plattform-Unterverzeichnis ist vollständig in sich geschlossen**:
 Code (Einstieg + Kernanwendung + Datenbank-Adapter) + `schema.sql` + die ausführliche Bereitstellungsanleitung der Plattform (README.md).
 

@@ -2,8 +2,6 @@
 
 **English** | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> Synced from the English primary where applicable
-
 Deploy SMSToWeb to Deno Deploy (Deno native runtime + Turso database). Semantically the closest to a Cloudflare Worker; the free tier is 1 million requests per month; about 15 minutes end to end.
 
 > Platform note: Deno Deploy has been upgraded to a new-generation platform with the console at [console.deno.com](https://console.deno.com) (the old dash.deno.com has been shut down), using a CI-like Git build model.

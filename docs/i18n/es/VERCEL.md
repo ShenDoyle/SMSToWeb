@@ -1,6 +1,5 @@
 # Guía de despliegue en Vercel
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | **Español** | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
-> Sincronizado del original en inglés (es)
 
 Despliega SMSToWeb en Vercel (Edge Function + base de datos Turso). La cuota gratuita basta para uso personal, unos 15 minutos en total.
 

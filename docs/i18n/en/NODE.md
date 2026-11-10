@@ -2,8 +2,6 @@
 
 **English** | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> Synced from the English primary where applicable
-
 Self-host SMSToWeb as a Docker container. A resident process with no function duration limits gives the best long-polling real-time performance; suitable for users with an existing server or those who want to deploy to Fly.io / Railway (free tiers covered in "Platform notes" below).
 
 **Files in this directory**: `server.mjs` (zero-dependency entry, Node 18+, with built-in daily cleanup), `app.js` (core app), `db.js` (Turso / local SQLite dual-mode adapter layer), `schema.sql` (table creation), `Dockerfile`, `package.json`.

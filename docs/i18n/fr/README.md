@@ -1,17 +1,10 @@
 # SMSToWeb — Passerelle cloud de SMS et de notifications
 
-> **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = **850 passing assertions** (plus the separate M-1 suite `tests/m1-lifecycle.mjs` = 32); `ENV_KEYS` = **33** variables; **all six platform entries pass a `waitUntil`-style `ctx`** (inline `await` is only a *runtime-capability* fallback, not an entry-point behaviour); Node shutdown grace = **80s** and the container/service stop grace must be **>= 90s** (Docker default 10s SIGKILLs first); `gen_app.py --check` verifies **only** the embedded `SCHEMA_SQL` block and SQL references, **not** platform-copy drift. Any statement in this mirror about "667/814/573 assertions", "31 variables", "other platforms finish notifications before the response", "8-second forced exit", "the deploy button creates the tables", or "one-click and you are live" is **outdated**. Read the [English primary](../../../README.md), [ARCHITECTURE](../../ARCHITECTURE.md), or the [Chinese user guide](../../guide/README.md) instead.
->
-> **同步提示（2026-11-09）**：本镜像属滞后翻译，上述事实以英文主版与中文主文档为准；本文件内关于测试数量、环境变量数量、「其他平台响应前发完通知」、8 秒强制退出、按钮自动建表等旧表述均已过时，请勿据此部署或验收。源码 `v1.1.0` 已固化至 `main`（`43aaecf`）；未创建 GitHub Release、未打 tag、未部署。
-
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | **Français** | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
-> Synchronisé depuis l'original anglais (fr)
 
-> L'anglais est la version principale maintenue de ce document. Les traductions se trouvent sous [`docs/i18n/<lang>/`](../../../docs/i18n/README.md) et peuvent prendre du retard ; en cas de doute, reportez-vous à ce fichier.
+SMSToWeb rassemble les messages de tous les canaux (transfert de SMS, notifications d'applications, scripts, webhooks et intégrations personnalisées) via une API HTTP et un format de message communs, pour les consulter, les rechercher et les transférer depuis une seule page web.
 
-Poussez en temps réel les SMS et notifications d'un téléphone Android (et de tout autre appareil) vers le cloud, et consultez-les depuis une page web où que vous soyez.
-
-- **Déploiement multiplateforme** : Cloudflare (principal) / Vercel / Deno Deploy / Netlify / Tencent EdgeOne Makers / Docker auto-hébergé — choisissez l'une des six, fonctionnalités strictement identiques
+- **Prise en charge multiplateforme** : Cloudflare Workers / Vercel / Deno Deploy / Netlify / Tencent EdgeOne Makers / Docker auto-hébergé — choisissez la plateforme adaptée à votre environnement.
 - **Réception en temps réel** : le push webhook arrive en base de données en quelques secondes ; la page web se rafraîchit toute seule, sans intervention manuelle
 - **Push universel** : tout appareil capable d'envoyer une requête HTTP (Linux / Windows / macOS / iOS / NAS / scripts) peut pousser des notifications sur la même page
 - **Sources et filtres** : filtrage dynamique par source (SMS / notifications et sources personnalisées agrégées automatiquement), combiné à la recherche par mot-clé et aux plages Aujourd'hui / 7 derniers jours / 30 derniers jours ; taille de page réglable
@@ -31,7 +24,7 @@ Poussez en temps réel les SMS et notifications d'un téléphone Android (et de 
                                                 browser ◀── web admin (embedded in gateway)
 ```
 
-**Déploiement en un clic (Cloudflare principal, ~2 min)** :
+**Déploiement sur Cloudflare** :
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ShenDoyle/SMSToWeb/tree/main/platforms/cloudflare)
 
@@ -48,23 +41,6 @@ Le bouton crée la base de données et les tables, lie les ressources et configu
 
 > Chaque répertoire de plateforme est **totalement autonome** (code + schéma + documentation indépendante, zéro dépendance npm, sans étape de build). Cliquez sur un guide ci-dessus et suivez les étapes. Les fonctionnalités et le schéma de données sont identiques sur toutes les plateformes ; vous pouvez migrer de l'une à l'autre à tout moment.
 > Pour la comparaison des plateformes et la préparation commune (base de données Turso), voir [platforms/README.md](../../../platforms/README.md).
-
-### Différences d'exécution (à lire avant de déployer)
-
-Le code métier est identique octet par octet sur les six plateformes, mais les **timeouts / tâches de fond / minuteurs** diffèrent à l'exécution. Adaptez via des variables d'environnement si besoin :
-
-| Plateforme | Timeout de fonction | Notifications en arrière-plan | Nettoyage planifié | Conseil |
-|---|---|---|---|---|
-| Cloudflare | pas de limite temps réel (limité au CPU) | `ctx.waitUntil` continue après la réponse | cron de la plateforme | les valeurs par défaut conviennent |
-| Vercel Edge | plafond ~25s par requête | terminé en ligne avant la réponse | cron de la plateforme | `WAIT_MAX_SECONDS=20` |
-| Netlify Functions | 60s (tous les plans) | terminé en ligne avant la réponse | fonction planifiée | l'entrée est par défaut à `WAIT_MAX_SECONDS=8` |
-| Deno Deploy | selon le plan | terminé en ligne avant la réponse | déclencheur externe requis | cron externe appelant `/api/cron?token=` |
-| EdgeOne Makers | selon le plan | terminé en ligne avant la réponse | déclencheur externe requis | baissez `WAIT_MAX_SECONDS` selon le plan |
-| Node / Docker | à votre convenance | terminé en ligne avant la réponse | déclencheur externe requis | le SQLite local exige Node ≥ 22.13 |
-
-> - **Long polling** : le frontend retente les échecs avec **backoff exponentiel** (2→30s) et redémarre immédiatement le polling quand la page redevient visible ; les requêtes tuées par la plateforme ne saturent jamais la fonction.
-> - **Transfert des notifications** : Cloudflare utilise `waitUntil` ; les autres plateformes terminent l'envoi des notifications avant la réponse (timeout de 10s par canal), donc beaucoup de canaux lents ajoutent un peu de latence.
-> - **Nettoyage planifié** : sur les plateformes sans cron, pointez n'importe quel planificateur vers `GET /api/cron?token=<RECEIVE_TOKEN>`.
 
 ---
 
@@ -103,24 +79,6 @@ Cloudflare a en plus besoin du binding `DB` (D1) ; les autres plateformes ont be
 > **Recommandations de sécurité**
 > 1. **Activez la connexion admin** (`ENABLE_AUTH="true"` + `ADMIN_PASSWORD`) : la page d'admin contient du contenu sensible comme les codes OTP par SMS ; sans connexion, quiconque connaît le domaine peut lire tous les messages et supprimer des données. L'endpoint de connexion est limité en débit (5 échecs consécutifs par IP = verrouillage 10 minutes) ; `/api/receive` et `/api/push` sont limités à 120 écritures par IP et par minute (429 au-delà).
 > 2. **Compromis du `?token=` dans les URL** : pour rester compatible avec SmsForwarder et clients similaires, `/api/receive` et `/api/push` acceptent l'authentification via le paramètre de requête `?token=` — le jeton peut apparaître dans les journaux d'accès de la plateforme et dans l'historique du navigateur. Si cela vous préoccupe, passez en POST avec l'en-tête `Authorization: Bearer <RECEIVE_TOKEN>` (les deux sont pris en charge).
-
-## FAQ (généralités)
-
-- **Un libellé affiche un `{{XXX}}` littéral** → impossible : la passerelle efface les libellés contenant un `{{` littéral et retombe sur `sim` ; définissez votre nom personnalisé directement dans le champ `name` du modèle
-- **API 401/403** → vérifiez que le `token=` de l'URL correspond à `RECEIVE_TOKEN` ; `/api/receive` et `/api/push` ne sont pas affectés par l'interrupteur de connexion
-- **API 429** → limite d'écriture atteinte (120/IP/min) ; ça se rétablit après une minute — si cela arrive en usage normal, votre jeton a peut-être fuité ou quelque chose martèle l'API
-- **Messages très longs** → un corps seul est plafonné à 8000 caractères, l'excédent est tronqué
-- **Renommer un libellé d'appareil** → un libellé vient du champ `name` du modèle de message ; changer `name` crée un nouveau libellé. Utilisez « ✎ » à côté d'un libellé sur la page web pour le renommer, « ⇄ » pour fusionner ses messages avec un autre appareil, et « × » pour supprimer directement un libellé vide
-- **Mise à niveau depuis une version plus ancienne (nouvelles colonnes)** → exécutez sur l'ancienne base : `ALTER TABLE messages ADD COLUMN deleted_at TEXT;`, `ALTER TABLE messages ADD COLUMN starred INTEGER NOT NULL DEFAULT 0;`, `ALTER TABLE messages ADD COLUMN read_at TEXT;` (les bases neuves les incluent déjà ; le SQLite local de node ajoute les colonnes automatiquement au démarrage)
-
-## Développement
-
-- `src/worker.js` : source principale (forme de Cloudflare Worker)
-- `platforms/gen_app.py` : génère le `app.js` neutre plateforme depuis `src/worker.js` vers les cinq plateformes portées et synchronise la copie Cloudflare `worker.js` (en gardant le code métier identique octet par octet sur les six plateformes) ; synchronise aussi la liste blanche d'environnement à 31 variables (ENV_KEYS, entrées d'authentification comprises) vers les six entrées de plateforme pour prévenir toute dérive (le db.js de node est un adaptateur double Turso + SQLite local, maintenu séparément et non synchronisé)
-- `platforms/*/` : répertoires de déploiement autonomes (entrée + app.js + adaptateur db.js + schema.sql + guide de plateforme)
-- `docs/i18n/en/` : ensemble de documentation anglais (déploiement/API/architecture/base de données) ; les autres langues sous `docs/i18n/<lang>/` — voir [docs/i18n/README.md](../../../docs/i18n/README.md)
-- `tests/run.mjs` : suite de tests sans dépendances (204 tests, exige Node 22.13+) : `node tests/run.mjs`
-- Après modification du code principal : exécutez `python platforms/gen_app.py` pour re-synchroniser toutes les plateformes, puis `node tests/run.mjs` ; le CI vérifie zéro dérive de synchronisation + syntaxe + tests
 
 ## Licence
 

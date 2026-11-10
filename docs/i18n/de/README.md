@@ -1,19 +1,10 @@
 # SMSToWeb — SMS- & Benachrichtigungs-Cloud-Gateway
 
-> **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = **850 passing assertions** (plus the separate M-1 suite `tests/m1-lifecycle.mjs` = 32); `ENV_KEYS` = **33** variables; **all six platform entries pass a `waitUntil`-style `ctx`** (inline `await` is only a *runtime-capability* fallback, not an entry-point behaviour); Node shutdown grace = **80s** and the container/service stop grace must be **>= 90s** (Docker default 10s SIGKILLs first); `gen_app.py --check` verifies **only** the embedded `SCHEMA_SQL` block and SQL references, **not** platform-copy drift. Any statement in this mirror about "667/814/573 assertions", "31 variables", "other platforms finish notifications before the response", "8-second forced exit", "the deploy button creates the tables", or "one-click and you are live" is **outdated**. Read the [English primary](../../../README.md), [ARCHITECTURE](../../ARCHITECTURE.md), or the [Chinese user guide](../../guide/README.md) instead.
->
-> **同步提示（2026-11-09）**：本镜像属滞后翻译，上述事实以英文主版与中文主文档为准；本文件内关于测试数量、环境变量数量、「其他平台响应前发完通知」、8 秒强制退出、按钮自动建表等旧表述均已过时，请勿据此部署或验收。源码 `v1.1.0` 已固化至 `main`（`43aaecf`）；未创建 GitHub Release、未打 tag、未部署。
-
-
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | **Deutsch** | [Português (BR)](../pt-BR/README.md)
 
-> Synct mit dem englischen Original (de)
+SMSToWeb bündelt Nachrichten aus beliebigen Kanälen (SMS-Weiterleitung, App-Benachrichtigungen, Skripte, Webhooks und eigene Integrationen) über eine gemeinsame HTTP-API und ein einheitliches Nachrichtenformat an einem Ort — lesbar, durchsuchbar und weiterleitbar über eine einzige Webseite.
 
-> Englisch ist die primär gepflegte Version dieses Dokuments. Die Übersetzungen liegen unter [`docs/i18n/<lang>/`](../../../docs/i18n/README.md) und können hinterherhinken; im Zweifel ist das englische Original maßgeblich.
-
-SMS und Benachrichtigungen von einem Android-Telefon (und jedem anderen Gerät) in Echtzeit in die Cloud pushen und von überall über eine Webseite abrufen.
-
-- **Multiplattform-Bereitstellung**: Cloudflare (primär) / Vercel / Deno Deploy / Netlify / Tencent EdgeOne Makers / Docker-Selfhosting — eine von sechs wählen, Funktionen völlig identisch
+- **Multiplattform-Unterstützung**: Cloudflare Workers / Vercel / Deno Deploy / Netlify / Tencent EdgeOne Makers / Docker-Selfhosting — wählen Sie die Plattform, die zu Ihrer Umgebung passt.
 - **Echtzeitempfang**: Webhook-Push landet in Sekunden in der Datenbank; die Webseite aktualisiert sich selbst, keine manuelle Arbeit
 - **Universeller Push**: Jedes Gerät, das HTTP-Anfragen senden kann (Linux / Windows / macOS / iOS / NAS / Skripte), kann Benachrichtigungen auf dieselbe Seite pushen
 - **Quellen & Filter**: Dynamisches Filtern nach Quelle (SMS / Benachrichtigungen und benutzerdefinierte Quellen werden automatisch aggregiert), kombiniert mit Schlagwortsuche und den Zeiträumen Heute / Letzte 7 Tage / Letzte 30 Tage; einstellbare Seitengröße
@@ -33,7 +24,7 @@ SMS und Benachrichtigungen von einem Android-Telefon (und jedem anderen Gerät) 
                                                 Browser ◀── Web-Admin (im Gateway eingebettet)
 ```
 
-**Ein-Klick-Bereitstellung (Cloudflare primär, ca. 2 Minuten)**:
+**Ein-Klick-Bereitstellung (Cloudflare)**:
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ShenDoyle/SMSToWeb/tree/main/platforms/cloudflare)
 
@@ -50,23 +41,6 @@ Der Button erstellt Datenbank und Tabellen, bindet Ressourcen und richtet CI aut
 
 > Jedes Plattformverzeichnis ist **vollständig in sich geschlossen** (Code + Schema + eigenständige Dokumentation, null npm-Abhängigkeiten, kein Build-Schritt). Klicken Sie auf eine Anleitung oben und folgen Sie den Schritten. Funktionen und Datenschema sind plattformübergreifend identisch; Sie können jederzeit zwischen ihnen migrieren.
 > Für den Plattformvergleich und die gemeinsame Vorbereitung (Turso-Datenbank) siehe [platforms/README.md](../../../platforms/README.md).
-
-### Laufzeitunterschiede (vor der Bereitstellung lesen)
-
-Der Geschäftscode ist auf allen sechs Plattformen byte-identisch, aber **Timeouts / Hintergrundaufgaben / Timer** unterscheiden sich zur Laufzeit. Bei Bedarf über Umgebungsvariablen anpassen:
-
-| Plattform | Funktions-Timeout | Hintergrund-Benachrichtigung | Geplante Bereinigung | Empfehlung |
-|---|---|---|---|---|
-| Cloudflare | kein Wanduhr-Limit (CPU-limitiert) | `ctx.waitUntil` läuft nach der Antwort weiter | Plattform-Cron | Standardwerte genügen |
-| Vercel Edge | ~25s Limit pro Anfrage | wird inline vor der Antwort abgeschlossen | Plattform-Cron | `WAIT_MAX_SECONDS=20` |
-| Netlify Functions | 60s (alle Tarife) | wird inline vor der Antwort abgeschlossen | Scheduled Function | Einstieg steht standardmäßig auf `WAIT_MAX_SECONDS=8` |
-| Deno Deploy | tarifabhängig | wird inline vor der Antwort abgeschlossen | benötigt externen Trigger | externer Cron ruft `/api/cron?token=` auf |
-| EdgeOne Makers | tarifabhängig | wird inline vor der Antwort abgeschlossen | benötigt externen Trigger | `WAIT_MAX_SECONDS` je nach Tarif senken |
-| Node / Docker | Ihre Wahl | wird inline vor der Antwort abgeschlossen | benötigt externen Trigger | lokales SQLite braucht Node ≥ 22.13 |
-
-> - **Long-Polling**: Das Frontend wiederholt Fehlversuche mit **exponentiellem Backoff** (2→30s) und pollt sofort erneut, sobald die Seite wieder sichtbar wird; von der Plattform abgebrochene Anfragen fluten die Funktion nie.
-> - **Benachrichtigungsweiterleitung**: Cloudflare nutzt `waitUntil`; andere Plattformen schließen das Senden der Benachrichtigungen vor der Antwort ab (10s Timeout pro Kanal), daher fügen viele langsame Kanäle etwas Latenz hinzu.
-> - **Geplante Bereinigung**: Auf Plattformen ohne Cron richten Sie einen beliebigen Scheduler auf `GET /api/cron?token=<RECEIVE_TOKEN>`.
 
 ---
 
@@ -105,24 +79,6 @@ Cloudflare benötigt zusätzlich die `DB`-Bindung (D1); andere Plattformen brauc
 > **Sicherheitsempfehlungen**
 > 1. **Admin-Login einschalten** (`ENABLE_AUTH="true"` + `ADMIN_PASSWORD`): Die Admin-Seite enthält sensible Inhalte wie SMS-OTP-Codes; ohne Login kann jeder, der die Domain kennt, alle Nachrichten lesen und Daten löschen. Der Login-Endpunkt ist ratenlimitiert (5 Fehlversuche in Folge pro IP sperren ihn für 10 Minuten); `/api/receive` und `/api/push` sind auf 120 Schreibvorgänge pro IP pro Minute limitiert (darüber 429).
 > 2. **Abwägung zu `?token=` in URLs**: Zur Kompatibilität mit SmsForwarder und ähnlichen Clients akzeptieren `/api/receive` und `/api/push` die Authentifizierung über den `?token=`-Query-Parameter — der Token kann in den Zugriffslogs der Plattform und im Browserverlauf auftauchen. Wenn das ein Anliegen ist, auf POST mit dem `Authorization: Bearer <RECEIVE_TOKEN>`-Header umsteigen (beide Varianten werden unterstützt).
-
-## FAQ (allgemein)
-
-- **Ein Label zeigt buchstäblich `{{XXX}}`** → kann nicht passieren: Das Gateway leert Labels, die ein literales `{{` enthalten, und fällt auf `sim` zurück; den eigenen Namen direkt im `name`-Feld der Vorlage setzen
-- **API 401/403** → prüfen, ob `token=` in der URL zu `RECEIVE_TOKEN` passt; `/api/receive` und `/api/push` sind vom Login-Schalter unberührt
-- **API 429** → Schreib-Ratenlimit erreicht (120/IP/min); nach einer Minute wieder frei — tritt es im normalen Betrieb auf, ist der Token womöglich geleakt oder etwas hämmert auf die API
-- **Sehr lange Nachrichten** → ein einzelner Body ist auf 8000 Zeichen begrenzt, der Überschuss wird abgeschnitten
-- **Geräte-Label umbenennen** → Ein Label stammt aus dem `name`-Feld der Nachrichtenvorlage; eine Änderung von `name` erzeugt ein neues Label. Verwenden Sie „✎“ neben einem Label auf der Webseite zum Umbenennen, „⇄“, um seine Nachrichten in ein anderes Gerät zusammenzuführen, und „×“, um ein leeres Label direkt zu löschen
-- **Upgrade von einer älteren Version (neue Spalten)** → auf der alten Datenbank ausführen: `ALTER TABLE messages ADD COLUMN deleted_at TEXT;`, `ALTER TABLE messages ADD COLUMN starred INTEGER NOT NULL DEFAULT 0;`, `ALTER TABLE messages ADD COLUMN read_at TEXT;` (frische Datenbanken enthalten sie bereits; Node mit lokalem SQLite fügt Spalten beim Start automatisch hinzu)
-
-## Entwicklung
-
-- `src/worker.js`: Kern-Quellcode (Cloudflare-Worker-Form)
-- `platforms/gen_app.py`: erzeugt aus `src/worker.js` das plattformneutrale `app.js` in die fünf portierten Plattformen und synchronisiert die Cloudflare-Kopie `worker.js` (hält den Geschäftscode auf sechs Plattformen byte-identisch); synchronisiert außerdem die Whitelist mit 31 Umgebungsvariablen (ENV_KEYS, inkl. Auth-Einträgen) in die sechs Plattform-Eingänge, um Drift zu verhindern (node/db.js ist ein Dual-Adapter für Turso + lokales SQLite, separat gepflegt und nicht synchronisiert)
-- `platforms/*/`: in sich geschlossene Bereitstellungsverzeichnisse (Einstieg + app.js + db.js-Adapter + schema.sql + Plattform-Anleitung)
-- `docs/i18n/en/`: englischer Dokumentationssatz (Bereitstellung/API/Architektur/Datenbank); weitere Sprachen unter `docs/i18n/<lang>/` — siehe [docs/i18n/README.md](../../../docs/i18n/README.md)
-- `tests/run.mjs`: Test-Suite ohne Abhängigkeiten (braucht Node 22.13+): `node tests/run.mjs`
-- Nach Änderungen am Kerncode: `python platforms/gen_app.py` ausführen, um alle Plattformen neu zu synchronisieren, dann `node tests/run.mjs`; CI prüft Null-Sync-Drift + Syntax + Tests
 
 ## Lizenz
 

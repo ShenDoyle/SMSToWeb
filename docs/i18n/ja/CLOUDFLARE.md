@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | **日本語** | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> 英語原文から同期（日本語版）
-
 これがプロジェクトの主力版です：スマホの SMS/通知 → Cloudflare Worker → D1 データベース → Web 管理画面。
 サーバー不要、無料枠が十分で、すべてブラウザ操作で完結し、ツールのインストールも不要です。
 

@@ -2,8 +2,6 @@
 
 **English** | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> Synced from the English primary where applicable
-
 Deploy SMSToWeb to Tencent EdgeOne Makers (formerly EdgeOne Pages; Functions + Turso database). Good experience for mainland China access; about 15 minutes end to end.
 
 **Files in this directory**: `functions/index.js` (dedicated entry for the root path `/`, the single source of all logic and the ENV_KEYS whitelist), `functions/[[default]].js` (fallback catching all other routes; it only re-exports index.js and needs no separate maintenance), `app.js` (core app), `db.js` (Turso adapter layer), `schema.sql` (table creation).

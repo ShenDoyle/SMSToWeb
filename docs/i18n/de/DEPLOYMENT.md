@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | **Deutsch** | [Português (BR)](../pt-BR/README.md)
 
-> Synct mit dem englischen Original (de)
-
 Dieses System besteht aus zwei Teilen: **Empfangsseite** (Push-Clients je Plattform) + **Cloud-Gateway** (eine von sechs Plattformen: Cloudflare / Vercel / Deno / Netlify / EdgeOne Makers / Docker-Selfhosting, siehe [platforms/README.md](../../../platforms/README.md); die Anbindung ist überall identisch).
 SMS sind nur einer von mehreren Anbindungswegen — jedes Gerät/jedes Skript, das HTTP-Anfragen senden kann, kann Benachrichtigungen auf dieselbe Webseite pushen und dort einsehen.
 

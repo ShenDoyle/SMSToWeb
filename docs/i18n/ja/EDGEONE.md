@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | **日本語** | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> 英語原文から同期（日本語版）
-
 SMSToWeb を Tencent EdgeOne Makers（旧 EdgeOne Pages、Functions + Turso データベース）へデプロイします。中国国内からのアクセス体験が良く、全体の所要時間は約 15 分です。
 
 **このディレクトリのファイル**：`functions/index.js`（ルートパス `/` 専用のエントリ。すべてのロジックと ENV_KEYS ホワイトリストの単一ソース）、`functions/[[default]].js`（その他のルートを捕捉するフォールバック。index.js を re-export するだけで個別メンテナンス不要）、`app.js`（コアアプリ）、`db.js`（Turso アダプタ）、`schema.sql`（テーブル作成）。

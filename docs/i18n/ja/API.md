@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | **日本語** | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> 英語原文から同期（日本語版）
-
 すべての API は `/` をルートとし、レスポンスは JSON（`Content-Type: application/json`）、CORS に対応しています。「公開 API」を除き、ログインスイッチによって保護されます（セキュリティ設定の推奨はルート README の「セキュリティ推奨事項」を参照）。
 
 ## 認証方式

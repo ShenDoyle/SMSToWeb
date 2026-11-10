@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | **繁體中文** | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> 自英語主版同步（繁體中文版）
-
 本系統由兩部分組成：**接收端**（各平台的推送用戶端）+ **雲端閘道**（六個平台任選其一：Cloudflare / Vercel / Deno / Netlify / EdgeOne Makers / Docker 自架，見 [PLATFORMS.md](./PLATFORMS.md)，串接方式完全相同）。
 簡訊只是串接路徑之一——任何能發 HTTP 請求的裝置/指令碼，都能把通知推到同一個網頁裡查看。
 

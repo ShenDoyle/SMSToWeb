@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | **Português (BR)**
 
-> Sincronizado do original em inglês (pt-BR)
-
 Implantar o SMSToWeb no Netlify (Functions v2 + banco Turso). Cerca de 15 minutos no total.
 
 **Arquivos neste diretório**: `functions/api.mjs` (entrada, intercepta todas as rotas com `path: "/*"`), `functions/cron.mjs` (scheduled function da limpeza agendada), `app.js` (aplicação central), `db.js` (adaptador Turso), `schema.sql` (criação das tabelas), `netlify.toml` (configuração do site).

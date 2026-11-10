@@ -1,6 +1,5 @@
 # Vue d'ensemble du déploiement multiplateformes
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | **Français** | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
-> Synchronisé depuis l'original anglais (fr)
 
 Les six plateformes de SMSToWeb (version principale Cloudflare + cinq plateformes portées) sont dans ce répertoire. **Chaque sous-répertoire de plateforme est totalement autonome** :
 code (entrée + application principale + couche d'adaptation BDD) + `schema.sql` + le tutoriel de déploiement détaillé propre à la plateforme (README.md).

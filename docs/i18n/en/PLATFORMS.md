@@ -2,8 +2,6 @@
 
 **English** | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> Synced from the English primary where applicable
-
 All six SMSToWeb platforms (the Cloudflare primary + five ported platforms) live in this directory. **Each platform subdirectory is fully self-contained**:
 code (entry + core app + database adapter layer) + `schema.sql` + a detailed platform-specific deployment guide (README.md).
 
@@ -16,10 +14,10 @@ code (entry + core app + database adapter layer) + `schema.sql` + a detailed pla
 | EdgeOne Makers (Tencent) | Functions | external cron calling /api/cron | [edgeone/README.md](./EDGEONE.md) |
 | Fly.io / Railway / VPS | Docker (Node 22) + Turso/local SQLite | in-process | [node/README.md](./NODE.md) |
 
-Across the six platforms (Cloudflare included), API paths, auth logic, the message model, the admin page, multi-channel notification forwarding, and daily cleanup (UTC 17:00) are fully identical.
+Across the six platforms (Cloudflare included), API paths, auth logic, the message model, the admin page, multi-channel notification forwarding and daily cleanup (UTC 17:00) come from the same business core; runtime behaviour still needs to be validated per platform.
 The table schema is the same, so you can migrate between them at any time.
 
-> **One-click deploy**: the Cloudflare / Vercel / Netlify guides each start with an official one-click deploy button (the Cloudflare button even creates the database and tables automatically).
+> **Deploy buttons**: the Cloudflare / Vercel / Netlify guides each start with an official deploy button. The button creates and binds platform resources, but it does not create tables — the application does that on its first request via `ensureSchema`.
 > Deno Deploy, EdgeOne and Docker self-hosting have no official button yet — just follow each platform guide.
 
 ## How to choose a platform

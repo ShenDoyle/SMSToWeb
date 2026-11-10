@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | **한국어** | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> 영어 원본에서 동기화됨（한국어판）
-
 SMSToWeb의 여섯 플랫폼(Cloudflare 메인 버전 + 5개 이식 버전)은 모두 이 디렉터리에 있습니다. **각 플랫폼 하위 디렉터리는 완전히 자기완결적**입니다:
 코드(엔트리 + 코어 애플리케이션 + 데이터베이스 어댑터 계층) + `schema.sql` + 해당 플랫폼의 상세 배포 튜토리얼(README.md).
 

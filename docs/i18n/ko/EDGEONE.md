@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | **한국어** | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> 영어 원본에서 동기화됨（한국어판）
-
 SMSToWeb을 Tencent EdgeOne Makers(구 EdgeOne Pages, Functions + Turso 데이터베이스)에 배포합니다. 중국 내 접속 경험이 좋고, 전체 약 15분입니다.
 
 **이 디렉터리의 파일**: `functions/index.js`(루트 경로 `/` 전용 엔트리, 전체 로직과 ENV_KEYS 화이트리스트의 단일 소스), `functions/[[default]].js`(나머지 라우트를 받는 폴백, index.js만 re-export하므로 별도 유지 불필요), `app.js`(코어 애플리케이션), `db.js`(Turso 어댑터 계층), `schema.sql`(테이블 생성).

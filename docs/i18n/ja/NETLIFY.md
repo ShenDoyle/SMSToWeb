@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | **日本語** | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> 英語原文から同期（日本語版）
-
 SMSToWeb を Netlify（Functions v2 + Turso データベース）へデプロイします。全体の所要時間は約 15 分です。
 
 **このディレクトリのファイル**：`functions/api.mjs`（エントリ、`path: "/*"` ですべてのルートを捕捉）、`functions/cron.mjs`（定期クリーンアップの Scheduled Function）、`app.js`（コアアプリ）、`db.js`（Turso アダプタ）、`schema.sql`（テーブル作成）、`netlify.toml`（サイト設定）。

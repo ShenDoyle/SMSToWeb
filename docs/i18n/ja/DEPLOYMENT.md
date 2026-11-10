@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | **日本語** | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> 英語原文から同期（日本語版）
-
 本システムは 2 つの部分から成ります：**送信側**（各プラットフォームのプッシュクライアント）+ **クラウドゲートウェイ**（6 プラットフォームから 1 つを選択：Cloudflare / Vercel / Deno / Netlify / EdgeOne Makers / Docker セルフホスト。[PLATFORMS.md](./PLATFORMS.md) 参照、取り込み方法は完全に同じです）。
 SMS は取り込み経路の一つにすぎません — HTTP リクエストを送れるあらゆるデバイス / スクリプトが、同じ Web ページへ通知をプッシュして閲覧できます。
 

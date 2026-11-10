@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | **繁體中文** | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> 自英語主版同步（繁體中文版）
-
 把 SMSToWeb 部署到自己的伺服器（Docker / VPS / Fly.io / Railway）。**處理程序常駐**、無函式時長限制、資料完全自控。本平台是移植版：業務程式碼與 Cloudflare 主版本逐位元組一致，差異僅在雙模式介接層（Turso / 本機 SQLite）。
 
 **本目錄檔案**：`server.mjs`（node:http 入口）、`app.js`（核心應用）、`db.js`（Turso + 本機 SQLite 雙模式介接層，獨立維護）、`schema.sql`（建表）、`Dockerfile`、`package.json`。

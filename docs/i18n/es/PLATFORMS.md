@@ -1,6 +1,5 @@
 # Resumen del despliegue multiplataforma
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | **Español** | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
-> Sincronizado del original en inglés (es)
 
 Las seis plataformas de SMSToWeb (versión principal de Cloudflare + cinco plataformas portadas) están en este directorio. **Cada subdirectorio de plataforma es completamente autocontenido**:
 código (entrada + aplicación principal + capa de adaptación de base de datos) + `schema.sql` + el tutorial detallado de despliegue de esa plataforma (README.md).

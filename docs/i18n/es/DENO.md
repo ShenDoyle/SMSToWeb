@@ -1,6 +1,5 @@
 # Guía de despliegue en Deno Deploy
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | **Español** | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
-> Sincronizado del original en inglés (es)
 
 Despliega SMSToWeb en Deno Deploy (runtime nativo de Deno + base de datos Turso). Es el más cercano en semántica al Cloudflare Worker; el plan gratuito da 1 millón de peticiones al mes, unos 15 minutos en total.
 

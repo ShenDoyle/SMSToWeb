@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | **Português (BR)**
 
-> Sincronizado do original em inglês (pt-BR)
-
 Implantar o SMSToWeb no Tencent EdgeOne Makers (antigo EdgeOne Pages; Functions + banco Turso). Boa experiência de acesso a partir da China, cerca de 15 minutos no total.
 
 **Arquivos neste diretório**: `functions/index.js` (entrada só para o caminho raiz `/`, fonte única de toda a lógica e da whitelist ENV_KEYS), `functions/[[default]].js` (intercepta todas as demais rotas e só reexporta o index.js — sem manutenção separada), `app.js` (aplicação central), `db.js` (adaptador Turso), `schema.sql` (criação das tabelas).

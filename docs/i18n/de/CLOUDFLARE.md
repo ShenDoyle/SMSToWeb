@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | **Deutsch** | [Português (BR)](../pt-BR/README.md)
 
-> Synct mit dem englischen Original (de)
-
 Dies ist die Hauptversion des Projekts: Handy-SMS/Benachrichtigungen → Cloudflare Worker → D1-Datenbank → Web-Admin-Seite.
 Kein Server nötig, großzügiges Gratis-Kontingent, komplett per Mausklick im Browser erledigt — ohne Installation jeglicher Tools.
 

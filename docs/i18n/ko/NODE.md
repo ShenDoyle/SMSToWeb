@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | **한국어** | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> 영어 원본에서 동기화됨（한국어판）
-
 SMSToWeb을 Docker 컨테이너로 셀프호스팅합니다. 상주 프로세스, 함수 실행 시간 제한 없음, 롱 폴링 실시간성 최고이며, 서버를 보유했거나 Fly.io / Railway에 배포하고 싶은 사용자에게 적합합니다(무료 할당량은 아래 "플랫폼 안내" 참조).
 
 **이 디렉터리의 파일**: `server.mjs`(Node 18+ 의존성 없는 엔트리, 내장 매일 정리 포함), `app.js`(코어 애플리케이션), `db.js`(Turso / 로컬 SQLite 듀얼 모드 어댑터 계층), `schema.sql`(테이블 생성), `Dockerfile`, `package.json`.

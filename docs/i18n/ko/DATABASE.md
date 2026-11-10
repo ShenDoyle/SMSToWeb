@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | **한국어** | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> 영어 원본에서 동기화됨（한국어판）
-
 데이터베이스는 단일 소스의 표준 SQLite DDL(루트 `schema.sql`)을 사용하며, 전 플랫폼에서 유일한 테이블 구조를 공유합니다: 클라우드 버전은 SQLite 호환 데이터베이스(D1 / Turso), 셀프호스팅 버전은 동일한 파일을 로컬 SQLite에 직접 적용합니다.
 
 ## 테이블 구조(단일 소스: 루트 schema.sql)

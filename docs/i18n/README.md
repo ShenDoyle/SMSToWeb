@@ -1,10 +1,6 @@
 # Documentation i18n
 
-**English** is the primary maintained language of this repository's documentation. This directory holds the eight translated mirrors (`zh-CN`, `zh-TW`, `ja`, `ko`, `es`, `fr`, `de`, `pt-BR`).
-
-> **Sync status (2026-11-09, M-2 pass)**: the English primary `README.md`, the Chinese primary docs (`docs/`) and the new [Chinese user guide](../guide/README.md) were corrected for current facts. **All eight translated mirrors remain intentionally lagging** — a full re-translation is out of scope and machine-looking placeholder translations are forbidden by [MAINTENANCE.md](MAINTENANCE.md). However, every mirrored `README.md` / `ARCHITECTURE.md` now carries a **"Sync notice (2026-11-09)"** block at the top listing the verified current facts: **850** tests, **33** `ENV_KEYS`, all six entries pass a `waitUntil`-style `ctx`, Node **80s** app grace with **≥90s** container stop grace, and the **narrow** scope of `gen_app.py --check`. This satisfies the rule "translations may lag; silently wrong is not": outdated statements (667/814 assertions, 31 variables, "other platforms finish notifications before the response", 8-second forced exit, deploy button creating tables) are explicitly flagged instead of being left to look current.
->
-> Developer-facing documents added for v1.0.4 — [Design System](../DESIGN-SYSTEM.md) and [Settings Center](../SETTINGS.md) — are maintained in the primary languages only and are intentionally **not mirrored** (they describe internal implementation conventions, not end-user instructions). Version strings in translations are not release markers — source `v1.1.0` has been finalized on `main` (commit `43aaecf`); **no GitHub Release has been created, no tag has been pushed, and no deployment has been performed**; real-platform runtime validation is 0/6.
+This directory holds the eight translated documentation mirrors (`zh-CN`, `zh-TW`, `ja`, `ko`, `es`, `fr`, `de`, `pt-BR`).
 
 ## Language index
 

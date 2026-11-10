@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | **Deutsch** | [Português (BR)](../pt-BR/README.md)
 
-> Synct mit dem englischen Original (de)
-
 Alle Endpunkte liegen unter `/` als Wurzel, Antworten sind JSON (`Content-Type: application/json`) mit CORS-Unterstützung. Außer den „öffentlichen Endpunkten“ sind sie durch den Login-Schalter geschützt (Empfehlungen zur Sicherheitskonfiguration siehe Root-README „Sicherheitsempfehlungen“).
 
 ## Authentifizierungsarten

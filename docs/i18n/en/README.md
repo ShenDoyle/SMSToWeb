@@ -1,19 +1,10 @@
 # SMSToWeb — SMS & Notification Cloud Gateway
 
-> **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = **850 passing assertions** (plus the separate M-1 suite `tests/m1-lifecycle.mjs` = 32); `ENV_KEYS` = **33** variables; **all six platform entries pass a `waitUntil`-style `ctx`** (inline `await` is only a *runtime-capability* fallback, not an entry-point behaviour); Node shutdown grace = **80s** and the container/service stop grace must be **>= 90s** (Docker default 10s SIGKILLs first); `gen_app.py --check` verifies **only** the embedded `SCHEMA_SQL` block and SQL references, **not** platform-copy drift. Any statement in this mirror about "667/814/573 assertions", "31 variables", "other platforms finish notifications before the response", "8-second forced exit", "the deploy button creates the tables", or "one-click and you are live" is **outdated**. Read the [English primary](../../../README.md), [ARCHITECTURE](../../ARCHITECTURE.md), or the [Chinese user guide](../../guide/README.md) instead.
->
-> **同步提示（2026-11-09）**：本镜像属滞后翻译，上述事实以英文主版与中文主文档为准；本文件内关于测试数量、环境变量数量、「其他平台响应前发完通知」、8 秒强制退出、按钮自动建表等旧表述均已过时，请勿据此部署或验收。源码 `v1.1.0` 已固化至 `main`（`43aaecf`）；未创建 GitHub Release、未打 tag、未部署。
-
-
 **English** | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> Synced from the English primary where applicable
+SMSToWeb collects messages from any channel — SMS forwarders, app notifications, scripts, webhooks and custom integrations — through one shared HTTP API and message format, and shows them on a single web page for reading, searching and forwarding.
 
-> English is the primary maintained version of this document. Translations live under [`docs/i18n/<lang>/`](../README.md) and may lag behind; when in doubt, refer to this file.
-
-Forward SMS from an Android phone and notifications from any HTTP-capable device to the cloud in real time, and read them from a web page anywhere.
-
-- **Multi-platform deployment**: Cloudflare (primary) / Vercel / Deno Deploy / Netlify / Tencent EdgeOne Makers / Docker self-hosted — pick one of six, features fully identical
+- **Multi-platform support**: Cloudflare Workers / Vercel / Deno Deploy / Netlify / Tencent EdgeOne Makers / Docker self-hosted — choose whichever platform fits your setup.
 - **Real-time receiving**: webhook push lands in the database in seconds; the web page refreshes itself, no manual work
 - **Universal push**: any device that can send an HTTP request (Linux / Windows / macOS / iOS / NAS / scripts) can push notifications into the same page
 - **Sources & filters**: filter dynamically by source (SMS / notifications and custom sources auto-aggregated), stacked with keyword search and Today / Last 7 days / Last 30 days ranges; adjustable page size
@@ -35,11 +26,11 @@ Forward SMS from an Android phone and notifications from any HTTP-capable device
                                                 browser ◀── web admin (embedded in gateway)
 ```
 
-**One-click deploy (Cloudflare primary, ~2 min)**:
+**Deploy to Cloudflare**:
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ShenDoyle/SMSToWeb/tree/main/platforms/cloudflare)
 
-What the button actually does: clones the public repository into your own GitHub/GitLab account, creates and binds the **D1 database** and other Cloudflare-native resources declared in `wrangler.toml`, and sets up build/CI. It does **not** run SQL migrations (the application's `ensureSchema` creates tables on the first request), does **not** create a Turso database and does **not** fill in your secrets — you still type `RECEIVE_TOKEN` (and `ADMIN_PASSWORD` / `SESSION_SECRET` if login is enabled). Honest summary: **one click to create the app + a few fields to fill in**. The button deploys the public `main` branch, which currently holds `v1.1.0` (commit `43aaecf`). No GitHub Release has been created, no tag pushed and no deployment performed. See the [verified deployment capability matrix](../../guide/10-部署能力矩阵.md).
+The button clones the public repository into your own account, creates and binds the D1 database and other platform resources, and sets up build/CI. Tables are created by the application on its first request; secrets are filled in on the settings page. See the [deployment capability matrix](../../guide/10-部署能力矩阵.md).
 
 | Platform | Deployment | Scheduled cleanup | Guide |
 |---|---|---|---|
@@ -50,25 +41,8 @@ What the button actually does: clones the public repository into your own GitHub
 | Tencent EdgeOne Makers | Functions + Turso | external cron | [platforms/edgeone/README.md](../../../platforms/edgeone/README.md) |
 | Fly.io / Railway / VPS | Docker (Node 22) + Turso / local SQLite | in-process | [platforms/node/README.md](../../../platforms/node/README.md) |
 
-> Every platform directory is **fully self-contained** (code + schema + standalone docs, zero npm dependencies, no build step). Click a guide above and follow the steps. Features and the data schema are identical across platforms; you can migrate between them at any time.
+> Every platform directory is **fully self-contained** (code + schema + standalone docs, zero npm dependencies, no build step). Click a guide above and follow the steps.
 > For platform comparison and common preparation (Turso database), see [platforms/README.md](../../../platforms/README.md).
-
-### Runtime differences (read before deploying)
-
-Business code is byte-identical across the six platforms, but **timeouts / background tasks / timers** differ at runtime. Adapt via environment variables when needed:
-
-| Platform | Function timeout | Background notify | Scheduled cleanup | Suggestion |
-|---|---|---|---|---|
-| Cloudflare | no wall-clock limit (CPU-limited) | `ctx.waitUntil` continues after response | platform cron | defaults work |
-| Vercel Edge | ~25s cap per request | completed inline before response | platform cron | `WAIT_MAX_SECONDS=20` |
-| Netlify Functions | 60s (all plans) | completed inline before response | scheduled function | entry defaults to `WAIT_MAX_SECONDS=8` |
-| Deno Deploy | plan-dependent | completed inline before response | needs external trigger | external cron calling `/api/cron?token=` |
-| EdgeOne Makers | plan-dependent | completed inline before response | needs external trigger | lower `WAIT_MAX_SECONDS` per plan |
-| Node / Docker | your choice | completed inline before response | needs external trigger | local SQLite needs Node ≥ 22.13 |
-
-> - **Long polling**: the frontend retries failures with **exponential backoff** (2→30s) and re-polls immediately when the page becomes visible; platform-killed requests never flood the function.
-> - **Notification forwarding**: **all six platform entries pass a `ctx`-style object**; the difference is whether the runtime provides `waitUntil`. `bgRun` uses it when present (forwarding continues after the response) and degrades to an inline `await` only when the runtime lacks it (then the response waits). Older revisions claiming the other platforms always finish before the response are wrong; see [ARCHITECTURE §4](../../ARCHITECTURE.md). Per-channel fetch timeout is 10s.
-> - **Scheduled cleanup**: on platforms without cron, point any scheduler at `GET /api/cron?token=<RECEIVE_TOKEN>`.
 
 ---
 
@@ -107,24 +81,6 @@ Cloudflare additionally needs the `DB` (D1 binding); other platforms need `TURSO
 > **Security recommendations**
 > 1. **Turn on admin login** (`ENABLE_AUTH="true"` + `ADMIN_PASSWORD`): the admin page holds sensitive content such as SMS OTP codes; without login, anyone who knows the domain can read every message and delete data. The login endpoint is rate-limited (5 consecutive failures per IP locks it for 10 minutes); `/api/receive` and `/api/push` are rate-limited to 120 writes per IP per minute (429 beyond that).
 > 2. **Trade-off of `?token=` in URLs**: for compatibility with SmsForwarder and similar clients, `/api/receive` and `/api/push` accept auth via the `?token=` query parameter — the token may appear in platform access logs and browser history. If that concerns you, switch to POST with the `Authorization: Bearer <RECEIVE_TOKEN>` header (both are supported).
-
-## FAQ (general)
-
-- **A label shows a literal `{{XXX}}`** → cannot happen: the gateway blanks labels containing a literal `{{` and falls back to `sim`; set your custom name directly in the template's `name` field
-- **API 401/403** → check that `token=` in the URL matches `RECEIVE_TOKEN`; `/api/receive` and `/api/push` are unaffected by the login toggle
-- **API 429** → write rate limit hit (120/IP/min); it recovers after a minute — if it happens in normal use, your token may have leaked or something is hammering the API
-- **Very long messages** → a single body is capped at 8000 characters, the excess is truncated
-- **Renaming a device label** → a label comes from the message template's `name` field; changing `name` creates a new label. Use "✎" next to a label on the web page to rename it, "⇄" to merge its messages into another device, and "×" to delete an empty label directly
-- **Upgrading from an older version (new columns)** → run on the old database: `ALTER TABLE messages ADD COLUMN deleted_at TEXT;`, `ALTER TABLE messages ADD COLUMN starred INTEGER NOT NULL DEFAULT 0;`, `ALTER TABLE messages ADD COLUMN read_at TEXT;` (fresh databases already include them; node local SQLite auto-adds columns on startup)
-
-## Development
-
-- `src/worker.js`: core source (Cloudflare Worker shape)
-- `platforms/gen_app.py`: generates the platform-neutral `app.js` from `src/worker.js` into the five ported platforms and syncs the Cloudflare copy `worker.js` (keeping business code byte-identical across six platforms); also syncs the **33-variable** environment whitelist (`ENV_KEYS`, including auth entries) into the six platform entries to prevent drift (node's db.js is a Turso + local SQLite dual adapter, maintained separately and not synced)
-- `platforms/*/`: self-contained deployment directories (entry + app.js + db.js adapter + schema.sql + platform guide)
-- `docs/i18n/en/`: English documentation set (deployment/API/architecture/database); other languages under `docs/i18n/<lang>/` — see [docs/i18n/README.md](../README.md)
-- `tests/run.mjs`: zero-dependency test suite (needs Node 22.13+, **850 assertions**, all passing): `node tests/run.mjs`. The M-1 lifecycle suite `tests/m1-lifecycle.mjs` (**32 assertions**) runs separately.
-- After changing core code: run `python platforms/gen_app.py` (**write mode**) to re-sync all platforms, then `python platforms/gen_app.py --check`, `node tests/run.mjs`, `node --check` and a **byte comparison** of the generated copies. `--check` is read-only but **narrow**: it verifies only the embedded `SCHEMA_SQL` block and SQL references — it does **not** compare the six platform `app.js`/`worker.js` copies and cannot detect drift from editing `src/worker.js`.
 
 ## License
 

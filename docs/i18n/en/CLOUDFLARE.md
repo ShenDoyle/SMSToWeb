@@ -2,8 +2,6 @@
 
 **English** | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> Synced from the English primary where applicable
-
 This is the project's primary version: phone SMS/notifications → Cloudflare Worker → D1 database → web admin page.
 No server required, generous free tier, and everything can be done by clicking through web pages — no tools to install.
 

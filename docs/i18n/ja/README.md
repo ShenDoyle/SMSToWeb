@@ -1,19 +1,10 @@
 # SMSToWeb — SMS & 通知クラウドゲートウェイ
 
-> **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = **850 passing assertions** (plus the separate M-1 suite `tests/m1-lifecycle.mjs` = 32); `ENV_KEYS` = **33** variables; **all six platform entries pass a `waitUntil`-style `ctx`** (inline `await` is only a *runtime-capability* fallback, not an entry-point behaviour); Node shutdown grace = **80s** and the container/service stop grace must be **>= 90s** (Docker default 10s SIGKILLs first); `gen_app.py --check` verifies **only** the embedded `SCHEMA_SQL` block and SQL references, **not** platform-copy drift. Any statement in this mirror about "667/814/573 assertions", "31 variables", "other platforms finish notifications before the response", "8-second forced exit", "the deploy button creates the tables", or "one-click and you are live" is **outdated**. Read the [English primary](../../../README.md), [ARCHITECTURE](../../ARCHITECTURE.md), or the [Chinese user guide](../../guide/README.md) instead.
->
-> **同步提示（2026-11-09）**：本镜像属滞后翻译，上述事实以英文主版与中文主文档为准；本文件内关于测试数量、环境变量数量、「其他平台响应前发完通知」、8 秒强制退出、按钮自动建表等旧表述均已过时，请勿据此部署或验收。源码 `v1.1.0` 已固化至 `main`（`43aaecf`）；未创建 GitHub Release、未打 tag、未部署。
-
-
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | **日本語** | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> 英語原文から同期（日本語版）
+さまざまな経路（SMS 転送、アプリ通知、スクリプト、Webhook、独自連携）からのメッセージを共通の HTTP API とデータ形式で一か所に集約し、単一の Web ページから閲覧・検索・転送できます。
 
-> 英語版がこのドキュメントの一次メンテナンス版です。翻訳は [`docs/i18n/<lang>/`](../../../docs/i18n/README.md) 配下にあり、最新化が遅れることがあります。迷ったら英語版を参照してください。
-
-Android スマホ（およびその他のあらゆるデバイス）からの SMS と通知をリアルタイムでクラウドへプッシュし、どこからでも Web ページで閲覧できるようにします。
-
-- **マルチプラットフォームデプロイ**: Cloudflare（主力）/ Vercel / Deno Deploy / Netlify / Tencent EdgeOne Makers / Docker セルフホスト — 6 つから 1 つを選ぶだけで、機能は完全に同一
+- **マルチプラットフォーム対応**: Cloudflare Workers / Vercel / Deno Deploy / Netlify / Tencent EdgeOne Makers / Docker セルフホスト — 環境に合ったプラットフォームを選んでデプロイできます。
 - **リアルタイム受信**: Webhook プッシュが数秒でデータベースに到着。Web ページは自分で更新されるので手作業不要
 - **汎用プッシュ**: HTTP リクエストを送れるあらゆるデバイス（Linux / Windows / macOS / iOS / NAS / スクリプト）から、同じページへ通知をプッシュ可能
 - **ソース & フィルター**: ソース（SMS / 通知、および自動集計されるカスタムソース）で動的に絞り込み、キーワード検索や今日 / 過去 7 日 / 過去 30 日の期間指定と重ねがけ可能。ページサイズは調整可
@@ -33,11 +24,11 @@ Android スマホ（およびその他のあらゆるデバイス）からの SM
                                                 ブラウザ ◀── Web 管理画面（ゲートウェイに組み込み）
 ```
 
-**ワンクリックデプロイ（Cloudflare 主力、約 2 分）**：
+**Cloudflare へのワンクリックデプロイ**：
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ShenDoyle/SMSToWeb/tree/main/platforms/cloudflare)
 
-このボタンはデータベースとテーブルの作成、リソースのバインド、CI の設定まで自動で行います。案内に従って `RECEIVE_TOKEN`（プッシュ認証シークレット）を入力すればすぐに運用開始できます。Vercel / Netlify のワンクリックボタンは各プラットフォームガイドにあります。
+このボタンは公開リポジトリを自分のアカウントへクローンし、D1 などのリソースを作成・バインドして CI を設定します。テーブルはアプリが初回リクエスト時に作成し、シークレットは設定ページで入力します。
 
 | プラットフォーム | デプロイ方式 | 定期クリーンアップ | ガイド |
 |---|---|---|---|
@@ -50,23 +41,6 @@ Android スマホ（およびその他のあらゆるデバイス）からの SM
 
 > どのプラットフォームディレクトリも**完全に自己完結**しています（コード + スキーマ + 独立したドキュメント、npm 依存ゼロ、ビルド不要）。上のガイドを開いて手順に従ってください。機能とデータスキーマは全プラットフォームで同一であり、いつでも相互に移行できます。
 > プラットフォーム比較と共通の事前準備（Turso データベース）は [PLATFORMS.md](./PLATFORMS.md) を参照してください。
-
-### ランタイムの違い（デプロイ前に読んでください）
-
-ビジネスコードは 6 プラットフォーム全体でバイト単位で同一ですが、**タイムアウト / バックグラウンドタスク / タイマー**はランタイムごとに異なります。必要に応じて環境変数で調整してください：
-
-| プラットフォーム | 関数タイムアウト | バックグラウンド通知 | 定期クリーンアップ | 推奨設定 |
-|---|---|---|---|---|
-| Cloudflare | 実時間の上限なし（CPU 制限のみ） | `ctx.waitUntil` がレスポンス後も継続 | プラットフォーム cron | デフォルトのままで OK |
-| Vercel Edge | リクエストあたり約 25 秒の上限 | レスポンス前にインラインで完了 | プラットフォーム cron | `WAIT_MAX_SECONDS=20` |
-| Netlify Functions | 60 秒（全プラン共通） | レスポンス前にインラインで完了 | scheduled function | エントリのデフォルトは `WAIT_MAX_SECONDS=8` |
-| Deno Deploy | プラン依存 | レスポンス前にインラインで完了 | 外部トリガーが必要 | 外部 cron で `/api/cron?token=` を呼ぶ |
-| EdgeOne Makers | プラン依存 | レスポンス前にインラインで完了 | 外部トリガーが必要 | プランに応じて `WAIT_MAX_SECONDS` を下げる |
-| Node / Docker | 自由に設定可能 | レスポンス前にインラインで完了 | 外部トリガーが必要 | ローカル SQLite には Node ≥ 22.13 が必要 |
-
-> - **ロングポーリング**: フロントエンドは**指数バックオフ**（2→30 秒）で失敗をリトライし、ページが再び表示されると即座に再ポーリングします。プラットフォームに強制切断されたリクエストが関数に殺到することはありません。
-> - **通知転送**: Cloudflare は `waitUntil` を使用します。その他のプラットフォームはレスポンスの前に通知送信を完了させます（チャネルあたりタイムアウト 10 秒）。低速なチャネルが多いと多少レイテンシが増えます。
-> - **定期クリーンアップ**: cron がないプラットフォームでは、任意のスケジューラで `GET /api/cron?token=<RECEIVE_TOKEN>` を叩いてください。
 
 ---
 
@@ -105,24 +79,6 @@ Cloudflare では追加で `DB`（D1 バインディング）が必要です。�
 > **セキュリティ推奨事項**
 > 1. **管理画面ログインを有効にする**（`ENABLE_AUTH="true"` + `ADMIN_PASSWORD`）：管理画面には SMS OTP コードなどの機密情報があります。ログインなしでは、ドメインを知っている人なら誰でも全メッセージを読み、データを削除できてしまいます。ログインエンドポイントにはレート制限があります（同一 IP で連続 5 回失敗すると 10 分ロック）。`/api/receive` と `/api/push` は IP あたり毎分 120 書き込みに制限されます（超過で 429）。
 > 2. **URL 内 `?token=` のトレードオフ**：SmsForwarder などのクライアントとの互換性のため、`/api/receive` と `/api/push` は `?token=` クエリパラメータによる認証も受け付けます — トークンはプラットフォームのアクセスログやブラウザ履歴に残る可能性があります。気になる場合は `Authorization: Bearer <RECEIVE_TOKEN>` ヘッダー付きの POST に切り替えてください（両方式ともサポートしています）。
-
-## FAQ（一般）
-
-- **ラベルに `{{XXX}}` がそのまま表示される** → 起こりません：ゲートウェイは `{{` を含むラベルを空にして `sim` にフォールバックします。カスタム名はテンプレートの `name` フィールドに直接設定してください
-- **API が 401/403 を返す** → URL の `token=` が `RECEIVE_TOKEN` と一致しているか確認してください。`/api/receive` と `/api/push` はログインスイッチの影響を受けません
-- **API が 429 を返す** → 書き込みレート制限（120/IP/分）に到達しました。1 分後には回復します。通常の使用で発生する場合は、トークンが漏洩しているか何かが API を連打している可能性があります
-- **非常に長いメッセージ** → 1 つの本文は 8000 文字が上限で、超過分は切り捨てられます
-- **デバイスラベルの改名** → ラベルはメッセージテンプレートの `name` フィールドに由来します。`name` を変えると新しいラベルになります。Web ページでラベル横の「✎」で改名、「⇄」でそのラベルのメッセージを別デバイスへ統合、空のラベルは「×」で直接削除できます
-- **旧バージョンからのアップグレード（新しいカラム）** → 既存のデータベースで実行：`ALTER TABLE messages ADD COLUMN deleted_at TEXT;`、`ALTER TABLE messages ADD COLUMN starred INTEGER NOT NULL DEFAULT 0;`、`ALTER TABLE messages ADD COLUMN read_at TEXT;`（新規データベースには最初から含まれています。node のローカル SQLite は起動時に自動でカラムを追加します）
-
-## 開発
-
-- `src/worker.js`：コアソース（Cloudflare Worker 形態）
-- `platforms/gen_app.py`：`src/worker.js` からプラットフォーム中立の `app.js` を生成して 5 つの移植プラットフォームへ同期し、Cloudflare コピーの `worker.js` も同期します（6 プラットフォームでビジネスコードをバイト単位で同一に維持）。31 変数の環境変数ホワイトリスト（ENV_KEYS、認証系を含む）も 6 プラットフォームのエントリへ同期してドリフトを防止します（node の db.js は Turso + ローカル SQLite のデュアルアダプタで、独立してメンテナンスされ同期対象外）
-- `platforms/*/`：自己完結型のデプロイディレクトリ（エントリ + app.js + db.js アダプタ + schema.sql + プラットフォームガイド）
-- `docs/i18n/en/`：英語ドキュメントセット（デプロイ / API / アーキテクチャ / データベース）。その他の言語は `docs/i18n/<lang>/` 配下 — [docs/i18n/README.md](../../../docs/i18n/README.md) 参照
-- `tests/run.mjs`：依存ゼロのテストスイート（Node 22.13+ が必要）：`node tests/run.mjs`
-- コアコードを変更した後：`python platforms/gen_app.py` で全プラットフォームを再同期し、続いて `node tests/run.mjs` を実行。CI が同期ドリフトゼロ + 構文 + テストを検証します
 
 ## ライセンス
 

@@ -2,8 +2,6 @@
 
 **English** | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> Synced from the English primary where applicable
-
 This system consists of two parts: **ingestion clients** (push clients on each device) + **cloud gateway** (choose one of six platforms: Cloudflare / Vercel / Deno / Netlify / EdgeOne Makers / Docker self-hosted — see [platforms/README.md](../../../platforms/README.md); the ingestion method is identical across them).
 SMS is only one ingestion path — any device or script that can send an HTTP request can push notifications into the same web page.
 

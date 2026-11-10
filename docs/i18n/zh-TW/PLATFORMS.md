@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | **繁體中文** | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> 自英語主版同步（繁體中文版）
-
 SMSToWeb 的全部六個平台（Cloudflare 主版本 + 五個移植平台）都在 `platforms/` 目錄。**每個平台子目錄完全自包含**：
 程式碼（入口 + 核心應用 + 資料庫介接層）+ `schema.sql` + 該平台的詳細部署教學（README.md）。
 

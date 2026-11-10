@@ -1,13 +1,6 @@
 # 架構文件
 
-> **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = **850 passing assertions** (plus the separate M-1 suite `tests/m1-lifecycle.mjs` = 32); `ENV_KEYS` = **33** variables; **all six platform entries pass a `waitUntil`-style `ctx`** (inline `await` is only a *runtime-capability* fallback, not an entry-point behaviour); Node shutdown grace = **80s** and the container/service stop grace must be **>= 90s** (Docker default 10s SIGKILLs first); `gen_app.py --check` verifies **only** the embedded `SCHEMA_SQL` block and SQL references, **not** platform-copy drift. Any statement in this mirror about "667/814/573 assertions", "31 variables", "other platforms finish notifications before the response", "8-second forced exit", "the deploy button creates the tables", or "one-click and you are live" is **outdated**. Read the [English primary](../../../README.md), [ARCHITECTURE](../../ARCHITECTURE.md), or the [Chinese user guide](../../guide/README.md) instead.
->
-> **同步提示（2026-11-09）**：本镜像属滞后翻译，上述事实以英文主版与中文主文档为准；本文件内关于测试数量、环境变量数量、「其他平台响应前发完通知」、8 秒强制退出、按钮自动建表等旧表述均已过时，请勿据此部署或验收。源码 `v1.1.0` 已固化至 `main`（`43aaecf`）；未创建 GitHub Release、未打 tag、未部署。
-
-
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | **繁體中文** | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
-
-> 自英語主版同步（繁體中文版）
 
 ## 總體架構
 
@@ -32,7 +25,7 @@
 | Node 自架 | `server.mjs`（node:http） | `db.js`（Turso / 本機 SQLite 雙模式，獨立維護） | 處理程序內建 |
 
 - 五個移植平台的 `app.js` / `db.js` 由 `platforms/gen_app.py` 從單一來源（`platforms/shared/`，經 `src/worker.js` 產生）同步，**六平台業務程式碼逐位元組一致**（Node 的 `db.js` 雙模式介接層獨立維護，不參與同步）
-- **31 個環境變數白名單（ENV_KEYS，含驗證項）**在 `gen_app.py` 同步時寫入六個平台入口，防止各平台透傳漂移；**不在此白名單的環境變數一律拒絕透傳**（從源頭杜絕「平台 A 依賴了平台 B 沒有的變數」與意外洩漏），未覆蓋的條目以測試報錯兜底
+- **33 個環境變數白名單（ENV_KEYS，含驗證項）**在 `gen_app.py` 同步時寫入六個平台入口，防止各平台透傳漂移；**不在此白名單的環境變數一律拒絕透傳**（從源頭杜絕「平台 A 依賴了平台 B 沒有的變數」與意外洩漏），未覆蓋的條目以測試報錯兜底
 - 本目錄 `app.js` / `db.js` 同步自 `shared/`（單一來源），請勿手改；業務改動統一改 `src/worker.js` 後執行 `python platforms/gen_app.py` 重新同步
 - `platforms/*/schema.sql` 與根目錄 `schema.sql` 一致（id、from、sim、name、content、source、time、device_id、deleted_at、starred、read_at、created_at；devices 表含 name、created_at、alias）
 

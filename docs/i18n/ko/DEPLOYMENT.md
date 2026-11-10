@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | **한국어** | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> 영어 원본에서 동기화됨（한국어판）
-
 본 시스템은 두 부분으로 구성됩니다: **수신단**(각 플랫폼의 푸시 클라이언트) + **클라우드 게이트웨이**(여섯 플랫폼 중 택1: Cloudflare / Vercel / Deno / Netlify / EdgeOne Makers / Docker 셀프호스팅, [platforms/README.md](../../../platforms/README.md) 참조, 연동 방식은 완전히 동일).
 SMS는 연동 경로 중 하나일 뿐입니다 — HTTP 요청을 보낼 수 있는 모든 기기/스크립트가 알림을 같은 웹페이지로 푸시해 확인할 수 있습니다.
 

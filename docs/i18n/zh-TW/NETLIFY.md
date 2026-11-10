@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | **繁體中文** | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> 自英語主版同步（繁體中文版）
-
 把 SMSToWeb 部署到 Netlify（Functions v2 + Turso 資料庫）。免費額度足夠個人使用，全程約 15 分鐘。
 
 **本目錄檔案**：`functions/api.mjs`（入口）、`functions/cron.mjs`（定時清理）、`app.js`（核心應用）、`db.js`（Turso 介接層）、`schema.sql`（建表）、`netlify.toml`（含定時任務設定）。

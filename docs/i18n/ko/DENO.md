@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | **한국어** | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> 영어 원본에서 동기화됨（한국어판）
-
 SMSToWeb을 Deno Deploy(Deno 네이티브 런타임 + Turso 데이터베이스)에 배포합니다. Cloudflare Worker와 의미론이 가장 가깝고, 무료 플랜은 매월 100만 요청이며, 전체 약 15분입니다.
 
 > 플랫폼 안내: Deno Deploy는 신세대 플랫폼으로 업그레이드되었으며 콘솔은 [console.deno.com](https://console.deno.com)입니다(구버전 dash.deno.com은 서비스 종료), CI와 유사한 Git 빌드 모델을 채택합니다.

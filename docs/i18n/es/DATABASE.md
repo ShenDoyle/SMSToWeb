@@ -1,6 +1,5 @@
 # Documento de la base de datos (DATABASE)
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | **Español** | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
-> Sincronizado del original en inglés (es)
 
 SMSToWeb usa una capa de adaptación de base de datos unificada (los cuatro métodos `prepare/bind/first/all/run`, idénticos a la API de Cloudflare D1) que nivela tres backends de almacenamiento; el código de negocio tiene cero diferencias de dialecto SQL.
 

@@ -1,6 +1,5 @@
 # Guía de despliegue autohospedado (Fly.io / Railway / VPS / local)
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | **Español** | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
-> Sincronizado del original en inglés (es)
 
 Autohospeda SMSToWeb como contenedor Docker. Proceso residente, sin límites de duración de función y la mejor temporalidad real del sondeo largo; ideal para quien ya tenga un servidor o quiera desplegar en Fly.io / Railway (la situación de las cuotas gratuitas más abajo, en «Notas de la plataforma»).
 

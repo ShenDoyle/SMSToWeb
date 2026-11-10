@@ -1,19 +1,10 @@
 # SMSToWeb — SMS/알림 클라우드 게이트웨이
 
-> **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = **850 passing assertions** (plus the separate M-1 suite `tests/m1-lifecycle.mjs` = 32); `ENV_KEYS` = **33** variables; **all six platform entries pass a `waitUntil`-style `ctx`** (inline `await` is only a *runtime-capability* fallback, not an entry-point behaviour); Node shutdown grace = **80s** and the container/service stop grace must be **>= 90s** (Docker default 10s SIGKILLs first); `gen_app.py --check` verifies **only** the embedded `SCHEMA_SQL` block and SQL references, **not** platform-copy drift. Any statement in this mirror about "667/814/573 assertions", "31 variables", "other platforms finish notifications before the response", "8-second forced exit", "the deploy button creates the tables", or "one-click and you are live" is **outdated**. Read the [English primary](../../../README.md), [ARCHITECTURE](../../ARCHITECTURE.md), or the [Chinese user guide](../../guide/README.md) instead.
->
-> **同步提示（2026-11-09）**：本镜像属滞后翻译，上述事实以英文主版与中文主文档为准；本文件内关于测试数量、环境变量数量、「其他平台响应前发完通知」、8 秒强制退出、按钮自动建表等旧表述均已过时，请勿据此部署或验收。源码 `v1.1.0` 已固化至 `main`（`43aaecf`）；未创建 GitHub Release、未打 tag、未部署。
-
-
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | **한국어** | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> 영어 원본에서 동기화됨（한국어판）
+여러 경로(SMS 전달, 앱 알림, 스크립트, 웹훅, 사용자 지정 연동)의 메시지를 공통 HTTP API와 데이터 형식으로 한곳에 모아, 단일 웹 페이지에서 조회·검색·전달할 수 있습니다.
 
-> 이 문서의 영어판이 기본 관리 버전입니다. 번역본은 [`docs/i18n/<lang>/`](../README.md)에 있으며 다소 늦어질 수 있습니다. 확실하지 않으면 영어 원본을 참조하세요.
-
-안드로이드 폰의 SMS와 각종 기기의 알림을 실시간으로 클라우드에 푸시하고, 어디서나 웹페이지로 확인하세요.
-
-- **멀티플랫폼 배포**: Cloudflare(메인) / Vercel / Deno Deploy / Netlify / Tencent EdgeOne Makers / Docker 셀프호스팅 — 6가지 중 하나만 선택, 기능은 완전히 동일
+- **멀티플랫폼 지원**: Cloudflare Workers / Vercel / Deno Deploy / Netlify / Tencent EdgeOne Makers / Docker 셀프호스팅 — 환경에 맞는 플랫폼을 골라 배포하세요.
 - **실시간 수신**: 웹훅 푸시가 몇 초 만에 데이터베이스에 기록; 웹페이지가 스스로 갱신, 수동 작업 불필요
 - **범용 푸시**: HTTP 요청을 보낼 수 있는 모든 기기(Linux / Windows / macOS / iOS / NAS / 스크립트)가 같은 페이지로 알림을 푸시할 수 있음
 - **소스 & 필터**: 소스별 동적 필터(SMS / 알림 및 사용자 지정 소스 자동 집계), 키워드 검색과 오늘 / 최근 7일 / 최근 30일 범위를 겹쳐 사용; 페이지 크기 조절 가능
@@ -33,7 +24,7 @@
                                                 browser ◀── web admin (embedded in gateway)
 ```
 
-**원클릭 배포(Cloudflare 메인, 약 2분)**:
+**Cloudflare 원클릭 배포**:
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ShenDoyle/SMSToWeb/tree/main/platforms/cloudflare)
 
@@ -50,23 +41,6 @@
 
 > 모든 플랫폼 디렉터리는 **완전히 자기완결형**입니다(코드 + 스키마 + 독립 문서, npm 의존성 0, 빌드 불필요). 위 표의 가이드를 열어 단계대로 진행하세요. 기능과 데이터 스키마는 전 플랫폼에서 동일하며 언제든 서로 마이그레이션할 수 있습니다.
 > 플랫폼 비교와 공통 준비(Turso 데이터베이스)는 [platforms/README.md](../../../platforms/README.md)를 참조하세요.
-
-### 런타임 차이(배포 전에 확인)
-
-비즈니스 코드는 6개 플랫폼에서 바이트 단위로 동일하지만 **타임아웃 / 백그라운드 작업 / 타이머** 는 런타임마다 다릅니다. 필요 시 환경 변수로 조정하세요:
-
-| 플랫폼 | 함수 타임아웃 | 백그라운드 알림 | 예약 정리 | 제안 |
-|---|---|---|---|---|
-| Cloudflare | 고정 벽시시간 제한 없음(CPU 제한) | `ctx.waitUntil` 응답 후에도 계속 | 플랫폼 cron | 기본값 그대로 사용 |
-| Vercel Edge | 요청당 약 25초 상한 | 응답 전에 인라인 완료 | 플랫폼 cron | `WAIT_MAX_SECONDS=20` |
-| Netlify Functions | 60초(모든 플랜 동일) | 응답 전에 인라인 완료 | scheduled function | 엔트리 기본 `WAIT_MAX_SECONDS=8` |
-| Deno Deploy | 플랜에 따라 | 응답 전에 인라인 완료 | 외부 트리거 필요 | `/api/cron?token=`을 호출하는 외부 cron |
-| EdgeOne Makers | 플랜에 따라 | 응답 전에 인라인 완료 | 외부 트리거 필요 | 플랜에 맞춰 `WAIT_MAX_SECONDS` 하향 |
-| Node / Docker | 직접 선택 | 응답 전에 인라인 완료 | 외부 트리거 필요 | 로컬 SQLite는 Node ≥ 22.13 필요 |
-
-> - **롱 폴링**: 프런트엔드는 실패 시 **지수 백오프**(2→30초)로 재시도하고 페이지가 다시 보이면 즉시 재폴링합니다. 플랫폼이 요청을 강제 종료해도 함수에 요청이 몰리지 않습니다.
-> - **알림 전달**: Cloudflare는 `waitUntil`을 사용하고, 그 외 플랫폼은 응답 전에 알림 전송을 마칩니다(채널당 10초 타임아웃). 느린 채널을 많이 설정하면 API 지연이 약간 늘어납니다.
-> - **예약 정리**: cron이 없는 플랫폼에서는 어떤 스케줄러로든 `GET /api/cron?token=<RECEIVE_TOKEN>`을 호출하면 됩니다.
 
 ---
 
@@ -105,24 +79,6 @@ Cloudflare는 추가로 `DB`(D1 바인딩)가 필요하고, 그 외 플랫폼은
 > **보안 권고**
 > 1. **관리자 로그인 켜기**(`ENABLE_AUTH="true"` + `ADMIN_PASSWORD`): 관리 페이지에는 SMS OTP 코드 등 민감한 내용이 있습니다. 로그인이 없으면 도메인만 아는 사람이 모든 메시지를 읽고 데이터를 삭제할 수 있습니다. 로그인 엔드포인트는 속도 제한이 내장되어 있고(IP당 연속 5회 실패 시 10분 잠금), `/api/receive`와 `/api/push`는 IP당 분당 120회 쓰기 제한이 있습니다(초과 시 429).
 > 2. **URL의 `?token=` 트레이드오프**: SmsForwarder 등 클라이언트와의 호환성을 위해 `/api/receive`와 `/api/push`는 `?token=` 쿼리 파라미터 인증을 허용합니다 — 토큰이 플랫폼 접근 로그와 브라우저 기록에 남을 수 있습니다. 우려된다면 POST + `Authorization: Bearer <RECEIVE_TOKEN>` 헤더 방식으로 전환하세요(두 방식 모두 지원).
-
-## FAQ(일반)
-
-- **라벨에 `{{XXX}}` 글자가 그대로 보임** → 발생하지 않음: 게이트웨이는 `{{` 글자를 포함하는 라벨을 자동으로 공백 처리하고 `sim`으로 폴백합니다. 사용자 지정 이름은 템플릿의 `name` 필드에 직접 채우세요
-- **API 401/403** → URL의 `token=`이 `RECEIVE_TOKEN`과 일치하는지 확인; `/api/receive`와 `/api/push`는 로그인 토글의 영향을 받지 않음
-- **API 429** → 쓰기 속도 제한 도달(120/IP/분); 1분 후 자동 회복 — 정상 사용 중에 발생한다면 토큰이 유출되었거나 무언가 API를 계속 두드리고 있을 가능성
-- **아주 긴 메시지** → 본문 한 건 최대 8000자, 초과분은 잘림
-- **기기 라벨 이름 변경** → 라벨 이름은 메시지 템플릿의 `name` 필드에서 옵니다. `name`을 바꾸면 새 라벨이 생깁니다. 웹페이지에서 라벨 옆 "✎"로 이름을 바꾸고, "⇄"로 해당 라벨의 메시지를 다른 기기로 병합하며, 메시지가 없는 라벨은 "×"로 바로 삭제
-- **구버전에서 업그레이드(새 컬럼)** → 기존 데이터베이스에서 실행: `ALTER TABLE messages ADD COLUMN deleted_at TEXT;`, `ALTER TABLE messages ADD COLUMN starred INTEGER NOT NULL DEFAULT 0;`, `ALTER TABLE messages ADD COLUMN read_at TEXT;` (새 데이터베이스는 이미 포함; node 로컬 SQLite는 시작 시 자동으로 컬럼 추가)
-
-## 개발
-
-- `src/worker.js`: 핵심 소스(Cloudflare Worker 형태)
-- `platforms/gen_app.py`: `src/worker.js`에서 플랫폼 중립 `app.js`를 생성해 5개 이식 플랫폼에 동기화하고, Cloudflare 독립 사본 `worker.js`도 동기화(6개 플랫폼 비즈니스 코드를 바이트 단위로 동일하게 유지); 31개 변수 환경 화이트리스트(ENV_KEYS, 인증 항목 포함)도 6개 플랫폼 엔트리에 동기화해 드리프트를 방지(node의 db.js는 Turso + 로컬 SQLite 듀얼 어댑터로 별도 유지되며 동기화 대상 아님)
-- `platforms/*/`: 자기완결형 배포 디렉터리(엔트리 + app.js + db.js 어댑터 + schema.sql + 플랫폼 가이드)
-- `docs/i18n/en/`: 영어 문서 세트(배포/API/아키텍처/데이터베이스); 그 외 언어는 `docs/i18n/<lang>/` — [docs/i18n/README.md](../README.md) 참조
-- `tests/run.mjs`: 의존성 없는 테스트 스위트(Node 22.13+ 필요): `node tests/run.mjs`
-- 핵심 코드 변경 후: `python platforms/gen_app.py`로 모든 플랫폼을 재동기화한 뒤 `node tests/run.mjs` 실행; CI가 동기화 제로 드리프트 + 문법 + 테스트를 검증
 
 ## License
 

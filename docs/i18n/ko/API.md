@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | **한국어** | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> 영어 원본에서 동기화됨（한국어판）
-
 모든 API는 `/`를 루트로 하며, 응답은 JSON(`Content-Type: application/json`)이고 CORS를 지원합니다. "공개 API"를 제외하고 로그인 토글의 보호를 받습니다(보안 설정 권장 사항은 루트 README의 "보안 권고" 참조).
 
 ## 인증 방식

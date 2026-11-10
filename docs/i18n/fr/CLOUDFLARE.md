@@ -1,6 +1,5 @@
 # Guide de déploiement Cloudflare (version principale, tout au navigateur)
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | **Français** | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
-> Synchronisé depuis l'original anglais (fr)
 
 C'est la version principale du projet : SMS/notifications du mobile → Cloudflare Worker → base de données D1 → page d'administration web.
 Sans serveur, largement dans le quota gratuit, tout se fait en clics dans le navigateur, sans installer d'outil.

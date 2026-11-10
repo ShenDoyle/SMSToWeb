@@ -2,8 +2,6 @@
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | **繁體中文** | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
-> 自英語主版同步（繁體中文版）
-
 所有端點均以 `/` 為根，回應為 JSON（`Content-Type: application/json`），支援 CORS。除「公開端點」外，受登入開關保護（安全設定建議見 README「安全強烈建議」）。
 
 ## 驗證方式
