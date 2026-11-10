@@ -69,7 +69,6 @@ function escAttr(s) {
 function jsStr(s) {
   return JSON.stringify(s).replace(/</g, "\\u003c");
 }
-/* 应用版本号：正式版发布固定版号，非正式版一般以小版本号递增升级；管理页/登录页底部页脚展示 */
 const APP_VERSION = "v1.1.0";
 
 /* 把页面模板中的占位标记替换为实际配置值（用函数替换器，避免值里含 $& 等特殊序列被误解释） */
