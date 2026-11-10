@@ -6,7 +6,7 @@
 
 **New here / 第一次使用？** → [Quick start (English)](docs/i18n/en/QUICKSTART.md) · [完整中文用户指南](docs/guide/README.md) · [常见问题](docs/guide/05-常见问题.md). You do **not** need to read the source code, the API reference, or this whole page to get started: the guide tells you which button to click, what to fill in, and how to confirm it worked.
 
-Push SMS and notifications from an Android phone (and any other device) to the cloud in real time, and read them from a web page anywhere. Free to deploy, no server required, about 10 minutes end to end.
+Forward SMS from an Android phone and notifications from any HTTP-capable device to the cloud in real time, and read them from a web page anywhere.
 
 **Current version: `v1.1.0`** — official releases carry a fixed version number (shown in the page footer); interim builds bump the patch version.
 

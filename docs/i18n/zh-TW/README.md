@@ -1,15 +1,15 @@
 # SMSToWeb — 簡訊/通知雲端閘道
 
-> **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = **850 passing assertions** (plus the separate M-1 suite `tests/m1-lifecycle.mjs` = 32); `ENV_KEYS` = **32** variables; **all six platform entries pass a `waitUntil`-style `ctx`** (inline `await` is only a *runtime-capability* fallback, not an entry-point behaviour); Node shutdown grace = **80s** and the container/service stop grace must be **>= 90s** (Docker default 10s SIGKILLs first); `gen_app.py --check` verifies **only** the embedded `SCHEMA_SQL` block and SQL references, **not** platform-copy drift. Any statement in this mirror about "667/814/573 assertions", "31 variables", "other platforms finish notifications before the response", "8-second forced exit", "the deploy button creates the tables", or "one-click and you are live" is **outdated**. Read the [English primary](../../../README.md), [ARCHITECTURE](../../ARCHITECTURE.md), or the [Chinese user guide](../../guide/README.md) instead.
+> **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = **850 passing assertions** (plus the separate M-1 suite `tests/m1-lifecycle.mjs` = 32); `ENV_KEYS` = **33** variables; **all six platform entries pass a `waitUntil`-style `ctx`** (inline `await` is only a *runtime-capability* fallback, not an entry-point behaviour); Node shutdown grace = **80s** and the container/service stop grace must be **>= 90s** (Docker default 10s SIGKILLs first); `gen_app.py --check` verifies **only** the embedded `SCHEMA_SQL` block and SQL references, **not** platform-copy drift. Any statement in this mirror about "667/814/573 assertions", "31 variables", "other platforms finish notifications before the response", "8-second forced exit", "the deploy button creates the tables", or "one-click and you are live" is **outdated**. Read the [English primary](../../../README.md), [ARCHITECTURE](../../ARCHITECTURE.md), or the [Chinese user guide](../../guide/README.md) instead.
 >
-> **同步提示（2026-11-09）**：本镜像属滞后翻译，上述事实以英文主版与中文主文档为准；本文件内关于测试数量、环境变量数量、「其他平台响应前发完通知」、8 秒强制退出、按钮自动建表等旧表述均已过时，请勿据此部署或验收。源码版本现为 `v1.1.0`（RC2 候选），目标 `v1.1.0` 尚未正式发布。
+> **同步提示（2026-11-09）**：本镜像属滞后翻译，上述事实以英文主版与中文主文档为准；本文件内关于测试数量、环境变量数量、「其他平台响应前发完通知」、8 秒强制退出、按钮自动建表等旧表述均已过时，请勿据此部署或验收。源码 `v1.1.0` 已固化至 `main`（`43aaecf`）；未创建 GitHub Release、未打 tag、未部署。
 
 
 [English](../../../README.md) | [简体中文](../zh-CN/README.md) | **繁體中文** | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
 > 本倉庫文件以英語為主要維護版本；本繁體中文版與其他語言譯文存放於 `docs/i18n/`，可能落後於英語主版。
 
-把 Android 手機的簡訊和各類裝置的通知即時推播到雲端，隨時透過網頁查看。免費部署、無需伺服器、約 10 分鐘完成。
+把 Android 手機的簡訊和各類裝置的通知即時推播到雲端，隨時透過網頁查看。
 
 - **多平台部署**：Cloudflare（主版本）/ Vercel / Deno Deploy / Netlify / 騰訊 EdgeOne Makers / Docker 自架，六擇一，功能完全一致
 - **即時接收**：Webhook 秒級寫入資料庫，網頁自動重新整理，無需手動操作

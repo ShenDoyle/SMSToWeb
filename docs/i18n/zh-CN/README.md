@@ -1,15 +1,15 @@
 # SMSToWeb — 短信/通知上云网关
 
-> **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = **850 passing assertions** (plus the separate M-1 suite `tests/m1-lifecycle.mjs` = 32); `ENV_KEYS` = **32** variables; **all six platform entries pass a `waitUntil`-style `ctx`** (inline `await` is only a *runtime-capability* fallback, not an entry-point behaviour); Node shutdown grace = **80s** and the container/service stop grace must be **>= 90s** (Docker default 10s SIGKILLs first); `gen_app.py --check` verifies **only** the embedded `SCHEMA_SQL` block and SQL references, **not** platform-copy drift. Any statement in this mirror about "667/814/573 assertions", "31 variables", "other platforms finish notifications before the response", "8-second forced exit", "the deploy button creates the tables", or "one-click and you are live" is **outdated**. Read the [English primary](../../../README.md), [ARCHITECTURE](../../ARCHITECTURE.md), or the [Chinese user guide](../../guide/README.md) instead.
+> **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = **850 passing assertions** (plus the separate M-1 suite `tests/m1-lifecycle.mjs` = 32); `ENV_KEYS` = **33** variables; **all six platform entries pass a `waitUntil`-style `ctx`** (inline `await` is only a *runtime-capability* fallback, not an entry-point behaviour); Node shutdown grace = **80s** and the container/service stop grace must be **>= 90s** (Docker default 10s SIGKILLs first); `gen_app.py --check` verifies **only** the embedded `SCHEMA_SQL` block and SQL references, **not** platform-copy drift. Any statement in this mirror about "667/814/573 assertions", "31 variables", "other platforms finish notifications before the response", "8-second forced exit", "the deploy button creates the tables", or "one-click and you are live" is **outdated**. Read the [English primary](../../../README.md), [ARCHITECTURE](../../ARCHITECTURE.md), or the [Chinese user guide](../../guide/README.md) instead.
 >
-> **同步提示（2026-11-09）**：本镜像属滞后翻译，上述事实以英文主版与中文主文档为准；本文件内关于测试数量、环境变量数量、「其他平台响应前发完通知」、8 秒强制退出、按钮自动建表等旧表述均已过时，请勿据此部署或验收。源码版本现为 `v1.1.0`（RC2 候选），目标 `v1.1.0` 尚未正式发布。
+> **同步提示（2026-11-09）**：本镜像属滞后翻译，上述事实以英文主版与中文主文档为准；本文件内关于测试数量、环境变量数量、「其他平台响应前发完通知」、8 秒强制退出、按钮自动建表等旧表述均已过时，请勿据此部署或验收。源码 `v1.1.0` 已固化至 `main`（`43aaecf`）；未创建 GitHub Release、未打 tag、未部署。
 
 
 [English](../../../README.md) | **简体中文** | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
 > 本仓库文档以英语为主维护版本；本中文版与其它语言译文存放于 `docs/i18n/`，可能滞后于英语主版。
 
-把 Android 手机的短信和各类设备的通知实时推送到云端，通过网页随时查看。免费部署、无需服务器、约 10 分钟完成。
+把 Android 手机的短信和各类设备的通知实时推送到云端，通过网页随时查看。
 
 - **多平台部署**：Cloudflare（主版本）/ Vercel / Deno Deploy / Netlify / 腾讯 EdgeOne Makers / Docker 自托管，六选一，功能完全一致
 - **实时接收**：Webhook 秒级入库，网页自动刷新，无需手动操作
@@ -63,7 +63,7 @@
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ShenDoyle/SMSToWeb/tree/main/platforms/cloudflare)
 
-按钮实际做的事：把公开仓库克隆到你自己的 GitHub/GitLab → **自动创建并绑定 D1 数据库**及 `wrangler.toml` 声明的平台原生资源 → 配置构建/CI。按钮**不会执行建表 SQL**（由应用的 `ensureSchema` 在首次请求自动建表）、**不会创建 Turso 数据库**、也**不会替你填密钥**，仍需在设置页手工填 `RECEIVE_TOKEN`（开启登录时还要 `ADMIN_PASSWORD` / `SESSION_SECRET`）。准确说法是**「一键创建应用 + 填几项配置」**，不是「点一下就上线」。按钮部署的是公开仓库 `main` 分支，可能落后于本地版本（当前源码 `v1.1.0` RC2 候选；正式版 `v1.1.0` 尚未发布）。完整能力矩阵见 [部署能力矩阵](../../guide/10-部署能力矩阵.md)。
+按钮实际做的事：把公开仓库克隆到你自己的 GitHub/GitLab → **自动创建并绑定 D1 数据库**及 `wrangler.toml` 声明的平台原生资源 → 配置构建/CI。按钮**不会执行建表 SQL**（由应用的 `ensureSchema` 在首次请求自动建表）、**不会创建 Turso 数据库**、也**不会替你填密钥**，仍需在设置页手工填 `RECEIVE_TOKEN`（开启登录时还要 `ADMIN_PASSWORD` / `SESSION_SECRET`）。准确说法是**「一键创建应用 + 填几项配置」**，不是「点一下就上线」。按钮部署的是公开仓库 `main` 分支，当前已固化 `v1.1.0`（`43aaecf`）；但尚未创建 GitHub Release、未打 tag、未部署。完整能力矩阵见 [部署能力矩阵](../../guide/10-部署能力矩阵.md)。
 
 | 平台 | 部署方式 | 定时清理 | 详细教程 |
 |---|---|---|---|

@@ -2,7 +2,7 @@
 
 > **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = **850 passing assertions** (plus the separate M-1 suite `tests/m1-lifecycle.mjs` = 32); `ENV_KEYS` = **33** variables; **all six platform entries pass a `waitUntil`-style `ctx`** (inline `await` is only a *runtime-capability* fallback, not an entry-point behaviour); Node shutdown grace = **80s** and the container/service stop grace must be **>= 90s** (Docker default 10s SIGKILLs first); `gen_app.py --check` verifies **only** the embedded `SCHEMA_SQL` block and SQL references, **not** platform-copy drift. Any statement in this mirror about "667/814/573 assertions", "31 variables", "other platforms finish notifications before the response", "8-second forced exit", "the deploy button creates the tables", or "one-click and you are live" is **outdated**. Read the [English primary](../../../README.md), [ARCHITECTURE](../../ARCHITECTURE.md), or the [Chinese user guide](../../guide/README.md) instead.
 >
-> **同步提示（2026-11-09）**：本镜像属滞后翻译，上述事实以英文主版与中文主文档为准；本文件内关于测试数量、环境变量数量、「其他平台响应前发完通知」、8 秒强制退出、按钮自动建表等旧表述均已过时，请勿据此部署或验收。源码版本现为 `v1.1.0`（RC2 候选），目标 `v1.1.0` 尚未正式发布。
+> **同步提示（2026-11-09）**：本镜像属滞后翻译，上述事实以英文主版与中文主文档为准；本文件内关于测试数量、环境变量数量、「其他平台响应前发完通知」、8 秒强制退出、按钮自动建表等旧表述均已过时，请勿据此部署或验收。源码 `v1.1.0` 已固化至 `main`（`43aaecf`）；未创建 GitHub Release、未打 tag、未部署。
 
 
 **English** | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
@@ -11,7 +11,7 @@
 
 > English is the primary maintained version of this document. Translations live under [`docs/i18n/<lang>/`](../README.md) and may lag behind; when in doubt, refer to this file.
 
-Push SMS and notifications from an Android phone (and any other device) to the cloud in real time, and read them from a web page anywhere. Free to deploy, no server required, about 10 minutes end to end.
+Forward SMS from an Android phone and notifications from any HTTP-capable device to the cloud in real time, and read them from a web page anywhere.
 
 - **Multi-platform deployment**: Cloudflare (primary) / Vercel / Deno Deploy / Netlify / Tencent EdgeOne Makers / Docker self-hosted — pick one of six, features fully identical
 - **Real-time receiving**: webhook push lands in the database in seconds; the web page refreshes itself, no manual work
@@ -39,7 +39,7 @@ Push SMS and notifications from an Android phone (and any other device) to the c
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ShenDoyle/SMSToWeb/tree/main/platforms/cloudflare)
 
-What the button actually does: clones the public repository into your own GitHub/GitLab account, creates and binds the **D1 database** and other Cloudflare-native resources declared in `wrangler.toml`, and sets up build/CI. It does **not** run SQL migrations (the application's `ensureSchema` creates tables on the first request), does **not** create a Turso database and does **not** fill in your secrets — you still type `RECEIVE_TOKEN` (and `ADMIN_PASSWORD` / `SESSION_SECRET` if login is enabled). Honest summary: **one click to create the app + a few fields to fill in**. The button deploys the public `main` branch, which may lag behind this checkout (`v1.1.0` RC2 candidate; formal release `v1.1.0` not published). See the [verified deployment capability matrix](../../guide/10-部署能力矩阵.md).
+What the button actually does: clones the public repository into your own GitHub/GitLab account, creates and binds the **D1 database** and other Cloudflare-native resources declared in `wrangler.toml`, and sets up build/CI. It does **not** run SQL migrations (the application's `ensureSchema` creates tables on the first request), does **not** create a Turso database and does **not** fill in your secrets — you still type `RECEIVE_TOKEN` (and `ADMIN_PASSWORD` / `SESSION_SECRET` if login is enabled). Honest summary: **one click to create the app + a few fields to fill in**. The button deploys the public `main` branch, which currently holds `v1.1.0` (commit `43aaecf`). No GitHub Release has been created, no tag pushed and no deployment performed. See the [verified deployment capability matrix](../../guide/10-部署能力矩阵.md).
 
 | Platform | Deployment | Scheduled cleanup | Guide |
 |---|---|---|---|

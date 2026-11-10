@@ -69,4 +69,4 @@ docker run -d --name smstoweb --restart unless-stopped --stop-timeout=90 -p 8787
 
 ## 版本提示
 
-源码版本 `v1.1.0`（RC2 候选），目标 `v1.1.0` 尚未正式发布；以管理页页脚版本号为准。
+源码 `v1.1.0` 已固化至 `main`（`43aaecf`），未创建 GitHub Release / 未部署；以管理页页脚版本号为准。

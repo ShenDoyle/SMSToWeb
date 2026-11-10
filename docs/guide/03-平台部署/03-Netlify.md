@@ -53,4 +53,4 @@ https://app.netlify.com/start/deploy?repository=https://github.com/ShenDoyle/SMS
 
 ## 版本与验证提示
 
-按钮部署公开仓库 `main` 分支，可能落后于本地工作区。本轮**未对 Netlify 做真实部署验证**；官方能力与免费额度依据见 [部署能力矩阵](../10-部署能力矩阵.md)。
+按钮部署公开仓库 `main` 分支（当前已固化 `v1.1.0` / `43aaecf`）。本轮**未对 Netlify 做真实部署验证**；官方能力与免费额度依据见 [部署能力矩阵](../10-部署能力矩阵.md)。

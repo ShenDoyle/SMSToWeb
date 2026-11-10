@@ -2,7 +2,7 @@
 
 > This is the short English path. The [complete Chinese user guide](../../guide/README.md) has per-platform click-by-click steps, screenshots references, and a fuller FAQ.
 
-**Version status**: source `v1.1.0` (RC2 candidate); target `v1.1.0` **not published**. The version shown in the page footer is authoritative.
+**Version status**: source `v1.1.0` is finalized on `main` (commit `43aaecf`); **no GitHub Release, no tag, no deployment** — six-platform runtime validation is 0/6. The version shown in the page footer is authoritative.
 
 ## What you need
 
