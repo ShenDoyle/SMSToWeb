@@ -1,0 +1,60 @@
+
+# A · 四层时间预算推导（deriveShutdownBudgets）
+  ok   M1-B01 默认长轮询 25s → HTTP 预算 30s  [http=30000]
+  ok   M1-B02 后台最坏 40s（4×10s 串行重试）→ drain 预算 45s  [drain=45000]
+  ok   M1-B03 应用整体宽限 80s，容器建议 90s（四层不倒挂）  [total=80000]
+  ok   M1-B04 SHUTDOWN_GRACE_MS 低于推导值被钳回 80s（禁止静默截断）
+  ok   M1-B05 调大值受 120s 上限约束，容器建议同步升到 130s
+
+# B · 真实登记机制状态机（非「收集+主动 await」替身）
+  ok   M1-B06 waitUntil 登记后集合 size=1  [size=1]
+  ok   M1-B08 同一任务不重复登记、不重复执行（§四.6 设计要求）
+  ok   M1-02 后台任务完成后自动移除登记  [ran=1 size=0]
+  ok   M1-03 rejection 后正确记录并移除，无未处理 Promise rejection
+  ok   M1-08 超时任务记为 background_task_timeout，绝不记为成功
+  ok   M1-B07 超时后迟到的 settle 不改写结果，也不产生未处理 rejection
+
+# C · 真实 HTTP 服务 / 真实 SIGTERM / 真实 SQLite
+  ok   M1-01 waitUntil 登记任务不阻塞 HTTP 响应  [resp_ms=17 pending=1]
+  FAIL M1-04 收到 SIGTERM 后仍在等待已登记后台任务（完成时间晚于停机开始）  [delta=n/ams]
+  FAIL M1-06 后台任务完成后 SQLite 才关闭  [order=completed<db_closed]
+  FAIL M1-04b 停机正常完成：db_closed=true / bg_finished>=1 / exit 0  [exit=null]
+  FAIL M1-12 正常运行期间后台任务不影响响应，无未处理 rejection
+  FAIL M1-05 等待期间 SQLite 保持可用：后台任务在 SIGTERM 之后完成真实 SQLite 读  [delta=n/ams]
+  FAIL M1-05b DB 读成功（非 db_access_after_close）且随后才关闭  [rows=null]
+  ok   M1-05c 无「关闭后访问」错误
+  FAIL M1-07 超过截止时间产生明确 background_task_timeout / unfinished 记录  [timeouts=0]
+  FAIL M1-08b 超时任务在停机统计中不记为成功  [bg_finished=null]
+  FAIL M1-07b 有界等待结束后按设计正常退出（exit 0，非强制兜底）  [exit=null]
+  FAIL M1-09 第二次 SIGTERM 被幂等拦截并留下 shutdown_signal_ignored  [count=0]
+  FAIL M1-09b 不重复执行关闭流程（shutdown_complete / exit 各 1 次）  [complete=0 exits=0]
+  FAIL M1-10 没有后台任务时仍能正常快速关闭  [elapsed=9ms exit=null]
+  FAIL M1-11 多个后台任务并发执行：3 个登记 / 3 个完成  [registered=3 completed=0]
+  FAIL M1-11b 全部完成后才关闭数据库，停机统计 bg_finished>=3  [bg_finished=null]
+  FAIL M1-12b 后台任务 rejection 不影响 HTTP 响应与停机退出码  [status=200 exit=null]
+  FAIL M1-03b 失败任务在停机窗口内被记录并从登记集合移除（remaining=0）
+  FAIL M1-13 HTTP 未收敛时仅走兜底路径：shutdown_aborted / exit 1  [reason=null]
+  FAIL M1-13b 兜底路径明确记录 db_close_skipped，绝不提前关闭数据库
+  FAIL M1-14 draining 状态拒绝新业务请求（handler 503 shutting down）  [status=-1]
+
+===== 结果：13 通过，19 失败 =====
+失败项：
+ - M1-04 收到 SIGTERM 后仍在等待已登记后台任务（完成时间晚于停机开始）
+ - M1-06 后台任务完成后 SQLite 才关闭
+ - M1-04b 停机正常完成：db_closed=true / bg_finished>=1 / exit 0
+ - M1-12 正常运行期间后台任务不影响响应，无未处理 rejection
+ - M1-05 等待期间 SQLite 保持可用：后台任务在 SIGTERM 之后完成真实 SQLite 读
+ - M1-05b DB 读成功（非 db_access_after_close）且随后才关闭
+ - M1-07 超过截止时间产生明确 background_task_timeout / unfinished 记录
+ - M1-08b 超时任务在停机统计中不记为成功
+ - M1-07b 有界等待结束后按设计正常退出（exit 0，非强制兜底）
+ - M1-09 第二次 SIGTERM 被幂等拦截并留下 shutdown_signal_ignored
+ - M1-09b 不重复执行关闭流程（shutdown_complete / exit 各 1 次）
+ - M1-10 没有后台任务时仍能正常快速关闭
+ - M1-11 多个后台任务并发执行：3 个登记 / 3 个完成
+ - M1-11b 全部完成后才关闭数据库，停机统计 bg_finished>=3
+ - M1-12b 后台任务 rejection 不影响 HTTP 响应与停机退出码
+ - M1-03b 失败任务在停机窗口内被记录并从登记集合移除（remaining=0）
+ - M1-13 HTTP 未收敛时仅走兜底路径：shutdown_aborted / exit 1
+ - M1-13b 兜底路径明确记录 db_close_skipped，绝不提前关闭数据库
+ - M1-14 draining 状态拒绝新业务请求（handler 503 shutting down）

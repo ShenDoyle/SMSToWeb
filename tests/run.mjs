@@ -811,13 +811,13 @@ async function main() {
     rl = await call("POST", "/api/tokens", eL, { headers: XLG, body: { name: "up-exp", note: "旧库带备注", expires_in_days: 30 }, cookie: "sms_auth=" + ((rl.setCookie.match(/sms_auth=([^;]*)/) || [])[1] || "") });
     check(rl.status === 200 && rl.data.success && typeof rl.data.expires_at === "string", "旧库补列后创建带备注+有效期令牌 → 200");
 
-    /* 7) 页脚版本号：管理页与登录页底部均展示 v1.0.4 */
+    /* 7) 页脚版本号：管理页与登录页底部均展示 v1.1.0 */
     const pg = await fetchApp(R("GET", "/", { cookie: ckE }), eE);
     const pgHtml = await pg.text();
-    check(pg.status === 200 && pgHtml.includes('<span class="ver">v1.0.4</span>'), "管理页页脚含版本号 v1.0.4");
+    check(pg.status === 200 && pgHtml.includes('<span class="ver">v1.1.0</span>'), "管理页页脚含版本号 v1.1.0");
     const lg = await fetchApp(R("GET", "/", {}), eE);
     const lgHtml = await lg.text();
-    check(lg.status === 200 && lgHtml.includes('<span class="ver">v1.0.4</span>'), "登录页页脚含版本号 v1.0.4");
+    check(lg.status === 200 && lgHtml.includes('<span class="ver">v1.1.0</span>'), "登录页页脚含版本号 v1.1.0");
     check(pgHtml.includes('id="setbtn"') && pgHtml.includes('openSettingsCenter("session")') && pgHtml.includes("登录有效期（本浏览器）"), "设置入口直连设置中心（登录有效期等分组在设置中心内）");
     check(pgHtml.includes("sms_ttl_min") && pgHtml.includes("登录有效期（本浏览器）"), "设置中心登录有效期分组为本浏览器独立配置（localStorage 键 sms_ttl_min）");
     check(pgHtml.includes("登录有效期（全局默认）") && pgHtml.includes("ds-scope--global") && pgHtml.includes("ds-scope--browser"), "设置中心区分全局与本浏览器作用域（作用域徽章）");
@@ -3652,6 +3652,404 @@ async function main() {
     const delSum = conc2.reduce(function (a, x) { return a + ((x.data && x.data.deleted) || 0); }, 0);
     const oneShot = conc2.filter(function (x) { return x.data && x.data.success === true && x.data.deleted === 1; }).length;
     check(delSum === 1 && oneShot === 1 && !(await devExists(d13c)), "T13c 并发删除（仅软删）：总删除数恰为 1、设备最终不存在（无重复/无残留）");
+  }
+
+  /* 本批新增：多目标通知并行分发 + 单目标失败隔离（隔离数据库，不污染主库） */
+  group("多目标通知并行分发与失败隔离（本批新增）");
+  {
+    const realFetchP = globalThis.fetch;
+    const startsP = [], urlsP = [];
+    globalThis.fetch = async function (url, opts) {
+      const u = String(url);
+      if (u.indexOf("notify.parallel.test") !== -1) {
+        startsP.push(Date.now());
+        urlsP.push(u);
+        await new Promise(function (r) { setTimeout(r, 120); });
+        /* 故意让其中 1 个目标失败，验证其余目标不被阻断 */
+        return new Response("{}", { status: u.indexOf("bad") !== -1 ? 500 : 200, headers: { "Content-Type": "application/json" } });
+      }
+      return realFetchP(url, opts);
+    };
+    const dbPathP = join(tmpdir(), "smstoweb_parallel_" + process.pid + ".db");
+    cleanupPath(dbPathP);
+    let dbP = null;
+    try {
+      dbP = new LocalDatabase(dbPathP);
+      const eP = Object.assign({}, env(), { DB: dbP });
+      const tgP = [1, 2, 3].map(function (i) {
+        return { id: "p" + i, channel: "generic", name: "并行目标" + i, enabled: true,
+          fields: { urls: "https://notify.parallel.test/hook/" + (i === 2 ? "bad" : "ok") + i } };
+      });
+      await dbP.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES('notify.enabled','1')").run();
+      await dbP.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES('notify.targets',?)")
+        .bind(JSON.stringify(tgP)).run();
+      const rP = await call("POST", "/api/receive?token=tok", eP, {
+        headers: { "X-Forwarded-For": "198.51.100.222" },
+        body: { name: "并行基准机", sim: "13900000000", from: "Parallel", content: "并行分发回归", time: "2026-11-09 15:00:00" },
+      });
+      check(rP.status === 200 && rP.data && rP.data.success === true && rP.data.duplicated === false,
+        "多目标含 1 个失败目标：/api/receive 仍 200 且消息正常入库");
+      check(urlsP.length === 3 && new Set(urlsP).size === 3,
+        "3 个目标各出站 1 次（失败目标未阻断其余目标）");
+      const spreadP = startsP.length === 3 ? Math.max.apply(null, startsP) - Math.min.apply(null, startsP) : -1;
+      check(spreadP >= 0 && spreadP < 60,
+        "3 个目标并发发起（首个与末个出站间隔 " + spreadP + "ms < 60ms；串行实现应 ≥ 240ms）");
+    } finally {
+      globalThis.fetch = realFetchP;
+      try { if (dbP && dbP.sqlite) dbP.sqlite.close(); } catch (_) {}
+      cleanupPath(dbPathP);
+    }
+  }
+
+  /* ===== R1-05：bgRun / waitUntil 后台通知异常路径（本轮新增，10 项覆盖） =====
+     两层验证：
+       L2 直接实例化「被测源码里真实的」bgRun 与结构化日志函数（bgRun 未导出，
+          故从同一份 platforms/node/app.js 提取函数体字节在隔离作用域执行），
+          精确覆盖同步抛错 / 异步 rejection / 日志失败 / 不重复 / 脱敏 / 内联语义；
+          断言的是 Promise 真实行为与日志真实内容，不是「内部函数是否被调用」。
+       L1 走真实 fetchApp(request, env, ctx) 入口 + 真实 waitUntil + 真实 DB，
+          覆盖多目标部分失败 / 全部失败 / 渠道超时 / 真实入口日志脱敏。 */
+  group("R1-05 后台通知异常路径（bgRun / waitUntil 兜底）");
+  {
+    const srcR1 = readFileSync(new URL("../platforms/node/app.js", import.meta.url), "utf8");
+    const logStartR1 = srcR1.indexOf("function newRequestId() {");
+    const logEndR1 = srcR1.indexOf("\n/*", srcR1.indexOf("function logEvent("));
+    const bgStartR1 = srcR1.indexOf("function bgRun(ctx, p, env) {");
+    const bgEndR1 = srcR1.indexOf("\n}", bgStartR1) + 2;
+    let bgRunR1 = null, logEventR1 = null;
+    if (logStartR1 > 0 && logEndR1 > logStartR1 && bgStartR1 > 0 && bgEndR1 > bgStartR1) {
+      const realR1 = new Function(
+        srcR1.slice(logStartR1, logEndR1) + "\n" + srcR1.slice(bgStartR1, bgEndR1) +
+        "\nreturn { bgRun: bgRun, logEvent: logEvent, logErrorInfo: logErrorInfo };"
+      )();
+      bgRunR1 = realR1.bgRun;
+      logEventR1 = realR1.logEvent;
+    }
+    check(typeof bgRunR1 === "function" && typeof logEventR1 === "function",
+      "R1-05-00 从被测源码提取真实 bgRun 与结构化日志函数（非复制桩）");
+
+    const realER1 = console.error, realWR1 = console.warn, realLR1 = console.log;
+    const realFetchR1 = globalThis.fetch;
+    const logLinesR1 = [];
+    /* 只捕获结构化日志；check() 的 ok/FAIL 输出必须转发，否则断言结果会被日志捕获器吞掉 */
+    const grabR1 = function () {
+      const line = [].join.call(arguments, " ");
+      if (line.indexOf("  ok   ") === 0 || line.indexOf("  FAIL ") === 0) { realLR1(line); return; }
+      logLinesR1.push(line);
+    };
+    const unhandledR1 = [];
+    const onUnhandledR1 = function (e) { unhandledR1.push(e); };
+    const tickR1 = function () { return new Promise(function (r) { setImmediate(r); }); };
+    const bgLogsR1 = function () {
+      return logLinesR1.filter(function (l) { return l.indexOf("background_task_failed") !== -1; });
+    };
+    const fwdLogsR1 = function () {
+      return logLinesR1.filter(function (l) { return l.indexOf("notify_forward_failed") !== -1; });
+    };
+    async function runBgR1(p, envObj) {
+      const seen = [];
+      const ctx = { waitUntil: function (x) { seen.push(x); } };
+      const ret = bgRunR1(ctx, p, envObj);
+      await tickR1();
+      return { seen: seen, ret: ret };
+    }
+    async function callBgR1(method, path, eP, optsP, ctxP) {
+      const resp = await fetchApp(R(method, path, optsP), eP, ctxP);
+      let data = null;
+      try { data = await resp.json(); } catch (_) {}
+      return { status: resp.status, data: data };
+    }
+    async function makeNotifyDbR1(tag, targets) {
+      const p = join(tmpdir(), "smstoweb_r105_" + tag + "_" + process.pid + ".db");
+      cleanupPath(p);
+      const d = new LocalDatabase(p);
+      await d.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES('notify.enabled','1')").run();
+      await d.prepare("INSERT OR REPLACE INTO settings(key,value) VALUES('notify.targets',?)")
+        .bind(JSON.stringify(targets)).run();
+      return { db: d, path: p };
+    }
+    /* 写限速按 clientIp 每 IP 每分钟 120 次计数；前序用例已累积在默认 "unknown" IP 上，
+       故每个 L1 子场景使用独立 X-Forwarded-For，避免被 429 误判为业务失败。 */
+    const receiveBodyR1 = function (content, ip) {
+      return { headers: { "X-Forwarded-For": ip || "198.51.100.240" },
+        body: { name: "R1-05后台验证机", sim: "13900000000", from: "R105",
+          content: content, time: "2026-11-09 16:00:00" } };
+    };
+
+    console.error = grabR1; console.warn = grabR1; console.log = grabR1;
+    process.on("unhandledRejection", onUnhandledR1);
+    try {
+      /* --- L2：bgRun 真实行为 --- */
+      /* ① 后台任务正常完成 */
+      {
+        logLinesR1.length = 0;
+        const r = await runBgR1(Promise.resolve("done"), { PLATFORM: "test" });
+        let resolved = true;
+        try { await Promise.all(r.seen); } catch (_) { resolved = false; }
+        await tickR1();
+        check(r.seen.length === 1 && r.ret === undefined,
+          "R1-05-01a waitUntil 收到 1 个后台 Promise，bgRun 不返回原 p");
+        check(resolved, "R1-05-01 后台任务正常完成：waitUntil 的 Promise 正常 resolve");
+        check(bgLogsR1().length === 0, "R1-05-01b 正常完成不产生 background_task_failed 日志");
+      }
+      /* ② 后台任务同步抛错：thenable 的 then 同步 throw（任务执行体同步异常） */
+      {
+        logLinesR1.length = 0;
+        const throwAble = { then: function () { throw new Error("sync throw in background task"); } };
+        const r = await runBgR1(throwAble, { PLATFORM: "test" });
+        let resolved = true;
+        try { await Promise.all(r.seen); } catch (_) { resolved = false; }
+        await tickR1();
+        check(resolved, "R1-05-02 后台任务同步抛错被兜底，waitUntil Promise 仍 resolve");
+        check(bgLogsR1().length === 1 && /sync throw in background task/.test(bgLogsR1()[0]),
+          "R1-05-02b 同步抛错记录 1 条可定位的 background_task_failed");
+      }
+      /* ③ 后台 Promise 异步 rejection（延迟触发，区别于已 reject 的 Promise） */
+      {
+        logLinesR1.length = 0;
+        const late = new Promise(function (_, rej) {
+          setTimeout(function () { rej(new Error("async rejection in background task")); }, 12);
+        });
+        const r = await runBgR1(late, { PLATFORM: "test" });
+        let resolved = true;
+        try { await Promise.all(r.seen); } catch (_) { resolved = false; }
+        await tickR1();
+        check(resolved, "R1-05-03 后台 Promise 异步 rejection 被兜底，waitUntil Promise 仍 resolve");
+        check(bgLogsR1().length === 1 && /async rejection in background task/.test(bgLogsR1()[0]),
+          "R1-05-03b 异步 rejection 被记录且错误信息可定位");
+      }
+      /* ⑦ 日志输出失败不得引发二次 rejection / 未处理 rejection */
+      {
+        logLinesR1.length = 0;
+        const before = unhandledR1.length;
+        const sink = console.error;
+        console.error = function () { throw new Error("log sink down"); };
+        const r = await runBgR1(Promise.reject(new Error("task failed while logging is broken")), { PLATFORM: "test" });
+        let resolved = true;
+        try { await Promise.all(r.seen); } catch (_) { resolved = false; }
+        await tickR1();
+        console.error = grabR1;
+        check(resolved, "R1-05-07 日志输出失败时 bgRun 的 catch 不产生二次 rejection");
+        check(unhandledR1.length === before,
+          "R1-05-07b 日志记录失败不产生未处理 Promise rejection", "新增=" + (unhandledR1.length - before));
+      }
+      /* ⑧ 同一后台任务异常只记录一次，不重复也不吞掉 */
+      {
+        logLinesR1.length = 0;
+        const r = await runBgR1(Promise.reject(new Error("single failure")), { PLATFORM: "test" });
+        try { await Promise.all(r.seen); } catch (_) {}
+        await tickR1();
+        check(bgLogsR1().length === 1,
+          "R1-05-08 同一后台任务异常只记录 1 次（不重复、不吞掉）", "条数=" + bgLogsR1().length);
+      }
+      /* ⑨ 日志脱敏：Token / 手机号 / 密钥不得明文进日志 */
+      {
+        logLinesR1.length = 0;
+        const secret = "13812345678 Bearer TOK_SECRET_9999 password=pwd_SECRET_8888";
+        const r = await runBgR1(Promise.reject(new Error(secret)), { PLATFORM: "test" });
+        try { await Promise.all(r.seen); } catch (_) {}
+        await tickR1();
+        const line = bgLogsR1()[0] || "";
+        let parsed = null;
+        try { parsed = JSON.parse(line); } catch (_) {}
+        check(!!parsed && parsed.event === "background_task_failed" && parsed.level === "error",
+          "R1-05-09a 异常记录为结构化单行 JSON，event/level 正确");
+        check(line.indexOf("TOK_SECRET_9999") === -1 && line.indexOf("13812345678") === -1 &&
+          line.indexOf("pwd_SECRET_8888") === -1,
+          "R1-05-09 日志不泄露 Token / 手机号 / 密钥明文");
+        check(/\*\*\*/.test(line), "R1-05-09c 敏感值被脱敏为 *** / ****");
+      }
+      /* ⑩ 内联路径（无 ctx）返回值与异常语义不变 */
+      {
+        logLinesR1.length = 0;
+        const pOk = Promise.resolve("inline-ok");
+        const retOk = bgRunR1(undefined, pOk, { PLATFORM: "test" });
+        let val = null;
+        try { val = await retOk; } catch (_) {}
+        check(retOk === pOk, "R1-05-10 内联路径返回原 Promise 对象，未被包装或吞掉");
+        check(val === "inline-ok", "R1-05-10b 内联路径正常返回值不变");
+        const pBad = Promise.reject(new Error("inline error propagates"));
+        const retBad = bgRunR1(undefined, pBad, { PLATFORM: "test" });
+        let threw = false;
+        try { await retBad; } catch (e) { threw = /inline error propagates/.test(String(e && e.message)); }
+        await tickR1();
+        check(threw, "R1-05-10c 内联路径异常仍向上传播（既有异常语义不变）");
+        check(bgLogsR1().length === 0, "R1-05-10d 内联路径不产生 background_task_failed 日志");
+      }
+
+      /* --- L1：真实入口 fetchApp + ctx.waitUntil --- */
+      /* ④ 多目标中单个目标失败，其余目标仍完成 */
+      {
+        logLinesR1.length = 0;
+        const urls = [];
+        globalThis.fetch = async function (url, opts) {
+          const u = String(url);
+          if (u.indexOf("notify.r105.test") !== -1) {
+            urls.push(u);
+            await new Promise(function (r) { setTimeout(r, 20); });
+            return new Response("{}", { status: u.indexOf("bad") !== -1 ? 500 : 200,
+              headers: { "Content-Type": "application/json" } });
+          }
+          return realFetchR1(url, opts);
+        };
+        let mk = null;
+        try {
+          mk = await makeNotifyDbR1("partial", [1, 2, 3].map(function (i) {
+            return { id: "r" + i, channel: "generic", name: "R1-05目标" + i, enabled: true,
+              fields: { urls: "https://notify.r105.test/h" + (i === 2 ? "bad" : "ok") + i } };
+          }));
+          const seen = [];
+          const ctx = { waitUntil: function (x) { seen.push(x); } };
+          const eP = Object.assign({}, env(), { DB: mk.db });
+          const r = await callBgR1("POST", "/api/receive?token=tok", eP,
+            receiveBodyR1("后台部分失败验证内容", "198.51.100.241"), ctx);
+          let bgOk = true;
+          try { await Promise.all(seen); } catch (_) { bgOk = false; }
+          await tickR1();
+          check(r.status === 200 && r.data && r.data.success === true && r.data.duplicated === false,
+            "R1-05-04 后台单目标失败：/api/receive 仍 200 且消息正常入库");
+          check(urls.length === 3 && new Set(urls).size === 3,
+            "R1-05-04b 3 个目标各出站 1 次，失败目标未阻断其余目标");
+          check(seen.length === 1 && bgOk,
+            "R1-05-04c waitUntil 后台 Promise 正常 resolve（无未处理 rejection）");
+          check(bgLogsR1().length === 0,
+            "R1-05-04d 单目标失败由内层降级，不误报为后台任务失败");
+        } finally {
+          globalThis.fetch = realFetchR1;
+          if (mk) { try { mk.db.sqlite.close(); } catch (_) {} cleanupPath(mk.path); }
+        }
+      }
+      /* ⑤ 多目标全部失败 */
+      {
+        logLinesR1.length = 0;
+        const urls = [];
+        globalThis.fetch = async function (url, opts) {
+          const u = String(url);
+          if (u.indexOf("notify.r105all.test") !== -1) {
+            urls.push(u);
+            return new Response("{}", { status: 503, headers: { "Content-Type": "application/json" } });
+          }
+          return realFetchR1(url, opts);
+        };
+        let mk = null;
+        try {
+          mk = await makeNotifyDbR1("allfail", [1, 2, 3].map(function (i) {
+            return { id: "a" + i, channel: "generic", name: "全失败目标" + i, enabled: true,
+              fields: { urls: "https://notify.r105all.test/h" + i } };
+          }));
+          const seen = [];
+          const ctx = { waitUntil: function (x) { seen.push(x); } };
+          const eP = Object.assign({}, env(), { DB: mk.db });
+          const r = await callBgR1("POST", "/api/receive?token=tok", eP,
+            receiveBodyR1("后台全部失败验证内容", "198.51.100.242"), ctx);
+          let bgOk = true;
+          try { await Promise.all(seen); } catch (_) { bgOk = false; }
+          await tickR1();
+          check(r.status === 200 && r.data && r.data.success === true && r.data.duplicated === false,
+            "R1-05-05 多目标全部失败：消息仍入库、主响应仍 200");
+          check(urls.length === 3, "R1-05-05b 3 个目标均真实出站（全失败不是跳过）", "出站=" + urls.length);
+          check(seen.length === 1 && bgOk,
+            "R1-05-05c 全部失败时 waitUntil Promise 仍 resolve（异常被逐层降级）");
+          check(fwdLogsR1().length >= 3,
+            "R1-05-05d 每个失败目标都有可定位的 notify_forward_failed 日志", "条数=" + fwdLogsR1().length);
+          check(bgLogsR1().length === 0,
+            "R1-05-05e 全部失败不冒泡成未捕获的后台任务异常");
+        } finally {
+          globalThis.fetch = realFetchR1;
+          if (mk) { try { mk.db.sqlite.close(); } catch (_) {} cleanupPath(mk.path); }
+        }
+      }
+      /* ⑥ 渠道超时：真实 AbortSignal.timeout 经 40ms 缩放触发 abort，验证超时被降级 */
+      {
+        logLinesR1.length = 0;
+        const realTimeoutR1 = AbortSignal.timeout;
+        let sawSignal = false, aborted = false;
+        AbortSignal.timeout = function (ms) { return realTimeoutR1(Math.min(ms, 40)); };
+        globalThis.fetch = async function (url, opts) {
+          const u = String(url);
+          if (u.indexOf("notify.r105timeout.test") !== -1) {
+            sawSignal = !!(opts && opts.signal);
+            const sig = opts && opts.signal;
+            return await new Promise(function (_, rej) {
+              if (!sig) { rej(new Error("no signal")); return; }
+              /* AbortSignal.timeout 的内部定时器不保证 ref 住事件循环；mock 又是纯 JS Promise，
+                 若不加一个 ref 定时器，进程会在微任务清空后自然退出（code 0）而等不到 abort。 */
+              const keepAlive = setTimeout(function () {}, 400);
+              sig.addEventListener("abort", function () {
+                clearTimeout(keepAlive);
+                aborted = true;
+                rej(new Error("The operation was aborted due to timeout"));
+              }, { once: true });
+            });
+          }
+          return realFetchR1(url, opts);
+        };
+        let mk = null;
+        try {
+          mk = await makeNotifyDbR1("timeout", [
+            { id: "t1", channel: "generic", name: "超时目标", enabled: true,
+              fields: { urls: "https://notify.r105timeout.test/h1" } },
+          ]);
+          const seen = [];
+          const ctx = { waitUntil: function (x) { seen.push(x); } };
+          const eP = Object.assign({}, env(), { DB: mk.db });
+          const r = await callBgR1("POST", "/api/receive?token=tok", eP,
+            receiveBodyR1("渠道超时验证内容", "198.51.100.243"), ctx);
+          let bgOk = true;
+          try { await Promise.all(seen); } catch (_) { bgOk = false; }
+          await tickR1();
+          check(sawSignal, "R1-05-06 通知请求携带真实超时信号（AbortSignal.timeout）");
+          check(aborted, "R1-05-06b 超时信号在缩放到 40ms 后真实触发 abort");
+          check(r.status === 200 && r.data && r.data.success === true,
+            "R1-05-06c 渠道超时不拖垮 /api/receive，消息仍入库");
+          check(seen.length === 1 && bgOk,
+            "R1-05-06d 超时被逐层降级，waitUntil Promise 仍 resolve");
+          check(fwdLogsR1().length >= 1 && /aborted due to timeout/.test(fwdLogsR1().join(" ")),
+            "R1-05-06e 超时错误被记录为可定位的 notify_forward_failed");
+        } finally {
+          AbortSignal.timeout = realTimeoutR1;
+          globalThis.fetch = realFetchR1;
+          if (mk) { try { mk.db.sqlite.close(); } catch (_) {} cleanupPath(mk.path); }
+        }
+      }
+      /* ⑨ 真实入口：后台任务抛错时响应/入库不变，且日志脱敏 */
+      {
+        logLinesR1.length = 0;
+        let mk = null;
+        try {
+          mk = await makeNotifyDbR1("secret", []);
+          const eP = Object.assign({}, env(), { DB: mk.db });
+          /* buildNotifyInfo 读取 NOTIFY_LINK；getter 同步抛错 → dispatchNotify 整体 reject → bgRun 兜底 */
+          Object.defineProperty(eP, "NOTIFY_LINK", {
+            configurable: true,
+            get: function () { throw new Error("13812345678 Bearer TOK_SECRET_9999 password=pwd_SECRET_8888"); },
+          });
+          const seen = [];
+          const ctx = { waitUntil: function (x) { seen.push(x); } };
+          const r = await callBgR1("POST", "/api/receive?token=tok", eP,
+            receiveBodyR1("后台任务抛错验证内容", "198.51.100.244"), ctx);
+          let bgOk = true;
+          try { await Promise.all(seen); } catch (_) { bgOk = false; }
+          await tickR1();
+          const line = bgLogsR1()[0] || "";
+          check(r.status === 200 && r.data && r.data.success === true && r.data.duplicated === false,
+            "R1-05-09d 后台任务抛错不影响 /api/receive 响应与消息入库");
+          check(seen.length === 1 && bgOk,
+            "R1-05-09e 真实入口的后台异常被兜底，waitUntil Promise resolve");
+          check(line.length > 0 && line.indexOf("TOK_SECRET_9999") === -1 &&
+            line.indexOf("13812345678") === -1 && line.indexOf("pwd_SECRET_8888") === -1,
+            "R1-05-09f 真实入口日志同样不泄露 Token / 手机号 / 密钥");
+        } finally {
+          if (mk) { try { mk.db.sqlite.close(); } catch (_) {} cleanupPath(mk.path); }
+        }
+      }
+      check(unhandledR1.length === 0,
+        "R1-05-11 全组无未处理 Promise rejection", "条数=" + unhandledR1.length);
+    } finally {
+      console.error = realER1; console.warn = realWR1; console.log = realLR1;
+      globalThis.fetch = realFetchR1;
+      process.removeListener("unhandledRejection", onUnhandledR1);
+    }
   }
 
   /* TEST-DB-001 退出顺序：关主库连接 → 清文件 → 输出结果 → 退出；关闭后不再访问 db */

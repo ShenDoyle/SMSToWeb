@@ -1,5 +1,10 @@
 # SMSToWeb — 短信/通知上云网关
 
+> **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = **850 passing assertions** (plus the separate M-1 suite `tests/m1-lifecycle.mjs` = 32); `ENV_KEYS` = **32** variables; **all six platform entries pass a `waitUntil`-style `ctx`** (inline `await` is only a *runtime-capability* fallback, not an entry-point behaviour); Node shutdown grace = **80s** and the container/service stop grace must be **>= 90s** (Docker default 10s SIGKILLs first); `gen_app.py --check` verifies **only** the embedded `SCHEMA_SQL` block and SQL references, **not** platform-copy drift. Any statement in this mirror about "667/814/573 assertions", "31 variables", "other platforms finish notifications before the response", "8-second forced exit", "the deploy button creates the tables", or "one-click and you are live" is **outdated**. Read the [English primary](../../../README.md), [ARCHITECTURE](../../ARCHITECTURE.md), or the [Chinese user guide](../../guide/README.md) instead.
+>
+> **同步提示（2026-11-09）**：本镜像属滞后翻译，上述事实以英文主版与中文主文档为准；本文件内关于测试数量、环境变量数量、「其他平台响应前发完通知」、8 秒强制退出、按钮自动建表等旧表述均已过时，请勿据此部署或验收。源码版本现为 `v1.1.0`（RC2 候选），目标 `v1.1.0` 尚未正式发布。
+
+
 [English](../../../README.md) | **简体中文** | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
 > 本仓库文档以英语为主维护版本；本中文版与其它语言译文存放于 `docs/i18n/`，可能滞后于英语主版。
@@ -58,7 +63,7 @@
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ShenDoyle/SMSToWeb/tree/main/platforms/cloudflare)
 
-点按钮自动完成建库建表、资源绑定与 CI 配置，按提示填 `RECEIVE_TOKEN`（推送鉴权密钥）即可上线；Vercel / Netlify 的一键部署按钮见对应平台教程。
+按钮实际做的事：把公开仓库克隆到你自己的 GitHub/GitLab → **自动创建并绑定 D1 数据库**及 `wrangler.toml` 声明的平台原生资源 → 配置构建/CI。按钮**不会执行建表 SQL**（由应用的 `ensureSchema` 在首次请求自动建表）、**不会创建 Turso 数据库**、也**不会替你填密钥**，仍需在设置页手工填 `RECEIVE_TOKEN`（开启登录时还要 `ADMIN_PASSWORD` / `SESSION_SECRET`）。准确说法是**「一键创建应用 + 填几项配置」**，不是「点一下就上线」。按钮部署的是公开仓库 `main` 分支，可能落后于本地版本（当前源码 `v1.1.0` RC2 候选；正式版 `v1.1.0` 尚未发布）。完整能力矩阵见 [部署能力矩阵](../../guide/10-部署能力矩阵.md)。
 
 | 平台 | 部署方式 | 定时清理 | 详细教程 |
 |---|---|---|---|
@@ -86,7 +91,7 @@
 | Node / Docker | 自定 | 响应前内联完成 | 需外部触发 | 本地 SQLite 需 Node ≥ 22.13 |
 
 > - **长轮询**：前端对失败自动**指数退避**（2→30s），并在页面重新可见时立即补拉，平台强杀请求也不会打爆函数。
-> - **通知转发**：Cloudflare 走 `waitUntil`；其余平台为「响应前把通知发完」（单渠道 10s 超时），因此配了很多慢渠道时会略微增加接口延迟。
+> - **通知转发**：**六个平台入口都传 `waitUntil` 型 `ctx`**，差别只在运行时是否真的提供 `waitUntil`：提供则响应后继续发送；缺失时 `bgRun` 才回退内联 `await`（响应会等待）。旧版「其余平台响应前把通知发完」的说法不准确，见 [ARCHITECTURE §4](../../ARCHITECTURE.md)。单渠道 fetch 超时 10s。
 > - **定时清理**：无平台 cron 的部署，用任意定时器请求 `GET /api/cron?token=<RECEIVE_TOKEN>` 即可。
 
 ---
@@ -142,8 +147,8 @@ Cloudflare 平台额外需要 `DB`（D1 绑定）；其余平台需要 `TURSO_DA
 - `platforms/gen_app.py`：从 `src/worker.js` 生成平台无关的 `app.js` 同步到五个移植平台，并同步 Cloudflare 独立副本 `worker.js`（保证六平台业务代码逐字节一致）；同时把 31 项环境变量白名单（ENV_KEYS，含鉴权项）同步到六个平台入口，防各平台透传漂移（node 的 db.js 为 Turso+本地 SQLite 双适配，独立维护不参与同步）
 - `platforms/*/`：各平台自包含部署目录（入口 + app.js + db.js 适配层 + schema.sql + 本平台教程）
 - `docs/i18n/en/`：英语文档集（部署/API/架构/数据库）；其它语言见 `docs/i18n/<lang>/`，导航见 [docs/i18n/README.md](../README.md)
-- `tests/run.mjs`：零依赖测试套件（需 Node 22.13+）：`node tests/run.mjs`
-- 修改核心代码后：`python platforms/gen_app.py` 重新同步全部平台，再跑 `node tests/run.mjs`；CI 会校验同步零漂移 + 语法 + 测试
+- `tests/run.mjs`：零依赖测试套件（需 Node 22.13+，**850 项断言全通过**）：`node tests/run.mjs`；另有 M-1 专项 `tests/m1-lifecycle.mjs`（**32 项**，独立运行）
+- 修改核心代码后：`python platforms/gen_app.py`（**写入模式**）重新同步全部平台，再依次跑 `--check`、`node tests/run.mjs`、语法检查与**六平台字节比对**。注意 `--check` 只校验 `SCHEMA_SQL` 内嵌块与 SQL 引用，**不校验副本一致性**，不能单独用来证明零漂移
 
 ## License
 

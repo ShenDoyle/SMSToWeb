@@ -11,7 +11,9 @@
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ShenDoyle/SMSToWeb/tree/main/platforms/cloudflare)
 
-点上方按钮，Cloudflare 自动完成：克隆代码到你的 GitHub → **自动创建 D1 数据库并执行建表** → 绑定资源 → 配置 CI（之后你仓库每次 push 自动重新部署）→ 上线。过程中按提示填两个密钥：
+点上方按钮，Cloudflare 自动完成：把公开仓库克隆到**你自己的** GitHub/GitLab → **创建并绑定 D1 数据库**（以及 `wrangler.toml` 声明的其他平台原生资源）→ 配置构建/CI（之后你仓库每次 push 自动重新部署）→ 上线。
+
+按钮**不会执行建表 SQL**：表结构由应用自身的 `ensureSchema` 在**首次请求**时自动建表、补列、建索引（见 [升级指南](../../docs/UPGRADE.md)）。按钮也**不会替你填密钥**，设置页需要你手工填下面三项（只有开启登录时后两项才必填）：
 
 - `RECEIVE_TOKEN`：推送鉴权密钥，自己编一个足够长的随机字符串（手机端接入 URL 中 `token=` 与之保持一致）
 - `ADMIN_PASSWORD`：管理页登录密码（**强烈建议设置**——管理页承载短信验证码等敏感内容；`ENABLE_AUTH="true"` 但漏配时管理接口一律拒绝访问，不会免登录放行）
@@ -19,6 +21,11 @@
 
 > 绑自定义域名（如 `sms.example.com`）：部署完成后进入 Worker → 设置 → 域和路由 → 添加自定义域。
 > 下方手动教程保留给不想走一键流程、或想逐步理解每一步的用户。
+
+**完成标志**：打开分配给你的 `*.workers.dev` 地址能看到管理页；再按 [快速开始](../../docs/guide/02-快速开始.md) 推送一条测试消息，页面出现这条消息即成功。
+
+> **版本提示**：按钮部署的是公开仓库 **`main` 分支**，可能落后于本地开发版本；本仓库源码版本为 `v1.1.0`（RC2 候选），目标发布版本 `v1.1.0` 尚未正式发布。
+> **注意** `workers.dev` 默认域名会开启浏览器完整性检查，若你的推送端使用默认 `User-Agent` 可能被拦在 Worker 之外；生产环境建议绑定自定义域名，或让推送端带描述性 `User-Agent`。
 
 ## 准备工作
 

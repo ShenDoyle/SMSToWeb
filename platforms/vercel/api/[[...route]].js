@@ -21,6 +21,7 @@ let cachedDbKey = "";
 /* ==== ENV_KEYS BEGIN（由 platforms/gen_app.py 同步，勿手工修改）==== */
 const ENV_KEYS = [
   "RECEIVE_TOKEN",
+  "DISABLE_RECEIVE_TOKEN",
   "ENABLE_AUTH",
   "ADMIN_PASSWORD",
   "SESSION_SECRET",
@@ -83,7 +84,7 @@ function configError(e) {
   });
 }
 
-export default async function handler(request) {
+export default async function handler(request, context) {
   let env;
   try {
     env = buildEnv();
@@ -94,5 +95,10 @@ export default async function handler(request) {
   if (url.pathname.replace(/\/+$/, "") === "/api/cron") {
     return handleCronRequest(request, env);
   }
-  return fetchApp(request, env);
+  /* Vercel 第二个参数提供 waitUntil（官方文档 Functions API Reference）：
+     通知/后台任务不阻塞 /api/receive 响应；缺失时核心应用自动退回内联 await */
+  const ctx = context && typeof context.waitUntil === "function"
+    ? { waitUntil: function (p) { context.waitUntil(p); } }
+    : undefined;
+  return fetchApp(request, env, ctx);
 }

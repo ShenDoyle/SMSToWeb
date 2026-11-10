@@ -1,0 +1,959 @@
+
+# schema 幂等自愈（旧库缺列 → 运行时自动补列，不再 500）
+  ok   自愈前旧库确无 starred/deleted_at/read_at 列（故障现场成立）
+(node:37728) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+  ok   缺列旧库列表接口 → 200（自愈生效，不再 500）
+  ok   缺失列已被自动补齐（PRAGMA table_info 前后对比）
+  ok   自愈后二次请求幂等 → 200 且旧数据可读
+
+# 旧库 + 新代码端到端（第 4 步：legacy 无 tokens 表 → 首请求自愈 → 令牌全链路可用）
+  ok   升级前现场成立：旧库无 tokens 表
+  ok   旧库登录 → 200（入口 ensureSchema 自愈已随首请求完成）
+  ok   首请求后 tokens 表自动建齐（9 列，含 expires_at/note，无明文列）
+  ok   tokens 三索引自动建齐
+  ok   旧库上创建命名令牌 → 200 返回一次性明文
+  ok   库内令牌 /api/receive → 200（升级后接入链路可用）
+  ok   环境变量兜底令牌 → 200（升级不破坏存量接入）
+  ok   吊销 → 200（泄露止血能力在旧库上可用）
+  ok   吊销后同令牌 → 403（状态码分布同旧版）
+  ok   升级后新旧消息共存可读
+  ok   stats 响应含 schema 自愈结果（state=ok + 时间，升级自检落点）
+
+# 令牌数据层（tokens 表 + 哈希存储 + 吊销/轮换/节流，零鉴权行为变更）
+  ok   空库首请求 → 200（ensureSchema 建全三表）
+  ok   tokens 表 9 列齐全（含 expires_at/note）且无明文列（PRAGMA table_info）
+  ok   idx_tokens_hash 为唯一索引（鉴权主路径）
+  ok   idx_tokens_name_active 为部分唯一索引（活跃命名唯一）
+  ok   idx_tokens_revoked 普通索引存在
+  ok   空库二次请求幂等 → 200
+  ok   createToken 返回一次性明文（smsw_ 前缀）与 id
+  ok   SHA-256(明文) 精确命中库内 token_hash（哈希正确性，行含 revoked_at）
+  ok   listTokens 无明文、无哈希、无 token_hash 字段
+  ok   token_prefix 为明文前 12 位（后台辨识用，不含完整明文）
+  ok   活跃重名创建 → NAME_TAKEN
+  ok   空名 → INVALID_NAME
+  ok   非法字符名 → INVALID_NAME（白名单 A-Za-z0-9_-）
+  ok   超长名(>64) → INVALID_NAME
+  ok   touchLastUsed 节流生效（60 秒内重复调用不产生第二次写）
+  ok   revokeToken → revoked:true
+  ok   吊销后 findTokenByHash 返回行带 revoked_at（第 2 步鉴权据此拒绝）
+  ok   重复吊销幂等 → revoked:false
+  ok   吊销后同名可重建（部分唯一索引只约束活跃行）
+  ok   rotateToken 返回新明文与新 id
+  ok   轮换后旧明文的哈希行已带 revoked_at
+  ok   轮换后新明文命中活跃行且保留原命名
+  ok   轮换不存在的 id → 失败（NOT_FOUND）
+  ok   轮换后原命名仍被新令牌占用 → NAME_TAKEN
+  ok   别名查询（SELECT t.token_hash FROM tokens t WHERE t.token_hash=?）运行时可跑
+
+# 接入鉴权（库内令牌优先 + 环境变量兜底 + DISABLE_RECEIVE_TOKEN + fail-closed）
+  ok   空库无令牌 → push 403（fail-closed，状态码同旧版）
+  ok   空库无令牌 → receive 403（fail-closed，状态码同旧版）
+  ok   仅 body.token 且不匹配 → push 403
+  ok   兜底：query ?token=tok → 200
+  ok   兜底：X-Receive-Token 头 → 200
+  ok   兜底：Authorization Bearer → 200
+  ok   兜底：body.token → 200
+  ok   createToken（鉴权组库内令牌）
+  ok   库内令牌：X-Receive-Token 头 → 200
+  ok   库内令牌：receive query → 200
+  ok   库内令牌命中后 last_used_at 已记录
+  ok   库内令牌错一个字符 → 403（哈希精确匹配，状态码同旧版）
+  ok   库内令牌吊销后 → 403（fail-closed，状态码同旧版）
+  ok   开关开启：环境变量兜底停用 → 403（fail-closed，状态码同旧版）
+  ok   开关开启：库内令牌仍放行 → 200
+  ok   开关未设（默认）：兜底启用 → 200
+  ok   开关取值容忍大小写/空白："TRUE " 亦视为停用 → 403
+  ok   /api/cron 库内令牌 → 403（不纳入库内令牌）
+{"timestamp":"2026-11-10T08:00:11.650Z","level":"info","event":"cron_cleanup","requestId":"197fd191-40e7-4609-a03b-f7cedaf7d9bc","platform":"cloudflare","phase":"cron","retention_days":30,"cleaned_old":0,"purged_deleted":0}
+  ok   /api/cron 环境变量 → 200（行为不变）
+
+# 令牌管理 API + CSRF + 收发联动（第 3 步）
+  ok   未登录 GET /api/tokens → 401
+  ok   未登录 POST /api/tokens → 401
+  ok   未登录 POST /api/tokens/revoke → 401
+  ok   未登录 POST /api/tokens/rotate → 401
+  ok   登录 → 200 且下发会话 cookie
+  ok   CSRF：Content-Type: text/plain 写请求 → 400（简单请求被拒）
+  ok   CSRF：表单 Content-Type 写请求 → 400
+  ok   创建令牌 → 200 返回一次性明文（smsw_ 前缀）
+  ok   创建响应含 token_prefix（前 12 位）与 name
+  ok   登录后 GET /api/tokens → 200 且 1 条
+  ok   GET 响应体无明文、无 token_hash 字段（前端从源头就没有）
+  ok   列表行含 revoked_at（活跃行 null）与 name
+  ok   创建重名 → 400 NAME_TAKEN
+  ok   创建非法名 → 400 INVALID_NAME
+  ok   吊销不存在 id → 404 NOT_FOUND
+  ok   轮换不存在 id → 404 NOT_FOUND
+  ok   重命名活跃令牌 → 200 且名称更新
+  ok   重命名后列表返回新名称
+  ok   重命名非法名 → 400 INVALID_NAME
+  ok   重命名不存在 id → 404 NOT_FOUND
+  ok   创建坏 JSON → 400 invalid json
+  ok   轮换前：库内令牌推送 → 200
+  ok   轮换 → 200 返回新明文与新 id（各一次）
+  ok   轮换后：旧明文推送 → 403
+  ok   轮换后：新明文推送 → 200
+  ok   吊销 → 200 revoked:true
+  ok   吊销后：/api/receive 用该令牌 → 403（联动第 2 步）
+  ok   重复吊销已吊销 id → 幂等成功（revoked:false）
+  ok   列表 2 条且均已吊销（审计行保留，活跃在前排序反转）
+  ok   吊销后列表仍无明文无哈希
+  ok   未登录重命名 → 401
+  ok   重命名非 application/json → 400（CSRF 闸门）
+  ok   已吊销令牌不可重命名 → 404
+  ok   并发重命名前置：两个活跃令牌创建成功
+  ok   并发重命名同名 → 恰好 1 成功 + 1 NAME_TAKEN
+  ok   并发后活跃名称 race-x 仅一条
+  ok   重命名不可变性前置：创建带备注/有效期令牌
+  ok   活跃令牌重命名成功
+  ok   重命名只改名称（哈希/有效期/备注/前缀/创建/最近使用不变）
+
+# 第 5 步 · 令牌边界补钉（并发/审计/前缀/节流/开关边界）
+  ok   边界组：登录 → 200
+  ok   同名并发创建两次 → 恰好 1 次成功 + 1 次 NAME_TAKEN（部分唯一索引时序生效）
+  ok   并发成功方返回一次性明文与一致前缀
+  ok   token_prefix 固定 12 位且不等于完整明文
+  ok   轮换 audit-dev → 200
+  ok   轮换后列表含 audit-dev 2 行（旧行保留审计）
+  ok   旧行 revoked_at 非空 + 新行活跃（审计完整性）
+  ok   旧行与新行 name 相同（部分唯一索引让出命名在 API 层成立）
+  ok   轮换后列表响应不含任何明文（grep 全响应体）
+  ok   列表行 token_prefix 长度固定 12
+  ok   节流：第 1 次 /api/receive（库内令牌）→ 200
+  ok   节流：第 2 次 /api/receive → 200
+  ok   60s 窗口内第二次接收未产生第二次写（哨兵时间未被覆盖）
+  ok   窗口过期后接收恢复写 last_used_at（节流双侧边界）
+  ok   开关边界值 DISABLE_RECEIVE_TOKEN="true" → 403（停用兜底）
+  ok   开关边界值 DISABLE_RECEIVE_TOKEN="TRUE" → 403（停用兜底）
+  ok   开关边界值 DISABLE_RECEIVE_TOKEN=" true " → 403（停用兜底）
+  ok   开关边界值 DISABLE_RECEIVE_TOKEN="1" → 200（兜底启用）
+  ok   开关边界值 DISABLE_RECEIVE_TOKEN="yes" → 200（兜底启用）
+  ok   开关边界值 DISABLE_RECEIVE_TOKEN="" → 200（兜底启用）
+  ok   开关边界值 DISABLE_RECEIVE_TOKEN="未设" → 200（兜底启用）
+
+# 第 5 步 · 限速回归补钉（receive/令牌管理/登录）
+  ok   receive 限速：前 120 次全部 200
+  ok   receive 限速：第 121 次 → 429
+  ok   receive 限速：窗口内后续请求持续 429
+  ok   令牌管理限速：POST /api/tokens 前 120 次（唯一名）全部 200
+  ok   令牌管理限速：POST /api/tokens 第 121 次 → 429（复用 allowWrite）
+  ok   令牌管理限速：第 122 次持续 429
+  ok   令牌管理限速：同桶耗尽后 revoke → 429（写接口共用限速）
+  ok   令牌管理限速：同桶耗尽后 rotate → 429（写接口共用限速）
+  ok   登录限速：第 1 次错误密码 → 403（尚未锁定）
+  ok   登录限速：第 2 次错误密码 → 403（尚未锁定）
+  ok   登录限速：第 3 次错误密码 → 403（尚未锁定）
+  ok   登录限速：第 4 次错误密码 → 403（尚未锁定）
+  ok   登录限速：第 5 次错误密码 → 403（尚未锁定）
+  ok   登录限速：5 次失败后第 6 次即使密码正确 → 429（锁 10 分钟）
+
+# 插队组 · 令牌有效期与备注（创建回显/格式校验/过期 403/软失效审计/轮换透传/旧库补列自愈）+ 页脚版本号
+  ok   有效期组：登录 → 200
+  ok   创建带备注+7天有效期 → 200 且响应含 UTC expires_at
+  ok   列表响应含服务端 UTC now（前端过期判定依据，客户端时钟不可信）
+  ok   列表行回显备注与未来有效期（7 天）
+  ok   含备注的列表响应仍无明文无哈希
+  ok   自定义到期日 2026-11-10 → 规范化为 2026-11-10 23:59:59（UTC 当日末）
+  ok   创建过去时间的令牌 → 200（格式合法即入库，由鉴权判失效）
+  ok   过期令牌 /api/push → 403（视同无效，状态码同吊销）
+  ok   过期拒绝后 revoked_at 仍为 null（软失效不吊销，保留审计痕迹）
+  ok   未过期令牌（7 天）→ 200（有效期不影响有效令牌接入）
+  ok   expires_in_days=0 → 400 INVALID_EXPIRY
+  ok   expires_in_days=1.5（非整数）→ 400 INVALID_EXPIRY
+  ok   expires_at=2026-02-30（不存在日期）→ 400 INVALID_EXPIRY
+  ok   expires_at 非法格式 → 400 INVALID_EXPIRY
+  ok   备注 201 字 → 400 INVALID_NOTE
+  ok   轮换 → 200 且响应含沿用后的 expires_at
+  ok   轮换后旧行吊销、新行活跃
+  ok   新行沿用原备注与有效期（不偷偷续期）
+  ok   补列自愈：旧 tokens 表确无 expires_at/note 列（现场成立）
+  ok   旧 7 列 tokens 表登录 → 200（首请求触发补列自愈，不 500）
+  ok   旧表自动补齐 expires_at/note 列（PRAGMA 前后对比）
+  ok   旧库补列后创建带备注+有效期令牌 → 200
+  ok   管理页页脚含版本号 v1.1.0
+  ok   登录页页脚含版本号 v1.1.0
+  ok   设置入口直连设置中心（登录有效期等分组在设置中心内）
+  ok   设置中心登录有效期分组为本浏览器独立配置（localStorage 键 sms_ttl_min）
+  ok   设置中心区分全局与本浏览器作用域（作用域徽章）
+  ok   登录页随请求声明本地会话时长（localStorage 键 sms_ttl_min）
+  ok   管理页含语义化 Design Tokens（主色/状态色/背景）
+  ok   登录页复用同一套 Design Tokens
+  ok   令牌模板占位在运行时已解析（无未展开占位符）
+  ok   旧变量以兼容别名映射到令牌（旧选择器不失效）
+  ok   公共组件层齐备（按钮/输入/开关/卡片/徽章/提示/空状态/作用域）
+  ok   键盘焦点可见（统一 focus-visible 焦点环）
+  ok   组件层仅在管理页定义（登录页只注入令牌，不重复组件）
+  ok   设置中心分组：登录与会话 / 通知 / 数据与业务 / 安全
+  ok   设置中心具备未保存状态、恢复默认与跟随全局默认入口
+  ok   设置中心说明文案明确浏览器作用域（不描述为全局）
+  ok   未保存时关闭弹窗会先确认（防静默丢失修改）
+  ok   弹层与下拉菜单有视口上限（窄屏不溢出）
+  ok   窄屏弹窗转为底部抽屉
+  ok   设置分组标签行可横向滚动（不挤压换行溢出）
+  ok   窄屏设置标签单行横滑、详情按钮单行横滑、推送按钮一行四等宽（触屏可滑动）
+  ok   设置中心文案九语种全覆盖（抽样 12 键各 9 处）
+  ok   SC_I18N 含全部九语种（含 pt-BR）
+  ok   设置中心逻辑区无硬编码中文文案（全部走 T() 键）
+  ok   列表仅保留分页、无加载更多，含未读入口
+  ok   列表文案九语种全覆盖（4 键各 9 处）
+  ok   列表请求 slim=1 且卡片使用摘要字段
+  ok   前端具备分页去重与历史位置保护
+  ok   列表保留上一页/下一页与页码跳转
+  ok   摘要按 CSS 两行截断并由 JS 实测溢出决定按钮
+  ok   多选默认隐藏，右键/长按进入批量操作
+  ok   批量已读按钮与部分失败反馈存在
+  ok   批量操作条底部悬浮固定，并为内容预留底部空间
+  ok   站点名并入顶栏，筛选区按视图标签与搜索筛选分行
+  ok   未读卡片正文加粗，已读保持当前浅色
+  ok   打开未读详情后自动切为已读，详情仅提供标记未读按钮
+  ok   来源/时间筛选按钮不再显示「全部」字样
+  ok   列表不再显示手动标记已读按钮
+  ok   验证码复制按钮可在设置中开关（九语种）
+  ok   卡片含验证码复制入口（data-code + 复制分支）
+  ok   验证码位于时间之前，时间固定在卡片尾部
+  ok   关闭复制按钮后验证码可触屏点按/鼠标双击复制并短暂提示已复制
+  ok   卡片删除按钮默认隐藏，仅多选时显示（详情删除不受影响）
+  ok   多选栏可见提示“导出当前筛选结果”（九语种）
+  ok   导出范围是当前筛选结果，不含已选 ID
+  ok   单渠道请求有 10s 超时与 AbortController 回退
+  ok   详情弹窗：正文主体 + 单行信息 + 底部操作
+  ok   本轮 13 个新增文案九语种全覆盖
+
+# 会话时长可配置（GET·PUT /api/settings / 默认 30 分钟 / 校验拒绝 / 登录 Max-Age 同步 / 旧库自愈建表）
+  ok   会话时长：未登录 GET /api/settings → 401
+  ok   会话时长：未登录 PUT /api/settings → 401
+  ok   会话时长组：登录 → 200
+  ok   未设置时登录 Cookie Max-Age=1800（默认 30 分钟）
+  ok   GET /api/settings → 默认 30 分钟
+  ok   PUT 480 → 200 且响应回显 480
+  ok   设置 480 后登录 Cookie Max-Age=28800（8 小时）
+  ok   会话 token 内嵌 exp 与 480 分钟一致（±5s）
+  ok   设置持久化：GET 回读 480
+  ok   重新登录仍按 480 分钟签发
+  ok   PUT 4（低于下限）→ 400 INVALID_TTL
+  ok   PUT 43201（高于上限）→ 400 INVALID_TTL
+  ok   PUT 1.5（非整数）→ 400 INVALID_TTL
+  ok   PUT "abc" → 400 INVALID_TTL
+  ok   PUT 非 application/json → 400（CSRF 闸门）
+  ok   PUT 43200（30 天上限）→ 200
+  ok   PUT 5（下限）→ 200 且登录 Max-Age=300
+  ok   PUT 3600（旧秒值）→ 规范为 30 分钟
+  ok   GET 回读：3600 旧值按 30 分钟展示
+  ok   旧值 3600 下登录 Cookie 仍为 30 分钟（Max-Age=1800）
+  ok   旧库现场成立：无 settings 表
+  ok   旧库（无 settings 表）登录 → 200（首请求自愈建表，不 500）
+  ok   settings 表已自动创建
+  ok   旧库首登 Max-Age=1800（缺行回退默认）
+  ok   旧库自愈后 PUT 1440 → 200
+  ok   旧库设置 1440 后登录 Max-Age=86400（24 小时）
+  ok   删除前：多目标保存 → 200
+  ok   多目标读取：2 个目标按渠道返回
+  ok   多目标响应不含敏感明文（只回脱敏末位）
+  ok   多目标敏感字段脱敏格式与已配置标记
+  ok   编辑已存目标（敏感字段留空）→ 200
+  ok   空敏感字段沿用旧密文（未丢失凭据）
+  ok   多目标再次保存（保留既有 id + 新增目标）→ 200
+  ok   目标 id 稳定，敏感字段仍沿用旧密文
+  ok   同一 id 跨渠道复用 → 400（禁止错误复用凭据）
+  ok   同批次重复 target_id → 400
+  ok   多目标保存使用 revision 乐观锁（过期修订号 → 409）
+  ok   409 后配置未被覆盖（并发写入不生效）
+  ok   按稳定 id 删除另一目标 → 200
+  ok   删除后仅保留被保留的稳定 id 目标，未误删其他目标
+  ok   非法渠道目标 → 400 INVALID_TARGETS
+  ok   清空多目标 → 回退单目标配置
+  ok   设置渠道 feishu webhook → 200（与环境变量渠道并存）
+  ok   环境变量与设置同时存在 → 环境变量优先（source=env，密文末位 -777）
+  ok   仅有设置时 → 使用设置（source=db，密文末位 -999）
+  ok   清理渠道设置 → 200（恢复为未配置，不影响后续用例）
+  ok   推送类型：未传 types → 保存成功（向后兼容）
+  ok   推送类型：未传 types 时视图返回全部类型
+  ok   推送类型：限定类型保存 → 200
+  ok   推送类型：去重并按固定顺序持久化（verify,sms / notify）
+  ok   推送类型：非法类型值 → 400
+  ok   推送类型：空类型数组 → 400（不允许静默全禁用）
+  ok   卡片级发送：前置保存 verify/notify 两类卡片 → 200
+  ok   卡片级发送：验证码只命中 verify 卡片（实际 hits=1 https://example.com/hook/t1）
+  ok   卡片级发送：普通短信（sms）不被 verify/notify 卡片接收（实际 status=200 hits=0）
+  ok   卡片级发送：纯通知只命中 notify 卡片（实际 status=200 hits=1 https://api.telegram.org/bottg-ty/sendMessage）
+
+# 浏览器独立会话时长（声明优先 / 边界与非法拒绝 / 缺省回退全局 / 独立性 / 存量会话不延长）
+  ok   浏览器TTL组：B 浏览器先登录 → 200（全局未设置，内置默认 30）
+  ok   B 未声明且未设全局 → Max-Age=1800（内置默认 30 分钟）
+  ok   全局默认设为 480（8 小时）
+  ok   A 声明 30 → Max-Age=1800（优先于全局 480）
+  ok   A 声明 30 → token exp 与 30 分钟一致（±5s）
+  ok   B 不声明 → 回退全局 480（Max-Age=28800），不受 A 影响
+  ok   B token exp 与全局 480 分钟一致（±5s）
+  ok   声明 null → 视同缺省回退全局 480
+  ok   A 声明 5（下限）→ 200 且 Max-Age=300
+  ok   A 声明 43200（30 天上限）→ 200 且 Max-Age=2592000
+  ok   A 声明 4（低于下限）→ 400 INVALID_TTL 且无会话 Cookie
+  ok   A 声明 43201（高于上限）→ 400 INVALID_TTL
+  ok   A 声明 "30"（字符串）→ 400 INVALID_TTL
+  ok   A 声明 1.5（非整数）→ 400 INVALID_TTL
+  ok   错误密码 + 非法声明 → 403 wrong password
+  ok   非法声明 400 后，A 此前签发的会话仍有效且全局默认仍为 480
+
+# 消息列表：默认 10 条 / 稳定游标 / 摘要瘦身 / 同一时间戳 / 未读筛选 / 边界
+  ok   默认每页 10 条
+  ok   首屏 total=25 / has_more / next_cursor
+  ok   slim=1 时列表不返回完整正文
+  ok   摘要长度 ≤ 120 个码位
+  ok   摘要不超过正文长度（截断上限生效）
+  ok   summary_truncated 与正文长度一致（>120 才标记）
+  ok   列表附带服务端提取的验证码
+  ok   游标翻完共 25 条且无重复
+  ok   严格按 (starred,received_at,id) 倒序，无乱序
+  ok   同一时间戳的记录全部保留（最大同秒组=3）
+  ok   未读筛选首页 10 条且全未读
+  ok   未读筛选翻页仍只返回未读
+  ok   未读翻页与首页无交集
+  ok   游标续页不包含更晚插入的新消息（仅取旧的一批）
+  ok   详情接口返回完整正文
+  ok   不存在的消息 → 404
+  ok   非法游标 → 400 INVALID_CURSOR
+  ok   非法 limit 回退默认 10
+  ok   limit=0（非法）回退默认 10
+  ok   标记已读后重新查询 read_at 已写入
+  ok   未读数量与未读筛选总数一致（25 vs 25）
+  ok   重复标记已读幂等
+  ok   空列表：0 条 / 无更多 / 无游标
+
+# 分页一致性：星标漂移检测（CURSOR_STALE）/ 会话内稳定排序 / 双分页不互相污染
+  ok   游标含 SHA-256 集合指纹（4 段：starred|time|id|sha256）
+  ok   首屏包含已星标消息（id=25）
+  ok   S1 取消已加载星标 → 409 CURSOR_STALE
+  ok   S1 重载后完整取回 25 条且无重复
+  ok   S2 星标未加载消息 → 409 CURSOR_STALE
+  ok   S2 重载后完整取回 25 条（新星标消息也出现）
+  ok   S3 第二页后星标已加载消息 → 409
+  ok   S3 重载后完整取回 25 条
+  ok   S5 多次切换（净变化 1）→ 409
+  ok   S5 净零切换（顺序未变）→ 续页正常，不误报失效
+  ok   净零切换续页与首屏无交集
+  ok   旧 3 段游标保持向后兼容
+  ok   碰撞 C1 {1,4}→{2,3}（同数量同总和）：必须 409
+  ok   碰撞 C2 {2,5}→{1,6}（同数量同总和）：必须 409
+  ok   集合不变 → 续页正常且无重复
+  ok   不同筛选条件分别计算指纹（摘要不同）
+  ok   同筛选重放游标：正常续页
+  ok   S4 前置：14/15 属未加载星标行
+  ok   S4 取消未加载星标 → 409 CURSOR_STALE
+  ok   page=2 与 page=1 无交集（数字分页独立）
+  ok   page=2 后接续游标：从第 2 页末继续，无交集
+  ok   跨筛选复用旧游标：明确失效或安全返回（不产生错页）
+  ok   未读筛选：标记已读后续页不回退、不与首页重复
+
+# 列表投影重构：数字分页与游标分页等价 / 指纹覆盖完整集合 / 空与大量星标
+  ok   数字分页 page=1 正常返回
+  ok   数字分页 page=2 正常返回
+  ok   数字分页 page=3 正常返回
+  ok   两路分页各取回 30 条（无遗漏）
+  ok   数字分页与游标分页 id 顺序逐项一致（排序不变、无重复）
+  ok   page=2 存在续页游标
+  ok   非当前页星标变化 → 409（指纹覆盖完整集合）
+  ok   净零星标切换 → 续页正常，不误报失效
+  ok   净零切换续页与首屏无交集
+  ok   大量星标集合：末页星标变化 → 409
+  ok   大量星标：page=2 与 page=1 无交集
+  ok   大量星标：page=2 游标续页无重复
+  ok   空星标集合：首屏 10 条且仍有下一页
+  ok   空星标集合：page=2 返回剩余 2 条
+  ok   空星标集合：两页无交集
+  ok   空星标集合：游标续页正常（指纹为空集合）
+  ok   空星标集合：续页无重复
+  ok   空星标集合：同一游标重放不误报 CURSOR_STALE
+
+# 指纹补证：messages.id 严格整数 / 逗号编码无歧义 / 指纹与行同快照
+  ok   id='1,2'（含逗号字符串）写入被拒绝 → 集合编码不可能被 id 内容污染
+  ok   id=1.5（非整数）写入被拒绝
+  ok   id='007' 被整数亲和归一化为 7（无前导零歧义）
+  ok   全表 id 的 SQLite 类型均为 integer（0 条非整数）
+  ok   规范化编码无歧义：{1,4} 与 {2,3} / {14} / {1,04} 摘要均不同
+  ok   状态 A：指纹=hash(1,2) 且返回行星标集合恰为 {1,2}
+  ok   状态 B：指纹=hash(3,4) 且返回行星标集合恰为 {3,4}
+  ok   跨状态指纹不同（{1,2} vs {3,4}；且同数量同总和不碰撞）
+
+# 批量已读：部分失败如实上报 / 未读统计 / 单条兼容 / 参数边界
+  ok   初始未读 3 条
+  ok   批量已读部分失败：updated=2 / failed=1
+  ok   失败 id 逐条列出（999999）
+  ok   批量后服务端返回未读=1
+  ok   统计接口未读与批量结果一致（不重复计入）
+  ok   重复标记已读幂等（未读数保持不变）
+  ok   空 ids → 400
+  ok   超过 200 条 → 400
+  ok   单条接口保持兼容
+
+# 收发 / 去重 / 列表 / 筛选 / 长轮询 / 删除 / 截断（免登录）
+  ok   push 无 token → 403（未命中库内与环境变量，fail-closed，状态码同旧版）
+  ok   push 带 token → 入库成功
+  ok   相同内容+时间重推 → duplicated:true
+  ok   receive 短信 → 入库成功
+  ok   列表 total>=2
+  ok   列表含 push 的消息
+  ok   每行带 sim_number 字段
+  ok   来源筛选 source=sms 仅 1 条
+  ok   长轮询 last_id=0 有更新 → changed:true 立即返回
+  ok   删除单条消息成功
+  ok   超长正文 push 仍成功（截断而非报错）
+  ok   超长正文被截断到 8000 字
+  ok   管理页渲染且含新开关 UI
+
+# 定时清理 runCron / cron HTTP 鉴权
+{"timestamp":"2026-11-10T08:00:31.092Z","level":"info","event":"cron_cleanup","requestId":"cb0fb5b9-b5c6-443d-8802-98336cd6e7a8","platform":"test","phase":"cron","retention_days":1,"cleaned_old":3,"purged_deleted":0}
+  ok   超过保留期的旧消息被 cron 清理
+  ok   /api/cron 无 token → 403
+{"timestamp":"2026-11-10T08:00:31.093Z","level":"info","event":"cron_cleanup","requestId":"506fcdce-00bb-46d7-b29c-242279a65fe3","platform":"test","phase":"cron","retention_days":30,"cleaned_old":0,"purged_deleted":0}
+  ok   /api/cron 带 token → 200
+
+# 设备别名 / 合并 / 动态来源
+  ok   创建两个设备标签
+  ok   设置设备别名成功
+  ok   别名生效（display_name 变为备用机）
+  ok   来源清单含自定义来源 alert
+  ok   自定义来源 alert 可单独筛选
+  ok   合并设备成功，迁移条数一致
+  ok   合并后目标设备消息数 = 原B + 原A
+  ok   合并后源设备标签已删除
+  ok   合并到自身 → 400
+
+# 时间范围 / 分页 / 导出
+  ok   range=1d 排除极旧消息
+  ok   range=7d 排除极旧、保留近期
+  ok   limit=2 生效且返回不超过 2 条
+  ok   导出 CSV 响应类型正确
+  ok   CSV 含表头
+  ok   CSV 带附件下载头
+  ok   导出 JSON 为数组且有数据
+  ok   CSV 公式注入被前置单引号防护
+
+# 号码归属地 / 内置号码库
+  ok   PHONE_AREA_ENABLED=false → 不外呼、返回 disabled
+  ok   非法号码 → found:false
+  ok   非手机号（短号）→ 不查询归属地
+  ok   /api/phone 上游查询限速生效（120 次/分，超限 429）
+  ok   管理页内置号码库与归属地填充逻辑存在
+
+# 重要操作密码确认（/api/auth-state 探测 / /api/verify-password 校验 / 复用登录限流）
+  ok   auth-state：开启登录 → required=true（公开可访问）
+  ok   auth-state：未开启登录 → required=false
+  ok   verify-password：无会话 → 401（不在公开白名单）
+  ok   前置：登录取得会话
+  ok   verify-password：密码正确 → 200
+  ok   verify-password：密码错误 → 403
+  ok   verify-password：空密码 → 403
+  ok   verify-password：连续错误达上限 → 429
+  ok   verify-password：未开启登录 → 直接放行
+
+# 批量删除 / 恢复 / 清空（软删除）
+  ok   准备两条批量消息
+  ok   批量软删除 2 条
+  ok   软删除后列表不再返回
+  ok   恢复 2 条
+  ok   恢复后重新可见
+  ok   按设备清空 2 条
+  ok   清空后该设备无消息
+  ok   设备消息全部软删后 msg_count=0（不含软删记录）
+  ok   软删全部消息后可直接删除设备标签（UI × 有出现条件）
+
+# 列表 code 字段（中英文识别 / 干扰数字不误报）
+  ok   英文验证码短信入库
+  ok   列表 slim 响应含英文验证码 code
+  ok   干扰数字短信入库
+  ok   手机号/订单号/金额/日期干扰 → code 为空（不误报）
+
+# 收藏 / 已读 / 统计 / PWA
+  ok   收藏消息
+  ok   只看收藏包含该消息
+  ok   取消收藏
+  ok   标为已读
+  ok   只看未读排除已读消息
+  ok   只看已读包含该消息且不混入未读
+  ok   导出按已读筛选返回数据
+  ok   标为未读
+  ok   统计接口返回
+  ok   manifest 可访问
+  ok   service worker 可访问
+
+# 登录鉴权 / http cookie 降级 / 防锁死
+  ok   开登录后无 cookie → 401
+  ok   登录密码错误 → 403
+  ok   登录密码正确 → 200
+  ok   登录下发 sms_auth cookie
+  ok   http 下 cookie 不带 Secure（降级，修复 Alook 登录）
+  ok   带登录 cookie → 200
+  ok   无 cookie 访问 / → 返回登录页
+  ok   开登录后 /api/push 仍可推送（公开接口）
+{"timestamp":"2026-11-10T08:00:31.284Z","level":"warn","event":"auth_config_incomplete","requestId":"-","platform":"test","phase":"config","message":"ENABLE_AUTH=true 但未设置 ADMIN_PASSWORD：管理接口已全部拒绝访问，配置密码并配置 SESSION…"}
+  ok   ENABLE_AUTH=true 但密码为空 → 受保护接口 401（不放行，安全默认）
+
+# 写入接口限速
+  ok   限速生效：放行一批后开始返回 429
+
+# 安全响应头 / /api/cron HTTP 触发（CF 入口）/ XFF 防伪造
+  ok   管理页响应带 X-Content-Type-Options: nosniff
+  ok   管理页响应带 X-Frame-Options: DENY（防 iframe 点击劫持）
+  ok   管理页响应带 Referrer-Policy: no-referrer
+  ok   API 响应同样带安全响应头
+  ok   fetchApp /api/cron 无 token → 403
+{"timestamp":"2026-11-10T08:00:31.305Z","level":"info","event":"cron_cleanup","requestId":"ff1b65e0-6c54-40f3-81ce-9758800cd05d","platform":"test","phase":"cron","retention_days":30,"cleaned_old":1,"purged_deleted":0}
+  ok   fetchApp /api/cron 带 token → 200（CF 侧外部 cron 可用）
+  ok   XFF 左段伪造不绕过写入限速（clientIp 取末段）
+
+# 中英双语 / 移动端 / 平台兼容
+  ok   管理页内置九语言字典（zh-CN/zh-TW/en/ja/ko/es/fr/de/pt-BR）
+  ok   九语言键集一致（zh-CN 151 项；差异：无）
+  ok   九语言 total/pageOf 保留 {n}/{a} 占位符（违例：无）
+  ok   九语言无空值（空：无）
+  ok   值语言守护（zh 系含中文、拉丁系无 CJK、ja 含假名、ko 含谚文；违例：无）
+  ok   拉丁系译文非 en 原样复制（违例：无）
+  ok   管理页静态文案带 data-i18n 标注
+  ok   语言选择位于设置中心并本地记忆
+  ok   i18n 运行时（T / applyI18n）已注入
+  ok   登录过期 401 → 整页重载到登录页（不停在加载失败）
+  ok   设备 tab 切换仅更新激活态（不再重复拉 /api/devices）
+  ok   移动端 viewport 安全区 / PWA meta 就位
+  ok   禁用 iOS 号码自动识别，避免吞掉发件号
+  ok   登录页同样支持多语言切换
+  ok   登录页 D 字典含九语言文案（ja/de/pt-BR/fr 抽查）
+  ok   manifest 含 lang / scope / display_override
+  ok   manifest 图标尺寸如实标注（.ico 用 sizes:any，不再虚标 192/512）
+  ok   Service Worker 缓存页面壳且跳过 /api/
+  ok   WAIT_MAX_SECONDS 生效（实测 3002ms）
+  ok   i18n / 日期函数可在沙箱中求值
+  ok   文案插值按语言输出（共 3 条 / 3 messages）
+  ok   分页文案按语言输出
+  ok   缺失键回退为键名（不抛错）
+  ok   zh-TW 字典生效（繁体输出）
+  ok   fr / de 字典生效
+  ok   中文完整时间格式（不变）
+  ok   zh-TW / ja 年月日完整时间格式
+  ok   英文完整时间格式走 Intl（含 Oct 19 / 2026 / 18:30）
+  ok   日期分组标签按语言输出
+  ok   ja/ko/es/de 日期分组标签输出
+  ok   英文相对时间（5 min ago）
+  ok   中文相对时间（5 分钟前）
+  ok   ja/ko 相对时间输出
+  ok   语言探测段可在沙箱中求值
+  ok   旧值 zh → zh-CN 归一化（?lang 与 localStorage 双通道）
+  ok   繁体变体归一化 zh-TW
+  ok   pt → pt-BR 归一化
+  ok   九语言代码直通
+  ok   ?lang 非法时回退 localStorage
+  ok   navigator.languages 逐个匹配（含变体）
+  ok   探测全空回退 en（不回退中文）
+
+# 验证码提取（七级级联回归）
+  ok   extractCode 可在沙箱中求值
+  ok   ②关键词在前+纯数字："您的验证码是482910，10分钟内有效" → "482910"
+  ok   ①关键词在前+分隔码："取件码 8-2-307，请至丰巢柜取件" → "82307"
+  ok   ①分隔码不被截断："验证码 1234 5678，请分别输入" → "12345678"
+  ok   ③码在前+纯数字："123456是您的验证码，10分钟内输入" → "123456"
+  ok   ③码在前优先于后续数字（回归：不得取 2000）："123456是您的验证码，您有2000积分待领取" → "123456"
+  ok   ③码在前+分隔式（回归）："8-2-307 是您的取件码" → "82307"
+  ok   ④Google 风格："G-383838 是您的 Google 验证码" → "383838"
+  ok   ⑤字母数字混合："您的登录码 a1b2c3 请勿泄露" → "a1b2c3"
+  ok   剥离手机号："验证码 482910，请勿告知 13812345678" → "482910"
+  ok   无验证码关键词不提取："【某App】您的订单20261020123456已发出" → ""
+  ok   超长数字串不从内部截取："1234567890是您的验证码" → ""
+  ok   4 位验证码："验证码 1234" → "1234"
+  ok   6 位验证码："校验码为 839201" → "839201"
+  ok   8 位验证码："动态密码 62481578" → "62481578"
+  ok   英文 verification code："Your verification code is 918204." → "918204"
+  ok   英文 OTP："OTP: 483920" → "483920"
+  ok   多候选优先验证码语境："验证码 123456，订单号 9876543210，手机号 13812345678" → "123456"
+  ok   特殊字符包裹："验证码：［583921］" → "583921"
+  ok   金额/日期干扰："您消费 2000 元，验证码是 482910，日期 2026-10-27" → "482910"
+  ok   分隔取件码："您的取件码为 8-2-307" → "82307"
+
+# 服务端轻量验证码检测 extractCodeLite
+  ok   extractCodeLite 可在沙箱中求值
+  ok   码在前："123456是您的验证码" → "123456"
+  ok   码在前优先于后续数字（回归）："123456是您的验证码，您有2000积分待领取" → "123456"
+  ok   关键词在前："您的验证码是482910，10分钟内有效" → "482910"
+  ok   分隔码先于纯数字："验证码 1234 5678，请分别输入" → "12345678"
+  ok   Google 风格："G-383838 是您的 Google 验证码" → "383838"
+  ok   剥离手机号："验证码 482910，请勿告知 13812345678" → "482910"
+  ok   剥离金额（回归：不得取 2000）："您消费2000元，验证码是482910" → "482910"
+  ok   剥离日期："2026-10-27 发出，验证码482910" → "482910"
+  ok   无验证码关键词不提取："【某App】您的订单20261020123456已发出" → ""
+  ok   超长数字串不从内部截取："1234567890是您的验证码" → ""
+  ok   4 位验证码："验证码 1234" → "1234"
+  ok   6 位验证码："校验码为 839201" → "839201"
+  ok   8 位验证码："动态密码 62481578" → "62481578"
+  ok   英文 verification code："Your verification code is 918204." → "918204"
+  ok   英文 OTP："OTP: 483920" → "483920"
+  ok   英文码在前："918204 is your verification code" → "918204"
+  ok   英文码在前 + as your OTP："Use 483920 as your OTP" → "483920"
+  ok   多候选优先验证码语境："验证码 123456，订单号 9876543210，手机号 13812345678" → "123456"
+  ok   特殊字符包裹："验证码：［583921］" → "583921"
+  ok   金额/日期干扰："您消费 2000 元，验证码是 482910，日期 2026-10-27" → "482910"
+  ok   英文订单号干扰："Order No. 20261020123456 shipped; verification code 482910" → "482910"
+  ok   英文无验证码语义："No verification code required for this order 20261020123456" → ""
+  ok   分隔取件码："您的取件码为 8-2-307" → "82307"
+  ok   取件码仍可识别："取件码 82307 请取件" → "82307"
+  ok   错误码不当验证码："验证码错误，错误代码 4001" → ""
+  ok   时长数字不当验证码："验证码已发送，有效期 2026 秒" → ""
+  ok   年份不当验证码："验证码已发送，活动截止 2026 年" → ""
+  ok   订单号不当验证码："验证码已发送，订单 1234 号" → ""
+  ok   客服号码不当验证码："验证码已发送，请拨打客服 4001" → ""
+
+# 验证码复制（Clipboard / 回退 / 失败反馈）
+  ok   doCopy / fallbackCopy 可在沙箱中求值
+  ok   复制内容严格等于验证码（不含短信全文）
+  ok   复制成功有轻量反馈（toast + 按钮文案）
+  ok   Clipboard 拒绝且回退失败 → 明确报错
+  ok   复制失败不显示成功文案、不锁按钮
+  ok   无 Clipboard API 且回退失败 → 明确报错
+  ok   Clipboard 拒绝但 execCommand 回退成功 → 报成功
+
+# 11 渠道通知渲染（fetch 桩 E2E）
+  ok   verify 态 receive 入库成功
+  ok   配置 11 渠道 → 转发 11 次（got 11）
+  ok   飞书：interactive + violet 卡头
+  ok   飞书：码入卡片 + 打开管理页按钮
+  ok   企微：引用块放码 + 链接行
+  ok   钉钉：title 进会话列表 + ### 标题
+  ok   Server酱：title ≤32 + desp markdown
+  ok   PushPlus：markdown 模板
+  ok   Telegram：HTML + blockquote 放码
+  ok   Bark：码进 title + copy 自动复制 + timeSensitive + url
+  ok   ntfy：lock tag + priority 4 + click
+  ok   Gotify：extras markdown + priority 8
+  ok   Resend：HTML 模板 + 纯文本降级
+  ok   通用 Webhook：payload 含 type/code
+  ok   notify 态 push 入库成功
+  ok   notify 态仍转发 11 次
+  ok   飞书：notify 态 turquoise 卡头
+  ok   Bark：无码省略 copy + active
+  ok   ntfy：无码 priority 3 且无 tags
+  ok   Gotify：无码 priority 5
+  ok   通用 Webhook：notify 态 type/code
+  ok   sms 态 receive 入库成功
+  ok   飞书：sms 态 blue 卡头
+  ok   Telegram：HTML 转义 <
+  ok   通用 Webhook：sms 态 type
+
+# 会话安全（无状态随机 Session / 签名 / TTL / 密钥策略）
+  ok   会话：核心含无状态 Session 实现区
+  ok   会话：错误密码 → 403
+  ok   会话：正确密码 → 200 + Set-Cookie
+  ok   会话：Cookie 含 HttpOnly
+  ok   会话：Cookie 含 SameSite=Lax
+  ok   会话：Cookie 含 Path=/
+  ok   会话：Cookie Max-Age=1800（TTL 30 分钟）
+  ok   会话：http 环境 Cookie 不带 Secure（自动降级）
+  ok   会话：https 环境 Cookie 含 Secure
+  ok   会话：两次登录产生不同随机 Session
+  ok   会话：Session 为 nonce.exp.sig 三段随机 token，非密码哈希
+  ok   会话：登录 Cookie 可访问管理 API
+  ok   会话：无 Cookie → 401
+  ok   会话：篡改签名 → 401
+  ok   会话：篡改 nonce → 401
+  ok   会话：篡改过期时间 → 401
+  ok   会话：Session 过期 → 401
+  ok   会话：错误密钥伪造 token → 401
+  ok   会话：独立实例 B（同密钥）验证实例 A 签发的 token 通过
+  ok   会话：不同密钥实例验证同一 token 失败（密钥轮换即失效）
+  ok   会话：签发后未做任何实例登记，验签直接通过（无状态）
+  ok   会话：logout → 200 + 清除 Cookie
+  ok   会话：logout 后浏览器不携带 Cookie → 无法访问
+  ok   会话：logout 前复制的 Token 在 TTL 内仍可重放（无状态限制，显式记录）
+  ok   会话：logout 不做跨实例吊销（独立实例验证仍通过，TTL 内有效）
+  ok   会话：SESSION_SECRET 缺失 → 登录 500（安全失败）
+  ok   会话：缺失密钥错误信息不含密码或密钥值
+  ok   会话：SESSION_SECRET 缺失 → 鉴权一律 401（不开放管理接口）
+  ok   会话：告警日志不含密钥值与密码
+  ok   会话：轮换 SESSION_SECRET 后旧 Token 失效
+  ok   会话：轮换后新密钥登录正常
+  ok   会话：登录响应体不含 token（不经 URL/正文传递）
+
+# 鉴权配置矩阵（配置缺失一律不放行，配置错误区别于密码错误）
+  ok   矩阵：开登录+密码缺失 → 受保护接口 401
+  ok   矩阵：开登录+密码缺失 → 访问 / 返回登录页（不放行管理页）
+  ok   矩阵：密码空串与缺失行为一致 → 401
+  ok   矩阵：密码缺失登录 → 500 server auth not configured（配置错误非 403）
+  ok   矩阵：配置错误响应不含密钥值或提交的密码
+  ok   矩阵：密钥缺失登录 → 500（安全失败，不签发 Session）
+  ok   矩阵：密钥缺失 → 受保护接口 401
+  ok   矩阵：密码+密钥双缺失 → 受保护接口 401
+  ok   矩阵：ENABLE_AUTH=false → 公开模式不受影响
+  ok   矩阵：ENABLE_AUTH=false 登录接口 → 400 auth disabled（原行为）
+
+# 阶段 1 组：Turso 适配层 fetch Mock（请求编码/响应解码/异常分支）
+  ok   构造：缺 URL 抛「缺少 TURSO_DATABASE_URL」
+  ok   构造：非 https/libsql URL 抛「格式不正确」
+  ok   构造：libsql:// 改写为 https:// 并拼 /v2/pipeline 端点
+  ok   编码：execute 为单次 POST
+  ok   编码：请求 URL 与 endpoint 一致
+  ok   编码：Bearer 鉴权 + JSON 头
+  ok   编码：pipeline 请求体 = execute + close 两段
+  ok   编码：boolean true → integer "1"
+  ok   编码：小数 → float
+  ok   编码：中文字符串 → text 原样透传
+  ok   编码：null → null
+  ok   解码：affected_row_count/last_insert_rowid → meta
+  ok   编码：bigint → integer 文本（无精度丢失）
+  ok   解码：integer/float/text/null 正确
+  ok   解码：未知单元格类型静默 → null（现状行为留档）
+  ok   解码：blob → base64 字符串
+  ok   解码：空结果 all() → []
+  ok   解码：空结果 first() → null
+  ok   异常：HTTP 401 → 「Turso HTTP 401」
+  ok   异常：HTTP 400 → 「Turso HTTP 400」
+  ok   异常：HTTP 500 → 「Turso HTTP 500」
+  ok   异常：fetch reject → 「Turso 网络请求失败」并带原因
+  ok   异常：响应体非 JSON → 拒绝（现状为裸 SyntaxError 穿透）
+  ok   异常：缺 results → 「缺少 results」
+  ok   异常：SQL 执行错误 → 「语句执行失败」并带引擎信息
+  ok   异常：缺 result → 「缺少 result」
+  ok   边界：对象参数 → 「不支持的 SQL 绑定参数类型」
+  ok   边界：NaN 编码为 float "NaN"（真库是否拒收列入必验项）
+
+# 阶段 2 组：Local/Turso 双适配契约（插入/更新/删除/绑定/排序分页/事务失败回滚）
+  ok   契约：双适配套件无异常
+  ok   契约：双适配步骤数一致（各 10 步）
+  ok   契约：同一 SQL 序列 10 步输出逐字段一致（Local vs Turso）
+  ok   契约：中文+引号+分号+emoji 参数原样写入读回
+  ok   契约：null 参数 → null，整数 42 原值
+  ok   契约：批量 UPDATE changes=2
+  ok   契约：更新后读取生效
+  ok   契约：ORDER BY + LIMIT/OFFSET 分页结果一致
+  ok   契约：删除后读取 changes=1、COUNT=2
+  ok   契约：无匹配行 first() → null
+  ok   契约：事务内违约语句双适配均抛错
+  ok   契约：ROLLBACK 后失败事务写入不残留
+  ok   契约：boolean 绑定 true → 整数 1
+
+# 阶段 3 组：ensureSchema × Turso（bare 库经 fetch Mock 真 SQL 迁移）
+  ok   迁移：裸库首请求 → 200（自愈经 Turso 适配层完成）
+  ok   迁移：四表建齐（devices/messages/tokens/settings）
+  ok   迁移：tokens 表 9 列（幂等补列路径）
+  ok   迁移：8 个业务索引建齐（实际 10）
+  ok   迁移：stats schema.state=ok
+  ok   迁移：第二次请求幂等 200（WeakSet 生效，不再重跑）
+
+# 第一提交点 A：D1 batchAtomic（原子语义 / 异常分类）
+  ok   A1 空批：不发请求，直接返回 results=[]
+  ok   A2 成功：逐语句 changes 与入参一一对应
+  ok   A2 成功：两条均已提交
+  ok   A3 语句级失败：code=FAILED / retryable=true
+  ok   A3 语句级失败：整批回滚（无部分落地，c 仍为 2）
+  ok   A4 无响应：code=UNKNOWN / retryable=false / effectUnproven=true
+  ok   A5 准备阶段失败：FAILED/prepare 且未调用 batch（零执行）
+  ok   A6 无 batch/batchAtomic 能力：FAILED/prepare（明确拒绝而非静默降级）
+  ok   A7 空 sql：FAILED/prepare（脏语句绝不进入批次）
+  ok   A8 worker 侧 AtomicBatchError 继承 Error（可被全局错误路径统一捕获）
+
+# 第一提交点 B：Turso batchAtomic 协议形状（3-RTT / baton / 真 SQL 原子性）
+  ok   B1 成功：恰好 3 个 RTT（BEGIN / 写 / COMMIT），实际 3
+  ok   B1 R1：BEGIN 独占管道（不与写语句同请求）
+  ok   B1 R2：写语句一次请求承载 2 条
+  ok   B1 R3：COMMIT 独占管道
+  ok   B1 baton：R1 用 null 开新流
+  ok   B1 baton：R2/R3 均携带服务端返回的 baton
+  ok   B1 baton：响应 baton 与请求 baton 不同（协议要求串行换手）
+  ok   B1 URL：无 base_url 时三次请求均打原端点
+  ok   B1 结果：changes/last_row_id 逐条映射正确
+  ok   B1 数据：事务已提交（真 SQL 语义，非 Mock 计数）
+  ok   B2 base_url：R1 仍打原端点
+  ok   B2 base_url：R2/R3 改投粘性地址（基地址 + /v2/pipeline）
+  ok   B3 写语句 SQL error：FAILED/execute（ROLLBACK 已确认）
+  ok   B3 写语句 SQL error：第 3 个请求为 ROLLBACK（同 baton 链路；BEGIN→写→ROLLBACK）
+  ok   B3 写语句 SQL error：整事务回滚（仅预置 dup 一行）
+  ok   B4 写成功后流被关闭：UNKNOWN/execute（不声称成功）
+  ok   B4 写成功后流被关闭：无第 3 个请求（未发 COMMIT）
+
+# 第一提交点 C：Turso 故障注入矩阵（分类逐类对齐第四轮状态机）
+  ok   C1 BEGIN 网络失败：FAILED/begin（写语句从未发出 ⇒ 未提交）
+  ok   C1 BEGIN 网络失败：只发了 1 个请求（不重试、不发写语句）
+  ok   C2 BEGIN HTTP 503：FAILED/begin（流失效且数据未动）
+  ok   C3 BEGIN SQL error：FAILED/begin
+  ok   C4 BEGIN 成功但流关闭：FAILED/begin（事务不存在）
+  ok   C5 写阶段无响应：UNKNOWN/execute（不得重试、不得报成功）
+  ok   C5 写阶段无响应：仅 2 个请求（无 ROLLBACK、无 COMMIT）
+  ok   C6 写阶段 HTTP 500：FAILED/execute（T3：流失效 ⇒ 无挂起事务，且未发 COMMIT）
+  ok   C7 写阶段响应不可解析：FAILED/execute（未发 COMMIT ⇒ 数据轴未提交）
+  ok   C8 COMMIT 无响应：UNKNOWN/commit（T2）
+  ok   C8 COMMIT 无响应：无第 4 个请求（S1 保守变体：零内部重试）
+  ok   C9 COMMIT HTTP 502：UNKNOWN/commit（协议未规定是否已执行）
+  ok   C10 COMMIT 响应不可解析：UNKNOWN/commit
+  ok   C11 COMMIT 锁竞争 + ROLLBACK 成功：FAILED/commit（C-2α→C-2β，确认未提交）
+  ok   C11 COMMIT 锁竞争：第 4 个请求为 ROLLBACK（复用成功响应中的 baton）
+  ok   C11 COMMIT 锁竞争：ROLLBACK 使用 COMMIT 响应返回的 baton（不是旧 baton）
+  ok   C12 COMMIT「无事务」：FAILED/commit（引擎明确已回滚）
+  ok   C12 COMMIT「无事务」：不发 ROLLBACK（没有可回滚的事务）
+  ok   C13 COMMIT 其他 SQL error：UNKNOWN/commit（C-2γ，保守不判定）
+  ok   C13 COMMIT 其他 SQL error：不发 ROLLBACK（状态不明不复用 baton）
+  ok   C14 COMMIT 锁竞争 + ROLLBACK 无响应：UNKNOWN/rollback（C-2δ）
+  ok   C15 baton 过期：FAILED/execute（流已关闭 ⇒ 服务端已回滚）
+  ok   C15 baton 过期：不发 ROLLBACK（无可用 baton）
+  ok   C16 入参非数组：FAILED/prepare（零请求）
+  ok   C16 缺 sql：FAILED/prepare（零请求）
+  ok   C16 非法绑定类型：FAILED/prepare（提前编码，脏参数绝不进事务）
+  ok   C17 适配层与 worker 侧错误类各自独立但同为 Error 子类（调用方只认 code/phase）
+
+# 阶段 3D-2：shared/db.js Turso 失败分类（R2 protocol→UNKNOWN + FAILED 出口三态分离）
+  ok   E1 R2 响应不可解析：UNKNOWN/execute（零观测不冒充确定性；retryable=false / effectUnproven=true）
+  ok   E1 仅 2 个请求（不发 ROLLBACK、不发 COMMIT、零重试）
+  ok   E2 R2 HTTP 500：FAILED/execute 保留（retryable=true / effectUnproven=false，detail 含 500）
+  ok   E2 detail 无「已回滚」类未经直接观测的事实性表述
+  ok   E3 R2 语句失败且 baton=null：FAILED/execute（流已关闭；COMMIT 未发出 ⇒ 未提交为结构性判断）
+  ok   E3 detail 不含「服务端已回滚」（回滚未直接确认）
+  ok   E3 不发 ROLLBACK（无可用 baton）
+  ok   E4 ROLLBACK 成功：FAILED/execute（已 ROLLBACK，确认未提交）
+  ok   E4 第 3 个请求为 ROLLBACK，使用 R2 响应返回的 baton
+  ok   E5 ROLLBACK 失败：UNKNOWN/rollback（状态不可证明，不复用 baton）
+  ok   E5 仅 3 个请求（ROLLBACK 失败后不重试、不发 COMMIT）
+  ok   E6 COMMIT 网络异常：UNKNOWN/commit（T2，无观测）
+  ok   E6 仅 3 个请求（无第 4 个请求：零内部重试）
+  ok   E7 分类一致性：retryable ⇔ FAILED、effectUnproven ⇔ UNKNOWN（互斥，由 code 派生）
+  ok   E7 shared 适配层错误类独立于 worker 侧类但同为 Error 子类（调用方只认 code/phase）
+{"timestamp":"2026-11-10T08:00:36.039Z","level":"error","event":"request_error","requestId":"d28048f6-18fe-4485-bd45-14d7c759075c","platform":"test","phase":"request","error":{"name":"AtomicBatchError","message":"atomic batch 已失败（execute）: injected failed","stack":"AtomicBatchError: atomic batch 已失败（execute）: injected failed\n    at main (file:///D:/OpenClaw/SMSToWeb/tests/run.mjs:3162:38)"}}
+{"timestamp":"2026-11-10T08:00:36.040Z","level":"error","event":"request_error","requestId":"7d9d908e-2be9-4959-9648-b7652b0e69e8","platform":"test","phase":"request","error":{"name":"AtomicBatchError","message":"atomic batch 状态未知（execute）: injected unknown","stack":"AtomicBatchError: atomic batch 状态未知（execute）: injected unknown\n    at main (file:///D:/OpenClaw/SMSToWeb/tests/run.mjs:3163:37)"}}
+  ok   E8 FAILED/UNKNOWN 两种分类对外均为 500（均走全局错误路径）
+  ok   E8 两种分类响应结构完全一致：{"success":false,"error":"internal error"}（不泄露 code/phase/detail）
+
+# 第一提交点 D：Node 连接级 FIFO 队列 / 事务不变量 / 连接重建八步
+  ok   D0 委派：atomicBatch(env.DB, …) 正确路由到适配层 batchAtomic（真实调用缝已验证）
+  ok   D1 成功：逐语句 changes/last_row_id 正确
+  ok   D1 成功：事务结束后 _inTx 复位为 false
+  ok   D2 语句失败：FAILED/execute（ROLLBACK 成功确认）
+  ok   D2 语句失败：异常后 _inTx 复位（不污染后续任务）
+  ok   D2 语句失败：整体回滚（c 仍为 3：seam+a+b）
+  ok   D3 队列：30 个并发任务全部落地（3+10×2+20=43，实际 43）
+  ok   D3 队列：链尾保持 Promise 且连接态 ready（调度链未被 rejection 污染）
+  ok   D4 _execDirect 事务外调用：guard 拒绝（_inTx 不变量生效）
+  ok   D5 事务重入：batchAtomic 被 guard 拒绝
+  ok   D6a 无 close()：事务结果仍为 UNKNOWN/rollback（不改写成 FAILED）
+  ok   D6a 无 close()：_connState=failed 且 _inTx 复位
+  ok   D6a 无 close()：未调用 _open()，未创建同文件新连接（open 次数 0）
+  ok   D6a 无 close()：语句缓存已清空（但不作为 finalize 证明）
+  ok   D6a 无 close()：错误信息明确表达连接不可用且需进程重启
+  ok   D6a 无 close()：后续队列任务立即 reject（fail-fast；实际 rejected:FAILED:conn）
+  ok   D6a 无 close()：普通 SQL 无法绕过失败态访问连接（statement 守卫）
+  ok   D6b finalize 抛错：仍为 UNKNOWN/rollback
+  ok   D6b finalize 抛错：failed、未调用 _open()、无新连接
+  ok   D6b finalize 抛错：诊断保留真实原因（缓存语句无 close()，关联语句无法 finalize（3 条，Node v22.22.2））
+  ok   D6b finalize 抛错：后续任务 fail-fast（实际 rejected:FAILED:conn）
+  ok   D6c 真实能力（StatementSync.close=false）：数据面仍为 UNKNOWN/rollback
+  ok   D6c 真实能力：连接决策与能力一致（期望 failed，实际 failed）
+  ok   D6c 无 finalize 能力：fail-closed，open 次数 0 且无可用连接（不宣称已释放）
+  ok   D6c 无 finalize 能力：后续任务 fail-fast（实际 rejected:FAILED:conn）
+  ok   D7a _open 中途失败：抛出原始错误（simulated: init failed after connect）
+  ok   D7a _open 中途失败：半初始化连接未被当成可用连接（sqlite=null）
+  ok   D7a _open 中途失败：清理路径被执行且记录成功（C:\Users\ADMINI~1\AppData\Local\Temp\smstoweb_atomic_local_openfail_37728.db 初始化失败（半初始化连接清理: ok）: simulated: init failed after connect）
+  ok   D7a _open 中途失败：半初始化连接已被真实关闭（isOpen=false，node:sqlite 实语义）
+  ok   D7b 清理失败：_rebuild 返回 false（不重开）
+  ok   D7b 清理失败：_connState=failed 且无可用的半初始化连接
+  ok   D7b 清理失败：诊断如实记录清理失败，未声称已释放（C:\Users\ADMINI~1\AppData\Local\Temp\smstoweb_atomic_local_cleanupfail_37728.db 初始化失败（半初始化连接清理: close 失败: simulated: cleanup close failed）: simulated: init failed after connect）
+  ok   D7b 清理失败：后续任务 fail-fast（rejected:FAILED:conn）
+  ok   D7b 清理失败：普通 SQL 无法绕过失败态访问半初始化连接
+
+# 阶段 5 组：结构化日志（字段/服务端 requestId/脱敏/安全响应/降级）
+  ok   日志：DB 连续抛错 → 500 + 仅安全文案
+  ok   日志：错误响应不含类名/堆栈（堆栈只留服务端）
+  ok   日志：全局异常入口输出可解析单行 JSON（捕获 8 行，可解析 8）
+  ok   日志：timestamp/level/phase 字段格式正确
+  ok   日志：platform 字段取自入口注入
+  ok   日志：requestId 服务端生成，不采信客户端 X-Request-Id（防伪造）
+  ok   日志：requestId 为 UUID 或降级格式
+  ok   日志：error 对象含 name/message/stack 且服务端保留堆栈
+  ok   日志：错误信息中的手机号已脱敏
+  ok   日志：错误信息中的 bearer 令牌已脱敏
+  ok   日志：Authorization: Bearer 整串脱敏（不残留真令牌）
+  ok   日志：Cookie 值与裸 access_token= 已脱敏
+  ok   日志：ensureSchema 失败走结构化告警且沿用同一 requestId
+  ok   日志：name/stack getter 抛错时业务仍返回 500（日志降级不破坏响应）
+  ok   日志：cron 清理输出结构化 info 行（cleaned/purged 数值化）
+  ok   日志：cron 字段 retention_days/requestId 齐备
+
+# 阶段 1-3 第二提交点：设备删除/合并原子事务（守卫入事务 + 回滚 + fail-closed）
+  ok   T1 删除成功：无活跃消息（含软删一并删除，deleted=1）
+  ok   T1 删除成功：设备记录与全部消息均无残留
+  ok   T2 删除不存在设备：保持原语义（success=true, deleted=0）
+  ok   T3 存在活跃消息：仍拒绝（400 has messages）
+  ok   T3 拒绝后设备与活跃消息均未受影响（守卫在事务内生效）
+{"timestamp":"2026-11-10T08:00:36.935Z","level":"error","event":"request_error","requestId":"d9989e52-138f-42d0-9781-5eca662d25dc","platform":"test","phase":"request","error":{"name":"AtomicBatchError","message":"atomic batch 已失败（execute）: injected: delete devices failed（已 ROL…","stack":"AtomicBatchError: atomic batch 已失败（execute）: injected: delete devices failed（已 ROLLBACK，确认未提交）\n    at LocalDatabase._runAtomic (file:///D:/OpenClaw/SMSToWeb/platforms/node/db.js:637:31)\n    at file:///D:/OpenClaw/SMSToWeb/platforms/node/db.js:609:37\n    at LocalDatabase._runTask (file:///D:/OpenClaw/SMSToWeb/platforms/node/db.js:577:12)\n    at file:///D:/OpenClaw/SMSToWeb/platforms/node/db.js:569:45"}}
+  ok   T4 删除事务中途失败：走全局错误路径（500，不误报成功）
+  ok   T4 删除事务中途失败：BEGIN 1 次 + ROLLBACK 1 次（真实回滚）
+  ok   T4 删除事务中途失败：整体回滚（设备仍在、软删消息未被删）
+  ok   T5 合并成功：返回 success=true
+  ok   T5 M1 活跃迁移数 = 1（仅无冲突的活跃消息被迁移）
+  ok   T8 M2 唯一索引冲突未迁移的活跃数 = 1（守卫/OR IGNORE 语义保留）
+  ok   T9 合并前源设备含 1 条软删消息（M3 前置条件成立）
+  ok   T5 M4/M5 源消息（软删+冲突）实际清空，源设备记录无残留
+  ok   T5 M6 目标活跃消息数 = 迁移前 + M1（1 + 1）
+  ok   T8 冲突记录未被重复迁移（目标同键消息仍只有 1 条）
+  ok   T6 合并源设备不存在：404 device not found
+  ok   T6 源不存在：事务内守卫拦截，目标消息数不变
+  ok   T7 合并目标设备不存在：404 device not found
+  ok   T7 目标不存在：事务内守卫拦截，源消息与设备原样保留
+{"timestamp":"2026-11-10T08:00:36.989Z","level":"error","event":"request_error","requestId":"a4df5250-1619-4d42-abcb-d239f584754b","platform":"test","phase":"request","error":{"name":"AtomicBatchError","message":"atomic batch 已失败（execute）: injected: migrate failed（已 ROLLBACK，确…","stack":"AtomicBatchError: atomic batch 已失败（execute）: injected: migrate failed（已 ROLLBACK，确认未提交）\n    at LocalDatabase._runAtomic (file:///D:/OpenClaw/SMSToWeb/platforms/node/db.js:637:31)\n    at file:///D:/OpenClaw/SMSToWeb/platforms/node/db.js:609:37\n    at LocalDatabase._runTask (file:///D:/OpenClaw/SMSToWeb/platforms/node/db.js:577:12)\n    at file:///D:/OpenClaw/SMSToWeb/platforms/node/db.js:569:45"}}
+  ok   T10 迁移阶段失败：500（走全局错误路径）
+  ok   T10 迁移阶段失败：执行了真实 ROLLBACK
+  ok   T10 迁移阶段失败：源消息/源设备/目标计数全部回滚原样
+{"timestamp":"2026-11-10T08:00:36.989Z","level":"error","event":"request_error","requestId":"824702f3-19c8-40f2-ac00-3fc4b89eb335","platform":"test","phase":"request","error":{"name":"AtomicBatchError","message":"atomic batch 已失败（execute）: injected: delete source device failed…","stack":"AtomicBatchError: atomic batch 已失败（execute）: injected: delete source device failed（已 ROLLBACK，确认未提交）\n    at LocalDatabase._runAtomic (file:///D:/OpenClaw/SMSToWeb/platforms/node/db.js:637:31)\n    at file:///D:/OpenClaw/SMSToWeb/platforms/node/db.js:609:37\n    at LocalDatabase._runTask (file:///D:/OpenClaw/SMSToWeb/platforms/node/db.js:577:12)\n    at file:///D:/OpenClaw/SMSToWeb/platforms/node/db.js:569:45"}}
+  ok   T10 收尾阶段失败：500（不误报成功）
+  ok   T10 收尾阶段失败：已迁移与已清理效果整体回滚（源消息/设备/目标均原样）
+{"timestamp":"2026-11-10T08:00:37.088Z","level":"error","event":"request_error","requestId":"6969d0ab-b178-477c-9853-231e3f345e9f","platform":"test","phase":"request","error":{"name":"AtomicBatchError","message":"atomic batch 状态未知（rollback）: injected: delete devices failed；ROL…","stack":"AtomicBatchError: atomic batch 状态未知（rollback）: injected: delete devices failed；ROLLBACK 失败: injected: rollback failed（事务结果未知；本地 SQLite 连接无法证明已安全重建，已进入不可用状态，后续任务 fail-fast，需进程重启恢复；原因: 缓存语句无 close()，关联语句无法 finalize（26 条，Node v22.22.2））\n    at LocalDatabase._runAtomic (file:///D:/OpenClaw/SMSToWeb/platforms/node/db.js:640:13)\n    at file:///D:/OpenClaw/SMSToWeb/platforms/node/db.js:609:37\n    at LocalDatabase._runTask (file:///D:/OpenClaw/SMSToWeb/platforms/node/db.js:577:12)\n    at file:///D:/OpenClaw/SMSToWeb/platforms/node/db.js:569:45"}}
+  ok   T12 ROLLBACK 失败：UNKNOWN 走全局错误路径（500，不报成功）
+  ok   T11 UNKNOWN：batchAtomic 仅调用 1 次、BEGIN 仅 1 次（不自动重试原事务）
+  ok   T12 v24.19.0 无 StatementSync.close()：连接重建 fail-closed（_connState=failed）
+{"timestamp":"2026-11-10T08:00:37.089Z","level":"error","event":"request_error","requestId":"7d2d3fca-ead0-4f56-9434-ef23964550d7","platform":"test","phase":"request","error":{"name":"AtomicBatchError","message":"atomic batch 已失败（conn）: 本地 SQLite 连接不可用（缓存语句无 close()，关联语句无法 fin…","stack":"AtomicBatchError: atomic batch 已失败（conn）: 本地 SQLite 连接不可用（缓存语句无 close()，关联语句无法 finalize（26 条，Node v22.22.2））；需进程重启恢复\n    at LocalDatabase._enqueue (file:///D:/OpenClaw/SMSToWeb/platforms/node/db.js:568:61)\n    at LocalDatabase.batchAtomic (file:///D:/OpenClaw/SMSToWeb/platforms/node/db.js:609:17)\n    at atomicBatch (file:///D:/OpenClaw/SMSToWeb/platforms/node/app.js:7855:23)\n    at handleDeleteDevice (file:///D:/OpenClaw/SMSToWeb/platforms/node/app.js:1848:19)\n    at fetchApp (file:///D:/OpenClaw/SMSToWeb/platforms/node/app.js:8998:22)\n    at async call (file:///D:/OpenClaw/SMSToWeb/tests/run.mjs:196:13)\n    at async main (file:///D:/OpenClaw/SMSToWeb/tests/run.mjs:3624:22)"}}
+  ok   T12 fail-closed 后：后续请求立即失败（fail-fast，不重试、不误报）
+  ok   T13a 写入顺序：BEGIN → 存在性 → 消息删除 → 设备删除 → COMMIT（无跨事务窗口）
+  ok   T13a 守卫条件直接内嵌在事务语句中（非事务外预检）
+  ok   T13b 并发删除（有活跃消息）：8 次全部 400（守卫在事务内逐次生效）
+  ok   T13b 并发后：设备仍在、活跃消息未丢
+  ok   T13c 并发删除（仅软删）：总删除数恰为 1、设备最终不存在（无重复/无残留）
+
+# 多目标通知并行分发与失败隔离（本批新增）
+{"timestamp":"2026-11-10T08:00:37.368Z","level":"error","event":"notify_forward_failed","requestId":"-","platform":"test","phase":"notify","message":"HTTP 500"}
+  ok   多目标含 1 个失败目标：/api/receive 仍 200 且消息正常入库
+  ok   3 个目标各出站 1 次（失败目标未阻断其余目标）
+  ok   3 个目标并发发起（首个与末个出站间隔 0ms < 60ms；串行实现应 ≥ 240ms）
+
+# R1-05 后台通知异常路径（bgRun / waitUntil 兜底）
+  ok   R1-05-00 从被测源码提取真实 bgRun 与结构化日志函数（非复制桩）
+  ok   R1-05-01a waitUntil 收到 1 个后台 Promise，bgRun 不返回原 p
+  ok   R1-05-01 后台任务正常完成：waitUntil 的 Promise 正常 resolve
+  ok   R1-05-01b 正常完成不产生 background_task_failed 日志
+  ok   R1-05-02 后台任务同步抛错被兜底，waitUntil Promise 仍 resolve
+  ok   R1-05-02b 同步抛错记录 1 条可定位的 background_task_failed
+  ok   R1-05-03 后台 Promise 异步 rejection 被兜底，waitUntil Promise 仍 resolve
+  ok   R1-05-03b 异步 rejection 被记录且错误信息可定位
+  ok   R1-05-07 日志输出失败时 bgRun 的 catch 不产生二次 rejection
+  ok   R1-05-07b 日志记录失败不产生未处理 Promise rejection
+  ok   R1-05-08 同一后台任务异常只记录 1 次（不重复、不吞掉）
+  ok   R1-05-09a 异常记录为结构化单行 JSON，event/level 正确
+  ok   R1-05-09 日志不泄露 Token / 手机号 / 密钥明文
+  ok   R1-05-09c 敏感值被脱敏为 *** / ****
+  ok   R1-05-10 内联路径返回原 Promise 对象，未被包装或吞掉
+  ok   R1-05-10b 内联路径正常返回值不变
+  ok   R1-05-10c 内联路径异常仍向上传播（既有异常语义不变）
+  ok   R1-05-10d 内联路径不产生 background_task_failed 日志
+  ok   R1-05-04 后台单目标失败：/api/receive 仍 200 且消息正常入库
+  ok   R1-05-04b 3 个目标各出站 1 次，失败目标未阻断其余目标
+  ok   R1-05-04c waitUntil 后台 Promise 正常 resolve（无未处理 rejection）
+  ok   R1-05-04d 单目标失败由内层降级，不误报为后台任务失败
+  ok   R1-05-05 多目标全部失败：消息仍入库、主响应仍 200
+  ok   R1-05-05b 3 个目标均真实出站（全失败不是跳过）
+  ok   R1-05-05c 全部失败时 waitUntil Promise 仍 resolve（异常被逐层降级）
+  ok   R1-05-05d 每个失败目标都有可定位的 notify_forward_failed 日志
+  ok   R1-05-05e 全部失败不冒泡成未捕获的后台任务异常
+  ok   R1-05-06 通知请求携带真实超时信号（AbortSignal.timeout）
+  ok   R1-05-06b 超时信号在缩放到 40ms 后真实触发 abort
+  ok   R1-05-06c 渠道超时不拖垮 /api/receive，消息仍入库
+  ok   R1-05-06d 超时被逐层降级，waitUntil Promise 仍 resolve
+  ok   R1-05-06e 超时错误被记录为可定位的 notify_forward_failed
+  ok   R1-05-09d 后台任务抛错不影响 /api/receive 响应与消息入库
+  ok   R1-05-09e 真实入口的后台异常被兜底，waitUntil Promise resolve
+  ok   R1-05-09f 真实入口日志同样不泄露 Token / 手机号 / 密钥
+  ok   R1-05-11 全组无未处理 Promise rejection
+
+===== 结果：850 通过，0 失败 =====

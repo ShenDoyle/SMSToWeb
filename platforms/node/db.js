@@ -533,9 +533,38 @@ export class LocalDatabase {
     }
   }
 
+  /* M-1 / R3-01：显式关闭入口。必须在后台任务全部收敛后由 server.mjs 调用。
+     置 _closed=true 让下面 _enqueue 的 fail-fast 真正生效：关闭后若仍有后台任务
+     尝试访问 DB（dispatchNotify → loadNotifyRows），会拿到明确的 AtomicBatchError，
+     并留下 db_access_after_close 日志，而不是在已关闭连接上抛原生错误后被
+     loadNotifyRows 的 catch → return null 静默降级成「配置回退到环境变量」。 */
+  close() {
+    if (this._closed) return false;
+    this._closed = true;
+    const conn = this.sqlite;
+    this.sqlite = null;
+    try {
+      /* 先显式 finalize 缓存语句，避免 sqlite3_close_v2 留下 zombie 连接 */
+      for (const s of this.stmts.values()) {
+        try { if (s && typeof s.close === "function") s.close(); } catch (_) {}
+      }
+      this.stmts.clear();
+      if (conn) conn.close();
+      return true;
+    } catch (e) {
+      this._connState = "failed";
+      this._rebuildError = "close() 失败: " + String((e && e.message) || e);
+      try { console.error(JSON.stringify({ ts: new Date().toISOString(), level: "error", event: "db_close_failed", message: this._rebuildError })); } catch (_) {}
+      return false;
+    }
+  }
+
   /* 队列入口：所有运行期 SQL 的唯一调度点（FIFO；连接不可用时立即 reject） */
   _enqueue(task) {
-    if (this._closed) return Promise.reject(new AtomicBatchError("FAILED", "conn", "数据库已关闭"));
+    if (this._closed) {
+      try { console.error(JSON.stringify({ ts: new Date().toISOString(), level: "error", event: "db_access_after_close", note: "后台任务在数据库关闭后仍尝试访问" })); } catch (_) {}
+      return Promise.reject(new AtomicBatchError("FAILED", "conn", "数据库已关闭"));
+    }
     if (this._connState === "failed") return Promise.reject(new AtomicBatchError("FAILED", "conn", "本地 SQLite 连接不可用（" + (this._rebuildError || this._initError || "连接重建失败") + "）；需进程重启恢复"));
     const run = this._queue.then(() => this._runTask(task));
     /* 链尾接住 rejection：单个任务失败不得污染后续任务的调度链 */

@@ -1,0 +1,27 @@
+# SMSToWeb · Docker Compose example (TEMPLATE — copy to your own deploy dir)
+# stop_grace_period: 90s is REQUIRED. Docker's 10s default would SIGKILL the
+# process before the 80s application drain finishes.
+# Docs: docs/guide/07-停止宽限与部署配置.md
+services:
+  smstoweb:
+    build: ../platforms/node          # or: image: smstoweb
+    container_name: smstoweb
+    restart: unless-stopped
+    stop_grace_period: 90s            # <-- REQUIRED
+    ports:
+      - "8787:8787"
+    environment:
+      RECEIVE_TOKEN: ${RECEIVE_TOKEN:?set RECEIVE_TOKEN in your .env}
+      ENABLE_AUTH: "true"
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD in your .env}
+      SESSION_SECRET: ${SESSION_SECRET:?set SESSION_SECRET in your .env}
+      SQLITE_PATH: /data/data.db
+      # SHUTDOWN_GRACE_MS: "90000"   # optional; app default is 80000, ceiling 120000
+      # Turso mode instead: replace SQLITE_PATH with the two TURSO_* vars
+    volumes:
+      - sms-data:/data
+volumes:
+  sms-data:
+# Apply:  docker compose up -d --build
+# Verify: docker compose config | grep stop_grace_period
+# Stop:   docker compose down     (uses stop_grace_period above)

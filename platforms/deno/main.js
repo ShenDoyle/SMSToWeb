@@ -17,6 +17,7 @@ let cachedDbKey = "";
 /* ==== ENV_KEYS BEGIN（由 platforms/gen_app.py 同步，勿手工修改）==== */
 const ENV_KEYS = [
   "RECEIVE_TOKEN",
+  "DISABLE_RECEIVE_TOKEN",
   "ENABLE_AUTH",
   "ADMIN_PASSWORD",
   "SESSION_SECRET",
@@ -87,7 +88,12 @@ Deno.serve(async function (request) {
   if (url.pathname.replace(/\/+$/, "") === "/api/cron") {
     return handleCronRequest(request, env);
   }
-  return fetchApp(request, env);
+  /* Deno Deploy 若提供 EdgeRuntime.waitUntil（后台任务可延续到响应之后），则透传给核心应用；
+     本地 Deno / 平台未提供时保持 undefined，核心应用回退内联 await，行为不变 */
+  const ctx = (typeof EdgeRuntime !== "undefined" && EdgeRuntime && typeof EdgeRuntime.waitUntil === "function")
+    ? { waitUntil: function (p) { return EdgeRuntime.waitUntil(p); } }
+    : undefined;
+  return fetchApp(request, env, ctx);
 });
 
 /* 每天 UTC 17:00（北京 01:00）清理过期数据（与 Worker 版 cron 一致） */

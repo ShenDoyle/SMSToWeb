@@ -1,0 +1,30 @@
+# SMSToWeb · systemd unit example (TEMPLATE — copy to /etc/systemd/system/)
+# TimeoutStopSec=90s is REQUIRED when running `node server.mjs` directly.
+# Docs: docs/guide/07-停止宽限与部署配置.md
+[Unit]
+Description=SMSToWeb SMS & notification gateway
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/smstoweb
+ExecStart=/usr/bin/node /opt/smstoweb/server.mjs
+Environment=RECEIVE_TOKEN=REPLACE_WITH_A_LONG_RANDOM_STRING
+Environment=ENABLE_AUTH=true
+Environment=ADMIN_PASSWORD=REPLACE_WITH_ADMIN_PASSWORD
+Environment=SESSION_SECRET=REPLACE_WITH_A_DIFFERENT_RANDOM_STRING
+Environment=SQLITE_PATH=/opt/smstoweb/data/data.db
+# Environment=SHUTDOWN_GRACE_MS=90000
+Restart=on-failure
+TimeoutStopSec=90s                 # <-- REQUIRED
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target
+
+# Apply:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now smstoweb
+#   systemctl show smstoweb -p TimeoutStopUSec    # expect 1min 30s
+# NOTE: for production, prefer an EnvironmentFile= with root-only permissions
+# instead of putting secrets inline in the unit file.

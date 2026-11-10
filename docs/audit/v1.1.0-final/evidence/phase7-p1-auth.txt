@@ -1,0 +1,27 @@
+== A. 六平台 ENV_KEYS 白名单与 buildEnv 透传 ==
+  ok   ENV_KEYS 含 DISABLE_RECEIVE_TOKEN [platforms/vercel/api/[[...route]].js]
+  ok   buildEnv 按 ENV_KEYS 循环透传 [platforms/vercel/api/[[...route]].js]
+  ok   ENV_KEYS 含 DISABLE_RECEIVE_TOKEN [platforms/netlify/functions/api.mjs]
+  ok   buildEnv 按 ENV_KEYS 循环透传 [platforms/netlify/functions/api.mjs]
+  ok   ENV_KEYS 含 DISABLE_RECEIVE_TOKEN [platforms/netlify/functions/cron.mjs]
+  ok   buildEnv 按 ENV_KEYS 循环透传 [platforms/netlify/functions/cron.mjs]
+  ok   ENV_KEYS 含 DISABLE_RECEIVE_TOKEN [platforms/deno/main.js]
+  ok   buildEnv 按 ENV_KEYS 循环透传 [platforms/deno/main.js]
+  ok   ENV_KEYS 含 DISABLE_RECEIVE_TOKEN [platforms/edgeone/functions/index.js]
+  ok   buildEnv 按 ENV_KEYS 循环透传 [platforms/edgeone/functions/index.js]
+  ok   ENV_KEYS 含 DISABLE_RECEIVE_TOKEN [platforms/node/server.mjs]
+  ok   buildEnv 按 ENV_KEYS 循环透传 [platforms/node/server.mjs]
+  ok   六入口 ENV_KEYS 块完全一致
+  ok   ENV_KEYS 现含 33 项 (32 + DISABLE_RECEIVE_TOKEN)
+== B/C. 核心 verifyInboundToken 行为矩阵 ==
+  ok   未设置 + RECEIVE_TOKEN 正确 → 放行(兜底生效)
+  ok   未设置 + RECEIVE_TOKEN 错误 → 拒绝
+  ok   DISABLE=true + RECEIVE_TOKEN 正确 → 拒绝(兜底停用)
+  ok   DISABLE=true + 无 RECEIVE_TOKEN → 拒绝
+  ok   DISABLE=false + RECEIVE_TOKEN 正确 → 放行
+  ok   DISABLE=TRUE(大写) + RECEIVE_TOKEN 正确 → 拒绝
+  ok   DISABLE=yes(非 true) + RECEIVE_TOKEN 正确 → 放行
+  ok   未提供 token → 拒绝
+  ok   库内令牌命中 + DISABLE=true → 仍放行(优先级)
+
+===== P1-1 鉴权测试：pass=23 fail=0 =====

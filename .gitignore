@@ -5,3 +5,8 @@ __pycache__/
 *.pyc
 *.log
 .workbuddy/
+
+# 本地运行/基准/备份/安全实验产物（含本地 SQLite 库与浏览器 profile 缓存）。
+# 该目录从未被 Git 跟踪（git ls-files runtime/ 为空），且内含个人账户标识等
+# 不应入库的数据；使用根目录限定规则，避免影响其他位置的同名目录。
+/runtime/

@@ -55,6 +55,7 @@ ENTRY_FILES = [
 # 由各入口 buildEnv 的数据库分支单独处理。
 ENV_KEYS = [
     "RECEIVE_TOKEN",
+    "DISABLE_RECEIVE_TOKEN",
     "ENABLE_AUTH",
     "ADMIN_PASSWORD",
     "SESSION_SECRET",
@@ -143,6 +144,7 @@ export {
   touchLastUsed,
   atomicBatch,
   AtomicBatchError,
+  verifyInboundToken,
 }
 """
 

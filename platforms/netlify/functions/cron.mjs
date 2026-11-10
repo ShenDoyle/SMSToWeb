@@ -14,6 +14,7 @@ let cachedDbKey = "";
 /* ==== ENV_KEYS BEGIN（由 platforms/gen_app.py 同步，勿手工修改）==== */
 const ENV_KEYS = [
   "RECEIVE_TOKEN",
+  "DISABLE_RECEIVE_TOKEN",
   "ENABLE_AUTH",
   "ADMIN_PASSWORD",
   "SESSION_SECRET",

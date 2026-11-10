@@ -17,6 +17,7 @@ let cachedDbKey = "";
 /* ==== ENV_KEYS BEGIN（由 platforms/gen_app.py 同步，勿手工修改）==== */
 const ENV_KEYS = [
   "RECEIVE_TOKEN",
+  "DISABLE_RECEIVE_TOKEN",
   "ENABLE_AUTH",
   "ADMIN_PASSWORD",
   "SESSION_SECRET",
@@ -82,10 +83,11 @@ function configError(e) {
   });
 }
 
-export async function onRequest({ request, env }) {
+export async function onRequest(context) {
+  const request = context.request;
   let e;
   try {
-    e = buildEnv(env);
+    e = buildEnv(context.env);
   } catch (err) {
     return configError(err);
   }
@@ -93,5 +95,10 @@ export async function onRequest({ request, env }) {
   if (url.pathname.replace(/\/+$/, "") === "/api/cron") {
     return handleCronRequest(request, e);
   }
-  return fetchApp(request, e);
+  /* EdgeOne Functions 的 EventContext 提供 waitUntil（官方文档：可延长事件处理生命周期）：
+     透传给核心应用后，通知转发等后台任务在响应返回后继续执行；平台未提供时回退内联 await */
+  const ctx = typeof context.waitUntil === "function"
+    ? { waitUntil: function (p) { return context.waitUntil(p); } }
+    : undefined;
+  return fetchApp(request, e, ctx);
 }

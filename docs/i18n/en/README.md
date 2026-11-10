@@ -1,5 +1,10 @@
 # SMSToWeb — SMS & Notification Cloud Gateway
 
+> **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = **850 passing assertions** (plus the separate M-1 suite `tests/m1-lifecycle.mjs` = 32); `ENV_KEYS` = **33** variables; **all six platform entries pass a `waitUntil`-style `ctx`** (inline `await` is only a *runtime-capability* fallback, not an entry-point behaviour); Node shutdown grace = **80s** and the container/service stop grace must be **>= 90s** (Docker default 10s SIGKILLs first); `gen_app.py --check` verifies **only** the embedded `SCHEMA_SQL` block and SQL references, **not** platform-copy drift. Any statement in this mirror about "667/814/573 assertions", "31 variables", "other platforms finish notifications before the response", "8-second forced exit", "the deploy button creates the tables", or "one-click and you are live" is **outdated**. Read the [English primary](../../../README.md), [ARCHITECTURE](../../ARCHITECTURE.md), or the [Chinese user guide](../../guide/README.md) instead.
+>
+> **同步提示（2026-11-09）**：本镜像属滞后翻译，上述事实以英文主版与中文主文档为准；本文件内关于测试数量、环境变量数量、「其他平台响应前发完通知」、8 秒强制退出、按钮自动建表等旧表述均已过时，请勿据此部署或验收。源码版本现为 `v1.1.0`（RC2 候选），目标 `v1.1.0` 尚未正式发布。
+
+
 **English** | [简体中文](../zh-CN/README.md) | [繁體中文](../zh-TW/README.md) | [日本語](../ja/README.md) | [한국어](../ko/README.md) | [Español](../es/README.md) | [Français](../fr/README.md) | [Deutsch](../de/README.md) | [Português (BR)](../pt-BR/README.md)
 
 > Synced from the English primary where applicable
@@ -34,7 +39,7 @@ Push SMS and notifications from an Android phone (and any other device) to the c
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ShenDoyle/SMSToWeb/tree/main/platforms/cloudflare)
 
-The button creates the database and tables, binds resources and sets up CI automatically; fill in `RECEIVE_TOKEN` (push auth secret) when prompted and you are live. One-click buttons for Vercel / Netlify are in their platform guides.
+What the button actually does: clones the public repository into your own GitHub/GitLab account, creates and binds the **D1 database** and other Cloudflare-native resources declared in `wrangler.toml`, and sets up build/CI. It does **not** run SQL migrations (the application's `ensureSchema` creates tables on the first request), does **not** create a Turso database and does **not** fill in your secrets — you still type `RECEIVE_TOKEN` (and `ADMIN_PASSWORD` / `SESSION_SECRET` if login is enabled). Honest summary: **one click to create the app + a few fields to fill in**. The button deploys the public `main` branch, which may lag behind this checkout (`v1.1.0` RC2 candidate; formal release `v1.1.0` not published). See the [verified deployment capability matrix](../../guide/10-部署能力矩阵.md).
 
 | Platform | Deployment | Scheduled cleanup | Guide |
 |---|---|---|---|
@@ -62,7 +67,7 @@ Business code is byte-identical across the six platforms, but **timeouts / backg
 | Node / Docker | your choice | completed inline before response | needs external trigger | local SQLite needs Node ≥ 22.13 |
 
 > - **Long polling**: the frontend retries failures with **exponential backoff** (2→30s) and re-polls immediately when the page becomes visible; platform-killed requests never flood the function.
-> - **Notification forwarding**: Cloudflare uses `waitUntil`; other platforms finish sending notifications before the response (10s timeout per channel), so many slow channels add a little latency.
+> - **Notification forwarding**: **all six platform entries pass a `ctx`-style object**; the difference is whether the runtime provides `waitUntil`. `bgRun` uses it when present (forwarding continues after the response) and degrades to an inline `await` only when the runtime lacks it (then the response waits). Older revisions claiming the other platforms always finish before the response are wrong; see [ARCHITECTURE §4](../../ARCHITECTURE.md). Per-channel fetch timeout is 10s.
 > - **Scheduled cleanup**: on platforms without cron, point any scheduler at `GET /api/cron?token=<RECEIVE_TOKEN>`.
 
 ---
@@ -115,11 +120,11 @@ Cloudflare additionally needs the `DB` (D1 binding); other platforms need `TURSO
 ## Development
 
 - `src/worker.js`: core source (Cloudflare Worker shape)
-- `platforms/gen_app.py`: generates the platform-neutral `app.js` from `src/worker.js` into the five ported platforms and syncs the Cloudflare copy `worker.js` (keeping business code byte-identical across six platforms); also syncs the 31-variable environment whitelist (ENV_KEYS, including auth entries) into the six platform entries to prevent drift (node's db.js is a Turso + local SQLite dual adapter, maintained separately and not synced)
+- `platforms/gen_app.py`: generates the platform-neutral `app.js` from `src/worker.js` into the five ported platforms and syncs the Cloudflare copy `worker.js` (keeping business code byte-identical across six platforms); also syncs the **33-variable** environment whitelist (`ENV_KEYS`, including auth entries) into the six platform entries to prevent drift (node's db.js is a Turso + local SQLite dual adapter, maintained separately and not synced)
 - `platforms/*/`: self-contained deployment directories (entry + app.js + db.js adapter + schema.sql + platform guide)
 - `docs/i18n/en/`: English documentation set (deployment/API/architecture/database); other languages under `docs/i18n/<lang>/` — see [docs/i18n/README.md](../README.md)
-- `tests/run.mjs`: zero-dependency test suite (needs Node 22.13+): `node tests/run.mjs`
-- After changing core code: run `python platforms/gen_app.py` to re-sync all platforms, then `node tests/run.mjs`; CI verifies zero sync drift + syntax + tests
+- `tests/run.mjs`: zero-dependency test suite (needs Node 22.13+, **850 assertions**, all passing): `node tests/run.mjs`. The M-1 lifecycle suite `tests/m1-lifecycle.mjs` (**32 assertions**) runs separately.
+- After changing core code: run `python platforms/gen_app.py` (**write mode**) to re-sync all platforms, then `python platforms/gen_app.py --check`, `node tests/run.mjs`, `node --check` and a **byte comparison** of the generated copies. `--check` is read-only but **narrow**: it verifies only the embedded `SCHEMA_SQL` block and SQL references — it does **not** compare the six platform `app.js`/`worker.js` copies and cannot detect drift from editing `src/worker.js`.
 
 ## License
 

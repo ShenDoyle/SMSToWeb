@@ -41,7 +41,11 @@ SMSToWeb 通过一个统一的数据库适配层（`prepare/bind/first/all/run` 
 | `starred` | INTEGER | 星标 0/1 |
 | `read_at` | TEXT NULL | 已读时间戳 |
 
-索引：`idx_messages_device_time(device_id, received_at DESC)`、`idx_messages_time(received_at)`、`idx_messages_source(source, received_at DESC)`，以及**去重唯一索引** `idx_messages_dedup(device_id, sender, content, received_at)`——重复推送由数据库层兜底拒绝，代码捕获唯一冲突后返回 `duplicated:true`。
+索引：`idx_messages_device_time(device_id, received_at DESC)`、`idx_messages_time(received_at)`、`idx_messages_source(source, received_at DESC)`、`idx_messages_star_time(starred DESC, received_at DESC, id DESC)`（列表主排序）、`idx_messages_dev_active_time(device_id, deleted_at, received_at)`（设备列表计数/最近时间覆盖索引），以及**去重唯一索引** `idx_messages_dedup(device_id, sender, content, received_at)`——重复推送由数据库层兜底拒绝，代码捕获唯一冲突后返回 `duplicated:true`。
+
+> 两个新增索引由 `ensureSchema` 以 `CREATE INDEX IF NOT EXISTS` 幂等创建，不改表结构、不迁移数据。5 万条本地基准实测接口 p50（权威数据见 `docs/audit/02-性能基线报告.md` 与 `runtime/bench/result-50000.json`）：列表首屏 112.54ms → **16.33ms**、设备列表 103.95ms → **12.76ms**、深翻页 135.69ms → **31.47ms**。列表索引刻意不用 `WHERE deleted_at IS NULL` 部分索引：统计接口聚合 `read_at` 时会退化为索引 + 随机回表（A/B 实测 39ms → 62ms，故否决）。
+>
+> 代价：写入 `receive` 1.17ms → 1.85ms（**+0.68ms**），库体积 22.3MB → 26.9MB（约 +20%）。曾在 WAL 检查点期间观测到单次 6ms 级写入，复测回落到 1.6–1.9ms，属离群值而非稳定态；此前本段写的「约 1.2ms → 6ms」即源自该离群值，现已按最终基准统一。
 
 ### settings — 键值设置表（2 列）
 

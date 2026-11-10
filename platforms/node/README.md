@@ -2,14 +2,40 @@
 
 把 SMSToWeb 以 Docker 容器方式自托管。进程常驻、无函数时长限制，长轮询实时性最佳，适合有现成服务器或想部署到 Fly.io / Railway 的用户（免费额度情况见下文「平台说明」）。
 
-**本目录文件**：`server.mjs`（Node 18+ 零依赖入口，含内置每日清理）、`app.js`（核心应用）、`db.js`（Turso / 本地 SQLite 双模式适配层）、`schema.sql`（建表）、`Dockerfile`、`package.json`。
+**本目录文件**：`server.mjs`（零依赖入口，含内置每日清理）、`lifecycle.mjs`（**Node 专属**：后台任务登记 + 停机编排，M-1）、`app.js`（核心应用）、`db.js`（Turso / 本地 SQLite 双模式适配层）、`schema.sql`（建表）、`Dockerfile`、`package.json`。
+
+> 运行环境：`Dockerfile` 基于 `node:22-alpine`；直接 `node server.mjs` 时，Turso 模式需 Node 18+，**本地 SQLite 模式需 Node 22.13+**（内置 `node:sqlite`）。
+
+---
+
+## 第零步（必做）：把「停止宽限」设为 90 秒
+
+**先做这一步，再开始部署。** Docker 默认只给容器 **10 秒** 就强制杀掉进程，而本应用最多需要 **80 秒** 才能把正在处理的请求和后台通知收尾。不配置会出现「消息已经收到、但通知没发出去」「重启时正在处理的请求被掐断」。
+
+> 这一步**只能由你（部署者）在自己的服务器或平台上设置**，项目代码和 `Dockerfile` 里的说明都**不能**替你设置。请按你实际使用的方式，**只做对应的一种**，不需要四种全做。
+
+| 你的部署方式 | 在哪里设置 | 直接复制的配置 |
+|---|---|---|
+| 用 `docker run` 启动 | 启动命令 | `docker run --stop-timeout=90 ...`（下方方式 C 已含） |
+| 手动停止容器 | 每次停止的命令 | `docker stop --timeout 90 smstoweb` |
+| Docker Compose | `compose.yaml` 对应服务下 | `stop_grace_period: 90s` |
+| systemd 服务 | `.service` 的 `[Service]` 段 | `TimeoutStopSec=90s` |
+| Fly.io / Railway | 平台控制台 | 本仓库**未验证**这两个平台能否把停机宽限设为 90s，请先查阅平台当前文档；不能设置时请理解「后台通知可能在重启时丢失」这一后果 |
+
+可复制的示例模板：[compose.example.yaml](../../docs/deploy-templates/compose.example.yaml) · [smstoweb.service.example](../../docs/deploy-templates/smstoweb.service.example) · [docker-run.example.sh](../../docs/deploy-templates/docker-run.example.sh)。它们是**示例模板**，不是仓库内已生效的生产配置。
+
+**完成标志**：容器启动日志打印 `shutdown_grace=80s`，并且你能在自己的部署方式里确认停止宽限 ≥ 90s。
+
+> **本地验证 ≠ 生产已配置**：本项目在 WSL2 + Docker **本地环境**用真实 `docker stop --timeout 90` 验证过退出码 0、后台通知完成、SQLite 在任务完成后才关闭（证据在仓库外 `M1-fix/`）。这不等于你的生产环境已配置好，生产侧仍须由你执行上表配置。
+
+应用内部时间预算（**无需你设置**）：HTTP 在途 30s + 后台任务 drain 45s + 收尾 5s = **80s**；`SHUTDOWN_GRACE_MS` 可调大到 `120000`，但不能低于 `80000`。
 
 ---
 
 ## 准备工作
 
-- Fly.io 或 Railway 账号（或任意有 Docker 的 VPS）
-- 数据库仍用 Turso（SQLite 兼容），下面第一步统一准备
+- Fly.io / Railway 账号，或任意装了 Docker 的 VPS（**并完成上面的第零步**）
+- 数据库用 Turso（SQLite 兼容），下面第一步统一准备；也可选本地 SQLite（`SQLITE_PATH`），则不需要 Turso
 
 ## 第一步：创建 Turso 数据库
 
@@ -61,7 +87,7 @@ curl "https://<app>.fly.dev/api/push?token=<RECEIVE_TOKEN>" -H "Content-Type: ap
 # 上传本目录到服务器后
 cd platforms/node
 docker build -t smstoweb .
-docker run -d --name smstoweb --restart unless-stopped -p 8787:8787 \
+docker run -d --name smstoweb --restart unless-stopped --stop-timeout=90 -p 8787:8787 \
   -e TURSO_DATABASE_URL=libsql://sms-gateway-xxxx.turso.io \
   -e TURSO_AUTH_TOKEN=<你的令牌> \
   -e RECEIVE_TOKEN=<你的密钥> \
@@ -70,7 +96,7 @@ docker run -d --name smstoweb --restart unless-stopped -p 8787:8787 \
 curl "http://127.0.0.1:8787/api/push?token=<RECEIVE_TOKEN>" -H "Content-Type: application/json" -d "{\"content\":\"VPS 部署成功\"}"
 ```
 
-建议用 Caddy/Nginx 反代加 HTTPS。不用 Docker 也可以直接 `node server.mjs`（需 Node 18+，零 npm 依赖；本地 SQLite 模式需 Node 22.13+）。
+建议用 Caddy/Nginx 反代加 HTTPS。不用 Docker 也可以直接 `node server.mjs`（Turso 模式 Node 18+；本地 SQLite 模式 Node 22.13+；零 npm 依赖）。直接运行时没有「容器宽限」这一层，但**进程管理器**（systemd / supervisor）仍必须给 ≥90s 停止宽限，否则同样会被提前杀掉。
 
 ## 环境变量（三种方式通用）
 
@@ -85,6 +111,7 @@ curl "http://127.0.0.1:8787/api/push?token=<RECEIVE_TOKEN>" -H "Content-Type: ap
 | `SESSION_SECRET` | 高熵随机值（≥32 位随机字符串） | 仅 `ENABLE_AUTH="true"` 时需要；与密码独立；缺失时登录/鉴权安全失败，轮换后旧会话全部失效 |
 | `RETENTION_DAYS` | `30` | 数据保留天数；可在管理页「业务设置」修改（数据库优先，本变量为兼容兜底） |
 | `PORT` | 默认 `8787` | 一般无需设置（Railway 自动注入） |
+| `SHUTDOWN_GRACE_MS` | 默认 `80000` | **应用内部**停机总宽限（毫秒）。可设 `90000`~`120000`；低于 `80000` 会被忽略。它**不能替代**容器/进程管理器的停止宽限，后者仍须按第零步设为 ≥90s |
 | `FEISHU_WEBHOOK`（可选 `FEISHU_SECRET`） | （可选）飞书群机器人 Webhook | **推荐在管理页「设置 → 通知设置」配置（数据库优先）**；以下通知变量均为旧版兼容兜底。机器人安全设置选「签名校验」时另配 `FEISHU_SECRET` |
 | `WECOM_WEBHOOK` | （可选）企业微信群机器人 Webhook | 配置后新消息自动转发企微群 |
 | `DINGTALK_WEBHOOK` | （可选）钉钉群机器人 Webhook | 加签安全设置需另配 `DINGTALK_SECRET` |

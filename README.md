@@ -4,9 +4,11 @@
 
 > English is the primary maintained version of this document. Translations live under [`docs/i18n/<lang>/`](docs/i18n/README.md) and may lag behind; when in doubt, refer to this file.
 
+**New here / 第一次使用？** → [Quick start (English)](docs/i18n/en/QUICKSTART.md) · [完整中文用户指南](docs/guide/README.md) · [常见问题](docs/guide/05-常见问题.md). You do **not** need to read the source code, the API reference, or this whole page to get started: the guide tells you which button to click, what to fill in, and how to confirm it worked.
+
 Push SMS and notifications from an Android phone (and any other device) to the cloud in real time, and read them from a web page anywhere. Free to deploy, no server required, about 10 minutes end to end.
 
-**Current version: `v1.0.4`** — official releases carry a fixed version number (shown in the page footer); interim builds bump the patch version.
+**Current version: `v1.1.0`** — official releases carry a fixed version number (shown in the page footer); interim builds bump the patch version.
 
 - **Multi-platform deployment**: Cloudflare (primary) / Vercel / Deno Deploy / Netlify / Tencent EdgeOne Makers / Docker self-hosted — pick one of six, features fully identical
 - **Real-time receiving**: webhook push lands in the database in seconds; the web page refreshes itself, no manual work
@@ -57,11 +59,15 @@ Push SMS and notifications from an Android phone (and any other device) to the c
                                                 browser ◀── web admin (embedded in gateway)
 ```
 
-**One-click deploy (Cloudflare primary, ~2 min)**:
+**Deploy to Cloudflare (recommended for beginners):**
 
 [![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/ShenDoyle/SMSToWeb/tree/main/platforms/cloudflare)
 
-The button creates the database and tables, binds resources and sets up CI automatically; fill in `RECEIVE_TOKEN` (push auth secret) when prompted and you are live. One-click buttons for Vercel / Netlify are in their platform guides.
+What this button **actually** does (Cloudflare "Deploy to Cloudflare" flow): clones the public repository into **your own** GitHub/GitLab account, creates and binds the **D1 database** (and other Cloudflare-native resources declared in `wrangler.toml`), and sets up a build/CI so later pushes redeploy. It does **not** run SQL migrations, does **not** create a Turso database, and does **not** fill in your secrets — you still type `RECEIVE_TOKEN` (and `ADMIN_PASSWORD` / `SESSION_SECRET` if you enable login) on the setup page. Creating the tables is handled by the application itself: `ensureSchema` runs on the first request and creates missing tables / columns / indexes automatically (see [UPGRADE](docs/UPGRADE.md)). Honest summary: **one click to create the app + a few fields to fill in**, not "one click and you are live". For the exact click-by-click path see [Cloudflare 部署指南](docs/guide/03-平台部署/01-Cloudflare.md).
+
+> **Version caveat (important):** this button deploys the **`main` branch of the public GitHub repository**, which can lag behind this local working tree. The source version in this checkout is `v1.1.0` (RC2 release candidate) — the v1.0.4-era fixes are now part of it; the release `v1.1.0` has **not** yet been formally published (RC2 is a release-candidate review, not the final release). Do not assume the button deploys the fixes described here.
+
+> **Buttons on other platforms:** Cloudflare / Vercel / Netlify already have buttons in their platform guides; Deno Deploy and EdgeOne have official buttons too, but this project has **not** validated them and does not ship them; Node/Docker self-hosting has **no** one-click deploy at all. See the [verified deployment capability matrix](docs/guide/10-部署能力矩阵.md).
 
 | Platform | Deployment | Scheduled cleanup | Guide |
 |---|---|---|---|
@@ -79,18 +85,19 @@ The button creates the database and tables, binds resources and sets up CI autom
 
 Business code is byte-identical across the six platforms, but **timeouts / background tasks / timers** differ at runtime. Adapt via environment variables when needed:
 
-| Platform | Function timeout | Background notify | Scheduled cleanup | Suggestion |
+| Platform | Function timeout | How notification forwarding is scheduled | Scheduled cleanup | Suggestion |
 |---|---|---|---|---|
-| Cloudflare | no wall-clock limit (CPU-limited) | `ctx.waitUntil` continues after response | platform cron | defaults work |
-| Vercel Edge | ~25s cap per request | completed inline before response | platform cron | `WAIT_MAX_SECONDS=20` |
-| Netlify Functions | 60s (all plans) | completed inline before response | scheduled function | entry defaults to `WAIT_MAX_SECONDS=8` |
-| Deno Deploy | plan-dependent | completed inline before response | needs external trigger | external cron calling `/api/cron?token=` |
-| EdgeOne Makers | plan-dependent | completed inline before response | needs external trigger | lower `WAIT_MAX_SECONDS` per plan |
-| Node / Docker | your choice | completed inline before response | needs external trigger | local SQLite needs Node ≥ 22.13 |
+| Cloudflare | no wall-clock limit (CPU-limited) | native `ctx.waitUntil` (30s cap after the response) | platform cron | defaults work |
+| Vercel Edge | plan-dependent | entry probes `context.waitUntil`; if unavailable, falls back to inline `await` | platform cron | entry default `WAIT_MAX_SECONDS=20` |
+| Netlify Functions | plan-dependent | entry probes `context.waitUntil` (only for functions deployed on/after 2025-03-20); otherwise inline `await` | scheduled function | entry default `WAIT_MAX_SECONDS=8` |
+| Deno Deploy | plan-dependent | entry probes `EdgeRuntime.waitUntil`; the official Runtime docs do not document it, so inline `await` is the common path | needs external trigger | external cron calling `/api/cron?token=` |
+| EdgeOne Makers | plan-dependent (CPU 200ms excl. I/O) | `onRequest(context)` passes native `context.waitUntil`; falls back if missing | needs external trigger | entry default `WAIT_MAX_SECONDS=20` |
+| Node / Docker | your choice | project's own `bgCtx.waitUntil`; background tasks are **registered and awaited during shutdown** (M-1) | in-process timer + `/api/cron` | local SQLite needs Node ≥ 22.13; **container stop grace must be ≥ 90s** |
 
-> - **Long polling**: the frontend retries failures with **exponential backoff** (2→30s) and re-polls immediately when the page becomes visible; platform-killed requests never flood the function.
-> - **Notification forwarding**: Cloudflare uses `waitUntil`; other platforms finish sending notifications before the response (10s timeout per channel), so many slow channels add a little latency.
+> - **All six platform entries pass a `ctx`-style object to `fetchApp`.** What differs is whether the *runtime* actually provides `waitUntil`: `bgRun` uses it when present (forwarding continues after the response) and degrades to an inline `await` when absent (the response then waits for forwarding). An older revision of this README claimed the other five platforms "always finish notifications before the response" — that is wrong; see [ARCHITECTURE §4](docs/ARCHITECTURE.md).
+> - **Long polling**: the frontend retries failures with **exponential backoff** (2→30s) and re-polls immediately when the page becomes visible; platform-killed requests never flood the function. The per-channel fetch timeout is 10s. `WAIT_MAX_SECONDS` is clamped to 3–25 by the core and lowered by some entries (Vercel 20 / Netlify 8 / EdgeOne 20) as a default, overridable by env var.
 > - **Scheduled cleanup**: on platforms without cron, point any scheduler at `GET /api/cron?token=<RECEIVE_TOKEN>`.
+> - **Node shutdown (M-1)**: HTTP in-flight budget 30s + background drain 45s + 5s margin = **80s** app grace (`SHUTDOWN_GRACE_MS`; floor 80s, ceiling 120s). SQLite is closed only after background tasks finish or time out. The **container** must allow ≥ 90s or Docker/systemd will SIGKILL the process first — see [停止宽限与部署配置](docs/guide/07-停止宽限与部署配置.md). Verified on local WSL2 Docker, **not** in production.
 
 ---
 
@@ -116,18 +123,21 @@ A `{"success":true,...}` response means it is stored; pushing the exact same pay
 | Variable | Required | Description |
 |---|---|---|
 | `RECEIVE_TOKEN` | yes | push auth secret; pick a long random string. Works as the **fallback** ingest credential: named tokens created in the admin page take priority |
-| `DISABLE_RECEIVE_TOKEN` | no | set `"true"` (case/whitespace-insensitive) to **disable the `RECEIVE_TOKEN` fallback** so only hashed named tokens can push; unset = fallback enabled (migration-friendly default). Does not affect `/api/cron`, which always uses the env var |
+| `DISABLE_RECEIVE_TOKEN` | no | set `"true"` (case/whitespace-insensitive) to **disable the `RECEIVE_TOKEN` fallback** so only hashed named tokens can push; unset = fallback enabled (migration-friendly default). Does not affect `/api/cron`, which always uses the env var. **Fixed in v1.1.0 (P1):** this key is now part of the 32→33-entry `ENV_KEYS` whitelist and every ported entry's `buildEnv()` passes it through, so disabling the `RECEIVE_TOKEN` fallback takes effect on **all six platforms** (Cloudflare / Vercel / Netlify / Deno / EdgeOne / Node) — not just Cloudflare. Default (unset) keeps the fallback enabled; only the string `"true"` (case/whitespace-insensitive) disables it. |
 | `ENABLE_AUTH` | no | `"true"` requires login for the admin page (**strongly recommended**, see security notes below); default is no login |
 | `ADMIN_PASSWORD` | no | login password (set when `ENABLE_AUTH="true"`; if missing, admin APIs refuse access and log an alert — missing config never opens the door) |
 | `RETENTION_DAYS` | no | data retention in days, default 30. Editable in **Settings → 设置中心 → 数据与业务** (the database value wins; this variable is only the fallback when no database value exists) |
-| `WAIT_MAX_SECONDS` | no | max seconds `/api/wait` long polling may hang, default 25 (range 3–25). On **Netlify Functions** (10s cap) or other short-timeout platforms set `8` so requests are not killed by the platform |
+| `WAIT_MAX_SECONDS` | no | max seconds `/api/wait` long polling may hang; the core clamps to **3–25** and defaults to **25**. Some entries ship safer defaults (Vercel `20`, Netlify `8`, EdgeOne `20`); an explicit env value always wins. Check your platform's *own* function-duration limit and lower it if requests are killed — older revisions of this README quoted conflicting platform numbers (10s / 60s); do not rely on them, verify against the platform's current documentation |
 | `PHONE_AREA_ENABLED` / `PHONE_AREA_API` | no | legacy fallback for carrier-region lookup: on by default (free 360 API, no key, 24h backend cache, 11-digit mobile numbers only); set `false` to disable; custom source via `PHONE_AREA_API` (URL with `{number}` placeholder). Prefer **Settings → 设置中心 → 数据与业务**, which stores the same values in the database and takes precedence |
 | Notification channel variables | no | **Legacy fallback only.** Configure channels in **Settings → 设置中心 → 通知** (database-backed, with per-channel enable/disable, credential update, masked display and a test-send button). These variables still work when the corresponding database key does not exist, which keeps existing deployments running after an upgrade: `FEISHU_WEBHOOK` (Feishu) / `WECOM_WEBHOOK` (WeCom) / `DINGTALK_WEBHOOK` (DingTalk, optional `DINGTALK_SECRET` signing) / `SERVERCHAN_SENDKEY` / `PUSHPLUS_TOKEN` / `TELEGRAM_BOT_TOKEN`+`TELEGRAM_CHAT_ID` / `BARK_DEVICE_KEY` (optional `BARK_URL`) / `NTFY_URL` (optional `NTFY_TOKEN`) / `GOTIFY_URL`+`GOTIFY_TOKEN` / `RESEND_API_KEY`+`MAIL_TO` (email, optional `MAIL_FROM`) / `GENERIC_WEBHOOKS` (generic webhook, optional `GENERIC_WEBHOOK_TEMPLATE` body / `GENERIC_WEBHOOK_HEADERS` headers). With nothing configured nothing is forwarded. Notifications auto-render in three modes by content (🔐 OTP / 💬 SMS / 🔔 notification) |
 | `SITE_NAME` / `SITE_ICON` | no | site name / icon URL; defaults apply when unset |
 | `NOTIFY_LINK` | no | legacy fallback for the admin page home URL; when set, every notification channel gets an "Open admin" entry (button/link/click). Editable in **Settings → 设置中心 → 通知** (database value wins; leaving the field empty there is an explicit clear that also hides this variable) |
 | `SESSION_SECRET` | required when login is on | session signing secret: **high-entropy random value (≥32 random characters recommended), fully independent from the admin password**; Cloudflare and EdgeOne (and every other platform) must each have their own value; never commit it to Git or reuse the password. If missing, login and auth **fail closed** (login returns 500, admin APIs return 401, no password-derived fallback). Rotating the value invalidates all existing sessions immediately. Sessions last 30 minutes; logout only clears the browser cookie — a copied session token remains valid within its TTL (up to 30 minutes) |
+| `SHUTDOWN_GRACE_MS` | no (Node self-hosting only) | overall **application** shutdown grace in milliseconds. It is derived, not fixed: `HTTP 30s + background drain 45s + 5s = 80000`. You may raise it (ceiling `120000`), but a value below the derived `80000` is ignored. This is **not** the container/systemd stop grace — that one is set by the deployer and must be ≥ 90s (see below) |
 
 Cloudflare additionally needs the `DB` (D1 binding); other platforms need `TURSO_DATABASE_URL` / `TURSO_AUTH_TOKEN` (Turso database, see each platform guide); Node self-hosting also supports `SQLITE_PATH` local SQLite mode (see platforms/node/README.md).
+
+> **Node self-hosting — stop grace (M-1 / M-3):** the application waits for in-flight HTTP requests and registered background notification tasks before closing SQLite, with an 80s overall budget. If the container or service manager kills the process earlier, that wait never happens. Docker's default stop grace is **10s**, which is far too short. Set **one** of these, matching how you deploy — do not set all four: `docker run --stop-timeout=90`, `docker stop --timeout 90 <container>`, Compose `stop_grace_period: 90s`, or systemd `TimeoutStopSec=90s`. The `Dockerfile` comment cannot set this for you; the deployer must. See [停止宽限与部署配置](docs/guide/07-停止宽限与部署配置.md) for copy-paste templates and the distinction between local verification and production configuration.
 
 > **Security recommendations**
 > 1. **Turn on admin login** (`ENABLE_AUTH="true"` + `ADMIN_PASSWORD`): the admin page holds sensitive content such as SMS OTP codes; without login, anyone who knows the domain can read every message and delete data. The login endpoint is rate-limited (5 consecutive failures per IP locks it for 10 minutes); `/api/receive` and `/api/push` are rate-limited to 120 writes per IP per minute (429 beyond that).
@@ -177,14 +187,15 @@ Migration and rollback:
 ## Development
 
 - `src/worker.js`: core source (Cloudflare Worker shape)
-- `platforms/gen_app.py`: generates the platform-neutral `app.js` from `src/worker.js` into the five ported platforms and syncs the Cloudflare copy `worker.js` (keeping business code byte-identical across six platforms); also syncs the 31-variable environment whitelist (ENV_KEYS, including auth entries) into the six platform entries to prevent drift (node's db.js is a Turso + local SQLite dual adapter, maintained separately and not synced)
+- `platforms/gen_app.py`: generates the platform-neutral `app.js` from `src/worker.js` into the five ported platforms and syncs the Cloudflare copy `worker.js` (keeping business code byte-identical across six platforms); also syncs the **33-variable** environment whitelist (`ENV_KEYS`, including auth entries) into the six platform entries to prevent drift (node's `db.js` is a Turso + local SQLite dual adapter, maintained separately and not synced).
+  - `python platforms/gen_app.py --check` is **read-only but narrow**: it verifies only that the embedded `SCHEMA_SQL` block in `src/worker.js` matches the root `schema.sql`, and that SQL table/column references are valid. It does **not** compare the six `app.js` / `worker.js` copies, does **not** check the `ENV_KEYS` blocks, and will **not** detect drift caused by editing `src/worker.js`. To prove byte-identity, compare the files themselves. Do not cite `--check` as proof that all platform copies are in sync.
 - `platforms/*/`: self-contained deployment directories (entry + app.js + db.js adapter + schema.sql + platform guide)
 - `docs/i18n/en/`: English documentation set (deployment/API/architecture/database); other languages under `docs/i18n/<lang>/` — see [docs/i18n/README.md](docs/i18n/README.md)
 - **[Design System](docs/DESIGN-SYSTEM.md)**: semantic tokens (`--ds-*`) and reusable components shared by the login page and admin page (single source in `src/worker.js`, synced to all platforms by `gen_app.py`)
 - **[Settings Center](docs/SETTINGS.md)**: grouped settings, per-item scope (global vs this-browser), save/cancel/reset semantics, sensitive-field masking
 - **[API reference](docs/API.md)**: message list pagination (`page` / `cursor` / `slim`), the SHA-256 cursor fingerprint and `409 CURSOR_STALE`, single-message detail endpoint, settings API
-- `tests/run.mjs`: zero-dependency test suite (needs Node 22.13+, **667 assertions**): `node tests/run.mjs`
-- After changing core code: run `python platforms/gen_app.py` to re-sync all platforms, then `node tests/run.mjs`; CI verifies zero sync drift + syntax + tests
+- `tests/run.mjs`: zero-dependency test suite (needs Node 22.13+, **850 assertions**, all passing): `node tests/run.mjs`. The separate M-1 lifecycle suite is `tests/m1-lifecycle.mjs` (**32 assertions**), not part of `tests/run.mjs`.
+- After changing core code: run `python platforms/gen_app.py` (**write mode**, re-syncs all platform copies) → `python platforms/gen_app.py --check` → `node tests/run.mjs` → `node --check` on every JS/MJS file → byte-compare the generated copies. Never hand-edit `platforms/*/app.js` or `platforms/cloudflare/worker.js`.
 
 ## License
 

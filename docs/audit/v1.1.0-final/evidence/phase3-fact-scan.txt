@@ -1,0 +1,54 @@
+# 阶段3 全仓旧事实命中扫描（排除 runtime/ 隐藏目录 与 docs/audit/ 历史档案）
+# docs/audit/ 历史档案命中：81 行（A 类，全部保留）
+
+README.md:68 [V104] > **Version caveat (important):** this button deploys the **`main` branch of the public GitHub repository**, which can lag behind this local working tree. The source version in this checkout
+README.md:126 [NUM] | `DISABLE_RECEIVE_TOKEN` | no | set `"true"` (case/whitespace-insensitive) to **disable the `RECEIVE_TOKEN` fallback** so only hashed named tokens can push; unset = fallback enabled (migrat
+README.md:190 [NUM] - `platforms/gen_app.py`: generates the platform-neutral `app.js` from `src/worker.js` into the five ported platforms and syncs the Cloudflare copy `worker.js` (keeping business code byte-id
+docs/API.md:256 [V104] > **会话时长优先级（v1.0.4 起）**：`session_ttl_minutes` 在此处为**全局默认值**（兼容回退策略）；若登录请求体携带 `session_ttl_minutes`（浏览器独立配置，存于浏览器 localStorage），则以请求声明为准。管理页「会话时长（本浏览器）」面板读写浏览器本地配置，不再修改此全局值。
+docs/ARCHITECTURE.md:52 [NUM] 3. 用脚本内 **ENV_KEYS 白名单**（单一清单，含 **33** 个环境变量）替换各入口文件 `/* ==== ENV_KEYS BEGIN ==== */ … /* ==== ENV_KEYS END ==== */` 标记块之间的内容，保证六平台透传的环境变量集合一致，防漂移。
+docs/DESIGN-SYSTEM.md:57 [V104] ### 3.1 消息列表专用（v1.0.4 第二阶段）
+docs/DESIGN-SYSTEM.md:68 [V104] ### 3.2 仪表盘布局（v1.0.4 前端）
+docs/SETTINGS.md:74 [V104] - 浏览器独立有效期功能（v1.0.4）未重新实现，仅在界面表达与分组上归位。
+docs/UPGRADE.md:3 [V104] > 适用：从任意旧版本升级到 **v1.1.0**（含 v1.0.4 及其后未发版的改动）。
+docs/UPGRADE.md:29 [V104] > **v1.0.4 追加（零操作）**：会话时长升级为**浏览器独立**——管理页「会话时长」面板改为读写浏览器本地配置（localStorage，键 `sms_ttl_min`），登录时随请求声明，服务端校验 5~43200 后按其签发独立 exp。
+docs/UPGRADE.md:35 [V104] > **v1.0.4 追加（UI 与 API 扩展，依然零操作）**：设置中心重构（分组 + 作用域徽章 + 未保存确认）、全项目 Design System、消息列表改为「默认 10 条 / 两行摘要（≤120 码位）/ 加载更多 / 未读入口」。
+docs/UPGRADE.md:42 [V104] > **v1.0.4 后续（未发版，前端与接口扩展，依然零操作）**：管理页前端替换为 1180px 仪表盘（左列表 + 右设备/设置概览/快捷统计）；多选改为右键/长按进入；验证码移到卡片顶部右侧（主色胶囊 + 一键复制，失败明确报错）；设置中心新增界面语言、分页、本浏览器偏好（消息开关 + 免打扰）；通知支持每渠道多目标（`notify.targets`）；接入令牌支持重命
+docs/UPGRADE.md:106 [NUM]    > **已在 v1.1.0（P1）修复**：该变量已纳入 32→33 项 `ENV_KEYS` 白名单，六个移植入口的 `buildEnv()` 均会透传，停用环境变量兜底在**全部六个平台**生效。默认值（未设置）仍保留兜底启用。详见 [常见问题 · 已知不一致](guide/05-常见问题.md#已知不一致诚实告知暂不影响使用)。
+docs/guide/02-快速开始.md:55 [NUM] | `RECEIVE_TOKEN` | 部署平台的「环境变量 / Secrets」设置页（Cloudflare 在按钮的设置页就会问） | 自己编的长随机串，手机端和脚本要用它 | `tK8mQ2xV7pL...`（32 位以上） |
+docs/guide/05-常见问题.md:90 [NUM] > **状态更新（2026-11-10，v1.1.0 / P1）：** `DISABLE_RECEIVE_TOKEN` 的跨平台透传不一致**已修复**。该变量已纳入 32→33 项 `ENV_KEYS` 白名单，六个移植入口的 `buildEnv()` 均会透传，停用 `RECEIVE_TOKEN` 兜底在 **Cloudflare / Vercel / Netlify / 
+docs/guide/05-常见问题.md:95 [NUM] - 2026-11-09 核实：业务代码会读这个变量（`src/worker.js:8246`），但它**不在 32 项 `ENV_KEYS` 白名单**里，Vercel / Netlify / Deno / EdgeOne / Node 五个入口的 `buildEnv()` 只按白名单透传，所以这些平台上**设置了也不会停用全局密钥**。
+docs/i18n/README.md:5 [NUM] > **Sync status (2026-11-09, M-2 pass)**: the English primary `README.md`, the Chinese primary docs (`docs/`) and the new [Chinese user guide](../guide/README.md) were corrected for current 
+docs/i18n/README.md:7 [V104] > Developer-facing documents added for v1.0.4 — [Design System](../DESIGN-SYSTEM.md) and [Settings Center](../SETTINGS.md) — are maintained in the primary languages only and are intentionall
+docs/i18n/de/ARCHITECTURE.md:3 [NUM] > **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = *
+docs/i18n/de/ARCHITECTURE.md:57 [NUM] 3. ersetzt mit der im Skript eingebauten **ENV_KEYS-Whitelist** (eine einzige Liste mit 31 Umgebungsvariablen) den Inhalt zwischen den Markierungen `/* ==== ENV_KEYS BEGIN ==== */ … /* ==== 
+docs/i18n/de/README.md:3 [NUM] > **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = *
+docs/i18n/de/README.md:121 [NUM] - `platforms/gen_app.py`: erzeugt aus `src/worker.js` das plattformneutrale `app.js` in die fünf portierten Plattformen und synchronisiert die Cloudflare-Kopie `worker.js` (hält den Geschäft
+docs/i18n/en/ARCHITECTURE.md:3 [NUM] > **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = *
+docs/i18n/en/ARCHITECTURE.md:59 [NUM] 3. Uses the **ENV_KEYS whitelist** built into the script (a single list containing 31 environment variables) to replace the content between the `/* ==== ENV_KEYS BEGIN ==== */ … /* ==== ENV_
+docs/i18n/en/README.md:3 [NUM] > **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = *
+docs/i18n/en/README.md:123 [NUM] - `platforms/gen_app.py`: generates the platform-neutral `app.js` from `src/worker.js` into the five ported platforms and syncs the Cloudflare copy `worker.js` (keeping business code byte-id
+docs/i18n/es/ARCHITECTURE.md:3 [NUM] > **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = *
+docs/i18n/es/ARCHITECTURE.md:55 [NUM] 3. Con la **lista blanca ENV_KEYS** incluida en el script (lista única, con 31 variables de entorno) reemplaza el contenido entre los marcadores `/* ==== ENV_KEYS BEGIN ==== */ … /* ==== ENV
+docs/i18n/es/README.md:3 [NUM] > **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = *
+docs/i18n/es/README.md:119 [NUM] - `platforms/gen_app.py`: genera el `app.js` neutral de plataforma a partir de `src/worker.js` en las cinco plataformas portadas y sincroniza la copia Cloudflare `worker.js` (manteniendo el 
+docs/i18n/fr/ARCHITECTURE.md:3 [NUM] > **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = *
+docs/i18n/fr/ARCHITECTURE.md:55 [NUM] 3. Avec la **liste blanche ENV_KEYS** incluse dans le script (liste unique, 31 variables d'environnement) remplace le contenu entre les marqueurs `/* ==== ENV_KEYS BEGIN ==== */ … /* ==== EN
+docs/i18n/fr/README.md:3 [NUM] > **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = *
+docs/i18n/fr/README.md:119 [NUM] - `platforms/gen_app.py` : génère le `app.js` neutre plateforme depuis `src/worker.js` vers les cinq plateformes portées et synchronise la copie Cloudflare `worker.js` (en gardant le code mé
+docs/i18n/ja/ARCHITECTURE.md:3 [NUM] > **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = *
+docs/i18n/ja/ARCHITECTURE.md:57 [NUM] 3. スクリプト内の **ENV_KEYS ホワイトリスト**（単一リスト、31 個の環境変数）で、各エントリファイルの `/* ==== ENV_KEYS BEGIN ==== */ … /* ==== ENV_KEYS END ==== */` マーカーブロック間の内容を置き換え、6 プラットフォームが透過する環境変数の集合を一致させてドリフトを防止します。
+docs/i18n/ja/README.md:3 [NUM] > **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = *
+docs/i18n/ja/README.md:121 [NUM] - `platforms/gen_app.py`：`src/worker.js` からプラットフォーム中立の `app.js` を生成して 5 つの移植プラットフォームへ同期し、Cloudflare コピーの `worker.js` も同期します（6 プラットフォームでビジネスコードをバイト単位で同一に維持）。31 変数の環境変数ホワイトリスト（ENV_KEYS、認証系を含む）
+docs/i18n/ko/ARCHITECTURE.md:3 [NUM] > **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = *
+docs/i18n/ko/README.md:3 [NUM] > **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = *
+docs/i18n/pt-BR/ARCHITECTURE.md:3 [NUM] > **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = *
+docs/i18n/pt-BR/ARCHITECTURE.md:57 [NUM] 3. substitui, com a **whitelist ENV_KEYS** embutida no script (uma única lista de 31 variáveis de ambiente), o conteúdo entre as marcações `/* ==== ENV_KEYS BEGIN ==== */ … /* ==== ENV_KEYS 
+docs/i18n/pt-BR/README.md:3 [NUM] > **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = *
+docs/i18n/pt-BR/README.md:121 [NUM] - `platforms/gen_app.py`: gera o `app.js` neutro de plataforma a partir de `src/worker.js` nas cinco plataformas portadas e sincroniza a cópia Cloudflare `worker.js` (mantendo o código de ne
+docs/i18n/zh-CN/README.md:3 [NUM] > **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = *
+docs/i18n/zh-CN/README.md:147 [NUM] - `platforms/gen_app.py`：从 `src/worker.js` 生成平台无关的 `app.js` 同步到五个移植平台，并同步 Cloudflare 独立副本 `worker.js`（保证六平台业务代码逐字节一致）；同时把 31 项环境变量白名单（ENV_KEYS，含鉴权项）同步到六个平台入口，防各平台透传漂移（node 的 db.js 为 Turso+本地
+docs/i18n/zh-TW/ARCHITECTURE.md:3 [NUM] > **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = *
+docs/i18n/zh-TW/ARCHITECTURE.md:35 [NUM] - **31 個環境變數白名單（ENV_KEYS，含驗證項）**在 `gen_app.py` 同步時寫入六個平台入口，防止各平台透傳漂移；**不在此白名單的環境變數一律拒絕透傳**（從源頭杜絕「平台 A 依賴了平台 B 沒有的變數」與意外洩漏），未覆蓋的條目以測試報錯兜底
+docs/i18n/zh-TW/README.md:3 [NUM] > **Sync notice (2026-11-09) / 同步提示**：This translated mirror may lag behind the English primary `README.md` and the Chinese `docs/` primaries. **Verified current facts**: `tests/run.mjs` = *
+docs/i18n/zh-TW/README.md:119 [NUM] - `platforms/gen_app.py`：從 `src/worker.js` 產生平台無關的 `app.js` 同步到五個移植平台，並同步 Cloudflare 獨立副本 `worker.js`（確保六平台業務程式碼逐位元組一致）；同時把 31 項環境變數白名單（ENV_KEYS，含驗證項）同步到六個平台入口，防止各平台透傳漂移（node 的 db.js 為 Turso
+platforms/README.md:74 [NUM] > 2. **令牌携带方式：推荐用请求头，query 仅兼容**：`/api/receive`、`/api/push` 按优先级支持四种携带方式——`X-Receive-Token` 请求头 → `?token=` query → `Authorization: Bearer` → JSON body 的 `token` 字段。**推荐客户端用 `X-Receive-Token

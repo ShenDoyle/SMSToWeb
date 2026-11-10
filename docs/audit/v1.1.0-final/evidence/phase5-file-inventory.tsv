@@ -1,0 +1,143 @@
+path	git_state	category	in_release	has_historical_change	reason	verification_evidence
+.gitignore	tracked-modified	A	YES	YES	本轮新增 /runtime/ 根限定忽略规则	gen_app.py --check + SHA256 字节一致性 + tests/run.mjs + 阶段2 Node 本地真实 HTTP 运行
+README.md	tracked-modified	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/ARCHITECTURE.md	tracked-modified	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/DATABASE.md	tracked-modified	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/DESIGN-SYSTEM.md	tracked-modified	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/UPGRADE.md	tracked-modified	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/i18n/MAINTENANCE.md	tracked-modified	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/i18n/README.md	tracked-modified	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/i18n/de/ARCHITECTURE.md	tracked-modified	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/i18n/de/README.md	tracked-modified	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/i18n/en/ARCHITECTURE.md	tracked-modified	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/i18n/en/README.md	tracked-modified	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/i18n/es/ARCHITECTURE.md	tracked-modified	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/i18n/es/README.md	tracked-modified	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/i18n/fr/ARCHITECTURE.md	tracked-modified	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/i18n/fr/README.md	tracked-modified	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/i18n/ja/ARCHITECTURE.md	tracked-modified	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/i18n/ja/README.md	tracked-modified	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/i18n/ko/ARCHITECTURE.md	tracked-modified	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/i18n/ko/README.md	tracked-modified	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/i18n/pt-BR/ARCHITECTURE.md	tracked-modified	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/i18n/pt-BR/README.md	tracked-modified	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/i18n/zh-CN/README.md	tracked-modified	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/i18n/zh-TW/ARCHITECTURE.md	tracked-modified	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/i18n/zh-TW/README.md	tracked-modified	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+platforms/README.md	tracked-modified	A	YES	YES	正式源码/六平台生成产物/根 DDL/正式配置	gen_app.py --check + SHA256 字节一致性 + tests/run.mjs + 阶段2 Node 本地真实 HTTP 运行
+platforms/cloudflare/README.md	tracked-modified	A	YES	YES	正式源码/六平台生成产物/根 DDL/正式配置	gen_app.py --check + SHA256 字节一致性 + tests/run.mjs + 阶段2 Node 本地真实 HTTP 运行
+platforms/cloudflare/schema.sql	tracked-modified	A	YES	YES	正式源码/六平台生成产物/根 DDL/正式配置	gen_app.py --check + SHA256 字节一致性 + tests/run.mjs + 阶段2 Node 本地真实 HTTP 运行
+platforms/cloudflare/worker.js	tracked-modified	A	YES	YES	正式源码/六平台生成产物/根 DDL/正式配置	gen_app.py --check + SHA256 字节一致性 + tests/run.mjs + 阶段2 Node 本地真实 HTTP 运行
+platforms/deno/app.js	tracked-modified	A	YES	YES	正式源码/六平台生成产物/根 DDL/正式配置	gen_app.py --check + SHA256 字节一致性 + tests/run.mjs + 阶段2 Node 本地真实 HTTP 运行
+platforms/deno/main.js	tracked-modified	A	YES	YES	正式源码/六平台生成产物/根 DDL/正式配置	gen_app.py --check + SHA256 字节一致性 + tests/run.mjs + 阶段2 Node 本地真实 HTTP 运行
+platforms/deno/schema.sql	tracked-modified	A	YES	YES	正式源码/六平台生成产物/根 DDL/正式配置	gen_app.py --check + SHA256 字节一致性 + tests/run.mjs + 阶段2 Node 本地真实 HTTP 运行
+platforms/edgeone/app.js	tracked-modified	A	YES	YES	正式源码/六平台生成产物/根 DDL/正式配置	gen_app.py --check + SHA256 字节一致性 + tests/run.mjs + 阶段2 Node 本地真实 HTTP 运行
+platforms/edgeone/functions/index.js	tracked-modified	A	YES	YES	正式源码/六平台生成产物/根 DDL/正式配置	gen_app.py --check + SHA256 字节一致性 + tests/run.mjs + 阶段2 Node 本地真实 HTTP 运行
+platforms/edgeone/schema.sql	tracked-modified	A	YES	YES	正式源码/六平台生成产物/根 DDL/正式配置	gen_app.py --check + SHA256 字节一致性 + tests/run.mjs + 阶段2 Node 本地真实 HTTP 运行
+platforms/gen_app.py	tracked-modified	A	YES	YES	正式源码/六平台生成产物/根 DDL/正式配置	gen_app.py --check + SHA256 字节一致性 + tests/run.mjs + 阶段2 Node 本地真实 HTTP 运行
+platforms/netlify/app.js	tracked-modified	A	YES	YES	正式源码/六平台生成产物/根 DDL/正式配置	gen_app.py --check + SHA256 字节一致性 + tests/run.mjs + 阶段2 Node 本地真实 HTTP 运行
+platforms/netlify/functions/api.mjs	tracked-modified	A	YES	YES	正式源码/六平台生成产物/根 DDL/正式配置	gen_app.py --check + SHA256 字节一致性 + tests/run.mjs + 阶段2 Node 本地真实 HTTP 运行
+platforms/netlify/functions/cron.mjs	tracked-modified	A	YES	YES	正式源码/六平台生成产物/根 DDL/正式配置	gen_app.py --check + SHA256 字节一致性 + tests/run.mjs + 阶段2 Node 本地真实 HTTP 运行
+platforms/netlify/schema.sql	tracked-modified	A	YES	YES	正式源码/六平台生成产物/根 DDL/正式配置	gen_app.py --check + SHA256 字节一致性 + tests/run.mjs + 阶段2 Node 本地真实 HTTP 运行
+platforms/node/Dockerfile	tracked-modified	A	YES	YES	正式源码/六平台生成产物/根 DDL/正式配置	gen_app.py --check + SHA256 字节一致性 + tests/run.mjs + 阶段2 Node 本地真实 HTTP 运行
+platforms/node/README.md	tracked-modified	A	YES	YES	正式源码/六平台生成产物/根 DDL/正式配置	gen_app.py --check + SHA256 字节一致性 + tests/run.mjs + 阶段2 Node 本地真实 HTTP 运行
+platforms/node/app.js	tracked-modified	A	YES	YES	正式源码/六平台生成产物/根 DDL/正式配置	gen_app.py --check + SHA256 字节一致性 + tests/run.mjs + 阶段2 Node 本地真实 HTTP 运行
+platforms/node/db.js	tracked-modified	A	YES	YES	正式源码/六平台生成产物/根 DDL/正式配置	gen_app.py --check + SHA256 字节一致性 + tests/run.mjs + 阶段2 Node 本地真实 HTTP 运行
+platforms/node/schema.sql	tracked-modified	A	YES	YES	正式源码/六平台生成产物/根 DDL/正式配置	gen_app.py --check + SHA256 字节一致性 + tests/run.mjs + 阶段2 Node 本地真实 HTTP 运行
+platforms/node/server.mjs	tracked-modified	A	YES	YES	正式源码/六平台生成产物/根 DDL/正式配置	gen_app.py --check + SHA256 字节一致性 + tests/run.mjs + 阶段2 Node 本地真实 HTTP 运行
+platforms/shared/app.js	tracked-modified	A	YES	YES	正式源码/六平台生成产物/根 DDL/正式配置	gen_app.py --check + SHA256 字节一致性 + tests/run.mjs + 阶段2 Node 本地真实 HTTP 运行
+platforms/vercel/api/[[...route]].js	tracked-modified	A	YES	YES	正式源码/六平台生成产物/根 DDL/正式配置	gen_app.py --check + SHA256 字节一致性 + tests/run.mjs + 阶段2 Node 本地真实 HTTP 运行
+platforms/vercel/app.js	tracked-modified	A	YES	YES	正式源码/六平台生成产物/根 DDL/正式配置	gen_app.py --check + SHA256 字节一致性 + tests/run.mjs + 阶段2 Node 本地真实 HTTP 运行
+platforms/vercel/schema.sql	tracked-modified	A	YES	YES	正式源码/六平台生成产物/根 DDL/正式配置	gen_app.py --check + SHA256 字节一致性 + tests/run.mjs + 阶段2 Node 本地真实 HTTP 运行
+schema.sql	tracked-modified	A	YES	YES	正式源码/六平台生成产物/根 DDL/正式配置	gen_app.py --check + SHA256 字节一致性 + tests/run.mjs + 阶段2 Node 本地真实 HTTP 运行
+src/worker.js	tracked-modified	A	YES	YES	正式源码/六平台生成产物/根 DDL/正式配置	gen_app.py --check + SHA256 字节一致性 + tests/run.mjs + 阶段2 Node 本地真实 HTTP 运行
+tests/run.mjs	tracked-modified	B	YES	YES	正式测试套件与专项断言	node tests/run.mjs / p1-auth.mjs / m1-lifecycle.mjs 本轮实际执行
+docs/audit/01-功能现状矩阵.md	untracked	D2	USER_CONFIRM	YES	历史审计底稿：带时效性勘误，明示不得作为当前发布依据；RC2 定位可选随附	RC1 补充验收报告 28 处清单 + RC2 发布候选文件清单 F 类定位
+docs/audit/02-性能基线报告.md	untracked	D2	USER_CONFIRM	YES	历史审计底稿：带时效性勘误，明示不得作为当前发布依据；RC2 定位可选随附	RC1 补充验收报告 28 处清单 + RC2 发布候选文件清单 F 类定位
+docs/audit/03-平台能力对照.md	untracked	D2	USER_CONFIRM	YES	历史审计底稿：带时效性勘误，明示不得作为当前发布依据；RC2 定位可选随附	RC1 补充验收报告 28 处清单 + RC2 发布候选文件清单 F 类定位
+docs/audit/HTML与多终端交互体验审计.md	untracked	D2	USER_CONFIRM	YES	历史审计底稿：带时效性勘误，明示不得作为当前发布依据；RC2 定位可选随附	RC1 补充验收报告 28 处清单 + RC2 发布候选文件清单 F 类定位
+docs/audit/P1-最终补证与发布门禁报告.md	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/P1-鉴权与后台通知可靠性闭环报告.md	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-RC1-发布候选验收报告.md	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-RC1-补充/56文件逐项完整性清单.md	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-RC1-补充验收报告.md	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-RC1/06-ui-overflow-evidence.md	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-RC1/07-docs-consistency.md	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-RC1/08-regression.md	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-RC1/README.md	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-RC1/screenshots/host_login_320.png	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-RC1/screenshots/host_login_390.png	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-RC1/screenshots/host_page_320.png	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-RC1/screenshots/host_page_390.png	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-RC1/screenshots/login-1366.png	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-RC1/screenshots/login-1920.png	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-RC1/screenshots/login-320.png	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-RC1/screenshots/login-390.png	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-RC1/screenshots/login-768.png	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-RC1/screenshots/page-1366.png	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-RC1/screenshots/page-1920.png	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-RC1/screenshots/page-320.png	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-RC1/screenshots/page-390.png	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-RC1/screenshots/page-768.png	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-RC2-发布候选整理报告.md	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-RC2-发布候选文件清单.md	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-RC2/phase0-baseline.md	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-RC2/phase2-version-inventory.md	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-RC2/phase4-generation-consistency.md	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-RC2/phase6-regression.md	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-RC2/phase7-security.md	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-RC2/phase8-not-tested.md	untracked	D1	YES	YES	RC1→RC2 版本验收证据链（含 UI 溢出验收截图）	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-final/evidence/node-smoke-last-run.json	untracked	E	NO	NO	重复留存副本	字节数/内容比对与空文件检查
+docs/audit/v1.1.0-final/evidence/node-smoke-output.json	untracked	D1	YES	NO	本轮可复核原始证据与提交清单附件	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-final/evidence/node-smoke-stderr.txt	untracked	E	NO	NO	空 stderr 文件	字节数/内容比对与空文件检查
+docs/audit/v1.1.0-final/evidence/node-smoke.mjs	untracked	D1	YES	NO	本轮可复核原始证据与提交清单附件	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-final/evidence/phase3-fact-scan.txt	untracked	D1	YES	NO	本轮可复核原始证据与提交清单附件	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-final/evidence/phase5-file-inventory.tsv	untracked	D1	YES	NO	本轮可复核原始证据与提交清单附件	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-final/evidence/phase5-git-add-paths.txt	untracked	D1	YES	NO	本轮可复核原始证据与提交清单附件	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-final/evidence/phase7-gen-check.txt	untracked	D1	YES	NO	本轮可复核原始证据与提交清单附件	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-final/evidence/phase7-m1-lifecycle-wsl22.txt	untracked	D1	YES	NO	本轮可复核原始证据与提交清单附件	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-final/evidence/phase7-m1-lifecycle.txt	untracked	D1	YES	NO	本轮可复核原始证据与提交清单附件	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-final/evidence/phase7-p1-auth.txt	untracked	D1	YES	NO	本轮可复核原始证据与提交清单附件	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-final/evidence/phase7-run-mjs.txt	untracked	D1	YES	NO	本轮可复核原始证据与提交清单附件	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-final/phase0-baseline.md	untracked	D1	YES	NO	本轮阶段报告 / 最终闭环报告	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-final/phase0-untracked-files.txt	untracked	D1	YES	NO	本轮阶段报告 / 最终闭环报告	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-final/phase1-runtime-gitignore.md	untracked	D1	YES	NO	本轮阶段报告 / 最终闭环报告	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-final/phase2-six-platform-runtime.md	untracked	D1	YES	NO	本轮阶段报告 / 最终闭环报告	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-final/phase3-i18n-review.md	untracked	D1	YES	NO	本轮阶段报告 / 最终闭环报告	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-final/phase4-release-notes.md	untracked	D1	YES	NO	本轮阶段报告 / 最终闭环报告	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-final/phase5-release-manifest.md	untracked	D1	YES	NO	本轮阶段报告 / 最终闭环报告	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-final/phase6-version-generation.md	untracked	D1	YES	NO	本轮阶段报告 / 最终闭环报告	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-final/phase7-regression.md	untracked	D1	YES	NO	本轮阶段报告 / 最终闭环报告	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/v1.1.0-final/phase8-final-diff-review.md	untracked	D1	YES	NO	本轮阶段报告 / 最终闭环报告	本轮各阶段报告原始输出（phase0-9）+ RC1/RC2 归档结论
+docs/audit/全项目性能与体验优化最终报告.md	untracked	D2	USER_CONFIRM	YES	历史审计底稿：带时效性勘误，明示不得作为当前发布依据；RC2 定位可选随附	RC1 补充验收报告 28 处清单 + RC2 发布候选文件清单 F 类定位
+docs/audit/六平台官方能力与最佳实践对照.md	untracked	D2	USER_CONFIRM	YES	历史审计底稿：带时效性勘误，明示不得作为当前发布依据；RC2 定位可选随附	RC1 补充验收报告 28 处清单 + RC2 发布候选文件清单 F 类定位
+docs/audit/功能现状矩阵.md	untracked	D2	USER_CONFIRM	YES	历史审计底稿：带时效性勘误，明示不得作为当前发布依据；RC2 定位可选随附	RC1 补充验收报告 28 处清单 + RC2 发布候选文件清单 F 类定位
+docs/audit/实施批次与改造记录.md	untracked	D2	USER_CONFIRM	YES	历史审计底稿：带时效性勘误，明示不得作为当前发布依据；RC2 定位可选随附	RC1 补充验收报告 28 处清单 + RC2 发布候选文件清单 F 类定位
+docs/audit/性能基线报告.md	untracked	D2	USER_CONFIRM	YES	历史审计底稿：带时效性勘误，明示不得作为当前发布依据；RC2 定位可选随附	RC1 补充验收报告 28 处清单 + RC2 发布候选文件清单 F 类定位
+docs/audit/文档一致性审计报告.md	untracked	D2	USER_CONFIRM	YES	历史审计底稿：带时效性勘误，明示不得作为当前发布依据；RC2 定位可选随附	RC1 补充验收报告 28 处清单 + RC2 发布候选文件清单 F 类定位
+docs/deploy-templates/compose.example.yaml	untracked	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/deploy-templates/docker-run.example.sh	untracked	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/deploy-templates/smstoweb.service.example	untracked	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/guide/01-项目介绍.md	untracked	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/guide/02-快速开始.md	untracked	C	YES	NO	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/guide/03-平台部署/01-Cloudflare.md	untracked	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/guide/03-平台部署/02-Vercel.md	untracked	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/guide/03-平台部署/03-Netlify.md	untracked	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/guide/03-平台部署/04-DenoDeploy.md	untracked	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/guide/03-平台部署/05-EdgeOne.md	untracked	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/guide/03-平台部署/06-Node自托管.md	untracked	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/guide/03-平台部署/README.md	untracked	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/guide/04-使用指南.md	untracked	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/guide/05-常见问题.md	untracked	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/guide/06-验收场景.md	untracked	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/guide/07-停止宽限与部署配置.md	untracked	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/guide/08-界面交互问题清单.md	untracked	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/guide/09-更新与维护.md	untracked	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/guide/10-部署能力矩阵.md	untracked	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/guide/README.md	untracked	C	YES	YES	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/i18n/en/QUICKSTART.md	untracked	C	YES	NO	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+docs/releases/v1.1.0.md	untracked	C	YES	NO	正式用户文档/发布说明/部署模板/主版 README	阶段3 全仓事实扫描 + 阶段4 过度承诺自检 + 阶段7 链接/路径检查
+platforms/node/lifecycle.mjs	untracked	A	YES	YES	正式源码/六平台生成产物/根 DDL/正式配置	gen_app.py --check + SHA256 字节一致性 + tests/run.mjs + 阶段2 Node 本地真实 HTTP 运行
+tests/m1-lifecycle.mjs	untracked	B	YES	YES	正式测试套件与专项断言	node tests/run.mjs / p1-auth.mjs / m1-lifecycle.mjs 本轮实际执行
+tests/p1-auth.mjs	untracked	B	YES	YES	正式测试套件与专项断言	node tests/run.mjs / p1-auth.mjs / m1-lifecycle.mjs 本轮实际执行
+docs/audit/v1.1.0-final/SMSToWeb-v1.1.0-正式版提交前最终闭环报告.md	untracked	D1	YES	NO	阶段9 最终闭环报告	本轮阶段0-9 全部证据与最终判定

@@ -70,7 +70,7 @@ function jsStr(s) {
   return JSON.stringify(s).replace(/</g, "\\u003c");
 }
 /* 应用版本号：正式版发布固定版号，非正式版一般以小版本号递增升级；管理页/登录页底部页脚展示 */
-const APP_VERSION = "v1.0.4";
+const APP_VERSION = "v1.1.0";
 
 /* 把页面模板中的占位标记替换为实际配置值（用函数替换器，避免值里含 $& 等特殊序列被误解释） */
 function renderHtml(html, env) {
@@ -107,9 +107,17 @@ function safeEqual(a, b) {
 }
 
 /* 后台任务调度：Cloudflare 传真实 ctx，用 ctx.waitUntil（响应即时返回、后台续跑）；
-   其他平台不传 ctx（undefined），退化为内联 await，确保通知在响应前完成、不被平台截断 */
-function bgRun(ctx, p) {
-  if (ctx && typeof ctx.waitUntil === "function") { ctx.waitUntil(p); return; }
+   其他平台不传 ctx（undefined），退化为内联 await，确保通知在响应前完成、不被平台截断。
+   waitUntil 分支统一兜底 rejection：后台通知失败既不能变成未处理的 Promise rejection，
+   也不能把「消息已成功入库」误报成失败；复用现有结构化日志记录真实平台与错误，保证可观测。
+   内联分支保持原语义不变（异常仍交由请求级错误处理），避免改变已验证的失败行为。 */
+function bgRun(ctx, p, env) {
+  if (ctx && typeof ctx.waitUntil === "function") {
+    ctx.waitUntil(Promise.resolve(p).catch(function (e) {
+      logEvent("error", "background_task_failed", "notify", env || null, "-", { error: logErrorInfo(e) });
+    }));
+    return;
+  }
   return p;
 }
 
@@ -922,8 +930,12 @@ async function dispatchNotify(env, msg, opts) {
        测试发送（mode._test）绕过规则，便于启用前验证配置 */
     if (!mode._test) list = list.filter(function (x) { return !x.types || x.types.indexOf(info.type) !== -1; });
     if (!list.length) return mode.collect ? [] : undefined;
-    const out = [];
-    for (const tg of list) {
+    /* 多目标并行分发：各目标之间无数据依赖，原来的 for...of + await 会把每个目标的
+       10 秒渠道超时累加到 /api/receive 链路上（N 个目标最坏 N×10s），并可能撑破
+       Cloudflare waitUntil 的 30 秒上限。Promise.all 让所有目标同时发起，
+       且结果顺序与 list 一致；每个目标仍由内层 .catch 独立降级，单个失败不影响其余目标，
+       collect（测试发送）返回结构与字段顺序均不变。 */
+    const chunks = await Promise.all(list.map(async function (tg) {
       const clone = { enabled: true, types: NOTIFY_TYPES.slice(), retry: cfg.retry, link: cfg.link, channels: {}, targets: [] };
       /* 内层按目标自己的类型再判定一次，保证单目标通道复用同一逻辑 */
       if (Array.isArray(tg.types) && tg.types.length) clone.types = tg.types.slice();
@@ -936,17 +948,21 @@ async function dispatchNotify(env, msg, opts) {
         configured: spec.need.every(function (f) { return !!tg.fields[f]; }),
       };
       const r = await dispatchNotify(env, msg, Object.assign({}, mode, { config: clone, _single: true, target_id: "" })).catch(function (e) {
-        /* 单个目标的意外异常不得中断后续目标；仅记录并转为该目标失败结果 */
+        /* 单个目标的意外异常不得中断其他目标；仅记录并转为该目标失败结果 */
         logEvent("error", "notify_forward_failed", "notify", env, "-", { message: safeNotifyError(e) });
         return mode.collect ? [{ channel: tg.channel, ok: false, error: safeNotifyError(e) }] : undefined;
       });
       if (mode.collect && Array.isArray(r)) {
-        out.push.apply(out, r.map(function (x) {
+        return r.map(function (x) {
           return Object.assign({}, x, { target_id: tg.id, target_name: tg.name, channel: tg.channel });
-        }));
+        });
       }
-    }
-    return mode.collect ? out : undefined;
+      return [];
+    }));
+    if (!mode.collect) return undefined;
+    const out = [];
+    for (const part of chunks) out.push.apply(out, part);
+    return out;
   }
   /* 仅测试指定渠道时可绕过开关，便于启用前验证配置是否可用 */
   const active = function (name) {
@@ -1291,7 +1307,7 @@ async function handleReceive(request, env, url, ctx) {
       source: "sms",
       sender: data.from,
       device: data.name || data.sim,
-    }));
+    }), env);
   }
 
   return json({
@@ -1347,7 +1363,7 @@ async function handlePush(request, env, url, ctx) {
       source: source,
       sender: sender,
       device: deviceName,
-    }));
+    }), env);
   }
 
   return json({ success: true, device_id: dev.id, duplicated });
@@ -1441,8 +1457,12 @@ async function handleListMessages(url, env) {
   }
   const whereSql = pageWhere.length ? "WHERE " + pageWhere.join(" AND ") + "" : "";
 
+  /* 计数：无筛选或仅按设备时走设备覆盖索引（5 万行 1ms / 0.2ms）；
+     一旦叠加 starred/read/source/range/关键词，优化器会选 ANY(device_id) 扫描并逐行回表，
+     实测 100-119ms，此时强制全表扫描降到 11-14ms */
+  const countHint = (starredOnly || unreadOnly || readOnly || source || q || rangeDays) ? "NOT INDEXED" : "";
   const totalRow = await env.DB.prepare(
-    `SELECT COUNT(*) AS n FROM messages m ${where.length ? "WHERE " + where.join(" AND ") : ""}`
+    `SELECT COUNT(*) AS n FROM messages m ${countHint} ${where.length ? "WHERE " + where.join(" AND ") : ""}`
   ).bind(...params).first();
   const total = totalRow ? totalRow.n : 0;
 
@@ -1454,26 +1474,31 @@ async function handleListMessages(url, env) {
      limit+1 行组合，且仍是同一条语句、同一读快照，指纹与分页数据的一致性不变。 */
   const whereAny = where.length ? "WHERE " + where.join(" AND ") : "WHERE 1=1";
   const whereAlias = whereAny.replace(/m\./g, "m2.");
-  const starSub = `(SELECT group_concat(x.id, ',') FROM (SELECT m2.id FROM messages m2 ${whereAlias} AND m2.starred = 1 ORDER BY m2.id) x)`;
+  /* 星标集合同样固定索引：默认计划会走设备覆盖索引 + 临时排序（5 万行实测 130ms）；
+     固定到 idx_messages_star_time 后先按 starred=1 取出少量行再排序，降到约 12ms */
+  const starSub = `(SELECT group_concat(x.id, ',') FROM (SELECT m2.id FROM messages m2 INDEXED BY idx_messages_star_time ${whereAlias} AND m2.starred = 1 ORDER BY m2.id) x)`;
 
   const pageCols = "m.id, m.sender, m.content, m.received_at, m.device_id, m.source, m.starred, m.read_at, "
-    + "length(m.content) AS content_len, "
-    + "COALESCE(NULLIF(d.alias, ''), d.device) AS device_name, d.sim, d.device";
+    + "length(m.content) AS content_len";
   const cols = "p.id, p.sender, p.content, p.received_at, p.device_id, p.source, p.starred, p.read_at, "
-    + "p.content_len, p.device_name, p.sim, p.device";
+    + "p.content_len, COALESCE(NULLIF(d.alias, ''), d.device) AS device_name, d.sim, d.device";
   /* 多取 1 条用于判断是否还有下一页（不额外发 COUNT）
      绑定顺序必须与 SQL 文本一致：内层 WHERE（基础筛选 + 游标）→ 内层 LIMIT/OFFSET
      → 外层星标集合子查询的基础筛选参数。外层 ORDER BY 只对当页 limit+1 行生效，
-     保证输出顺序与原语句逐行一致，而排序缓冲不再复制星标 CSV。 */
+     保证输出顺序与原语句逐行一致，而排序缓冲不再复制星标 CSV。
+     内层先只查 messages（用 INDEXED BY 固定 idx_messages_star_time），再在 LIMIT 后关联 devices。
+     不加索引提示时，优化器会误选设备覆盖索引做 ANY(device_id) 扫描 + 临时排序，
+     实测 5 万行由 0.1ms 退化到 90ms；固定索引后计划稳定为索引顺序扫描。 */
   const list = await env.DB.prepare(
     `SELECT ${cols}, s.starids AS _starids
      FROM (
        SELECT ${pageCols}
-       FROM messages m JOIN devices d ON d.id = m.device_id
+       FROM messages m INDEXED BY idx_messages_star_time
        ${whereSql}
        ORDER BY m.starred DESC, m.received_at DESC, m.id DESC
        LIMIT ? OFFSET ?
      ) p
+     LEFT JOIN devices d ON d.id = p.device_id
      CROSS JOIN (SELECT ${starSub} AS starids) s
      ORDER BY p.starred DESC, p.received_at DESC, p.id DESC`
   ).bind(...pageParams, limit + 1, cursor ? 0 : (page - 1) * limit, ...params).all();
@@ -1486,7 +1511,7 @@ async function handleListMessages(url, env) {
   let starIdsCsv = rows.length ? rows[0]._starids : null;
   if (starIdsCsv === null || starIdsCsv === undefined) {
     const fr = await env.DB.prepare(
-      `SELECT group_concat(x.id, ',') AS s FROM (SELECT m2.id FROM messages m2 ${whereAlias} AND m2.starred = 1 ORDER BY m2.id) x`
+      `SELECT group_concat(x.id, ',') AS s FROM (SELECT m2.id FROM messages m2 INDEXED BY idx_messages_star_time ${whereAlias} AND m2.starred = 1 ORDER BY m2.id) x`
     ).bind(...params).first();
     starIdsCsv = (fr && fr.s) || "";
   }
@@ -1697,7 +1722,10 @@ async function handleReadMessage(request, env) {
     }
     let unread = null;
     try {
-      const t = await env.DB.prepare("SELECT SUM(CASE WHEN read_at IS NULL THEN 1 ELSE 0 END) AS u FROM messages WHERE deleted_at IS NULL").first();
+      /* 聚合 read_at/starred 时用 NOT INDEXED 强制全表顺序扫描：
+         默认计划会误选设备覆盖索引（ANY(device_id)+deleted_at），逐行回表取列，
+         5 万行实测 160ms；全表扫描 19ms */
+      const t = await env.DB.prepare("SELECT SUM(CASE WHEN read_at IS NULL THEN 1 ELSE 0 END) AS u FROM messages NOT INDEXED WHERE deleted_at IS NULL").first();
       unread = (t && t.u) || 0;
     } catch (e) {}
     return json({ success: true, read: read, updated: okIds.length, failed: failedIds.length, failed_ids: failedIds, unread: unread });
@@ -1710,7 +1738,12 @@ async function handleReadMessage(request, env) {
 }
 /* 统计：总量 / 未读 / 收藏 / 来源分布 / 近 7 天（按北京日期） */
 async function handleStats(env) {
-  const base = "FROM messages WHERE deleted_at IS NULL";
+  /* 聚合 read_at/starred/source 时用 NOT INDEXED：设备覆盖索引会让优化器做
+     ANY(device_id) 扫描并逐行回表，5 万行实测 160-174ms；全表顺序扫描 19-22ms。 */
+  const base = "FROM messages NOT INDEXED WHERE deleted_at IS NULL";
+  /* 近 7 天有 received_at 范围条件，保留优化器默认计划即可利用时间/设备覆盖索引，
+     不要叠加 NOT INDEXED，否则退化为全表扫描 */
+  const dayBase = "FROM messages WHERE deleted_at IS NULL";
   const tot = await env.DB.prepare(
     "SELECT COUNT(*) AS total, SUM(CASE WHEN read_at IS NULL THEN 1 ELSE 0 END) AS unread, " +
     "SUM(CASE WHEN starred = 1 THEN 1 ELSE 0 END) AS starred " + base
@@ -1719,7 +1752,7 @@ async function handleStats(env) {
     "SELECT source, COUNT(*) AS n " + base + " GROUP BY source ORDER BY n DESC"
   ).all();
   const days = await env.DB.prepare(
-    "SELECT date(datetime(received_at, '+8 hours')) AS d, COUNT(*) AS n " + base +
+    "SELECT date(datetime(received_at, '+8 hours')) AS d, COUNT(*) AS n " + dayBase +
     " AND received_at >= datetime('now', '-7 days') GROUP BY d ORDER BY d"
   ).all();
   return json({
@@ -1826,7 +1859,7 @@ async function handleDeleteDevice(idParam, env) {
 /* 来源清单：聚合 messages.source 及条数，供管理页动态生成「来源筛选」下拉（替代写死的三项） */
 async function handleListSources(env) {
   const rows = await env.DB.prepare(
-    "SELECT source, COUNT(*) AS n FROM messages WHERE deleted_at IS NULL GROUP BY source ORDER BY n DESC"
+    "SELECT source, COUNT(*) AS n FROM messages NOT INDEXED WHERE deleted_at IS NULL GROUP BY source ORDER BY n DESC"
   ).all();
   return json({ success: true, list: (rows.results || []).map(function (r) {
     return { source: r.source, count: r.n };
@@ -2007,9 +2040,11 @@ async function handleWait(url, env) {
   const deadline = Date.now() + waitSec * 1000;
   const tick = Math.min(2000, Math.max(500, waitSec * 1000 / 5));
   for (;;) {
+    /* 全局 MAX(id) 用 NOT INDEXED：默认会选设备覆盖索引做 ANY(device_id) 扫描，
+       50 万级数据下每 tick 都白扫；不指定索引时 SQLite 用 rowid 倒序定位，实测 0.03ms */
     const sql = filter
       ? "SELECT MAX(id) AS n FROM messages WHERE device_id = ?1 AND deleted_at IS NULL"
-      : "SELECT MAX(id) AS n FROM messages WHERE deleted_at IS NULL";
+      : "SELECT MAX(id) AS n FROM messages NOT INDEXED WHERE deleted_at IS NULL";
     const row = await (filter ? env.DB.prepare(sql).bind(deviceId) : env.DB.prepare(sql)).first();
     if (row && row.n > lastId) return json({ success: true, changed: true, id: row.n });
     if (Date.now() > deadline) return json({ success: true, changed: false });
@@ -2760,17 +2795,21 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     .card { padding: 12px 0; }
     .msg-bottom { flex-direction: column; align-items: flex-start; gap: 6px; }
     .msg-actions { align-self: flex-end; }
-    .code-chip .copy { min-height: 26px; padding: 3px 10px; }
+    .code-chip .copy { min-height: 32px; padding: 4px 10px; }
     /* 筛选区：视图标签一行，搜索与来源/时间并排一行，整体更紧凑 */
     .toolbar { padding: 10px 12px; }
     .toolbar-top { margin-bottom: 8px; }
     .filters { flex-direction: column; align-items: stretch; flex-wrap: nowrap; gap: 8px; }
     .filter-tabs { flex-wrap: nowrap; gap: 6px; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
     .filter-tabs::-webkit-scrollbar { display: none; }
-    .filter-tabs .chip { flex: 0 0 auto; min-height: 28px; padding: 4px 10px; }
+    .filter-tabs .chip { flex: 0 0 auto; min-height: 34px; padding: 4px 10px; }
     .filter-row { flex-wrap: nowrap; width: 100%; }
     .filter-row .searchwrap { flex: 1 1 auto; width: auto; min-width: 0; margin-left: 0; }
-    .filter-row select { flex: 0 0 auto; max-width: 96px; min-height: 30px; padding: 4px 6px; }
+    /* iOS Safari 对 <16px 的文本框聚焦会自动放大页面；搜索框保持 16px 防止误缩放 */
+    .filter-row .searchwrap input { font-size: 16px; }
+    .filter-row select { flex: 0 0 auto; max-width: 96px; min-height: 32px; padding: 4px 6px; font-size: 14px; }
+    /* 触屏最小可点区域：验证码复制/星标/操作按钮实测 22-28px，提升到 32-36px */
+    .msg-actions .star, .msg-actions .del, .msg-actions .more { min-width: 36px; min-height: 36px; display: inline-flex; align-items: center; justify-content: center; }
     /* 批量操作条：底部悬浮，单行左右滑，按钮不压缩 */
     .selbar { width: calc(100% - 16px); padding: 8px 10px; gap: 6px; justify-content: flex-start;
               bottom: calc(10px + env(safe-area-inset-bottom, 0px)); border-radius: 14px; }
@@ -6445,8 +6484,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   /* 推送式自动刷新：长轮询 /api/wait；第 1 页收到新消息即刷新，其他页只弹胶囊避免打断阅读。
      失败（平台函数超时 / 断网）时指数退避，避免在函数时长较短的平台上形成忙循环。 */
   var pollErr = 0;
+  var pollTimer = null;
   function pollLoop(delay) {
-    setTimeout(function () {
+    pollTimer = setTimeout(function () {
+      pollTimer = null;
+      /* 页面隐藏时停止长轮询（浏览器会节流定时器，但请求仍会发往服务端并占用 DB 查询）；
+         回到前台由 visibilitychange 立即恢复，不影响新消息实时性 */
+      if (document.hidden) return;
       if (state.q) {
         load().then(function () { pollLoop(5000); }, function () { pollLoop(5000); });
         return;
@@ -7212,6 +7256,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       state.unread = 0;
       document.title = SITE_NAME;
       pollErr = 0;
+      /* 隐藏期间长轮询已暂停（pollTimer 为空），回到前台立即重启，避免等下一轮延迟 */
+      if (!pollTimer) pollLoop(0);
       load(true);
     }
   });
@@ -7712,6 +7758,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_dedup
   ON messages(device_id, sender, content, received_at);
 -- 来源筛选索引
 CREATE INDEX IF NOT EXISTS idx_messages_source ON messages(source, received_at DESC);
+-- 首屏列表主排序（starred DESC, received_at DESC, id DESC）：
+-- 避免 5 万行以上时 SQLite 选「逐设备回表 + 临时 B 树全量排序」（实测 112ms → 0.1ms）
+-- 注意：不要改成 WHERE deleted_at IS NULL 的部分索引——统计接口聚合 read_at 时会
+-- 被迫走索引 + 随机回表，实测由 39ms 退化到 62ms；普通索引下统计仍走全表扫描
+CREATE INDEX IF NOT EXISTS idx_messages_star_time
+  ON messages(starred DESC, received_at DESC, id DESC);
+-- 设备列表计数/最近消息时间：覆盖索引，避免逐设备回表全扫（实测 104ms → 5.8ms）
+CREATE INDEX IF NOT EXISTS idx_messages_dev_active_time
+  ON messages(device_id, deleted_at, received_at);
 
 -- 已有库升级：为旧 messages 表补 source 列（新库执行上面的建表已包含，此句幂等报错可忽略）
 -- ALTER TABLE messages ADD COLUMN source TEXT NOT NULL DEFAULT 'sms';

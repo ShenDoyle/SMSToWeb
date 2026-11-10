@@ -1,0 +1,2 @@
+[ok] SCHEMA_SQL 内嵌块与根 schema.sql 一致
+[ok] schema 引用校验通过（表 devices, messages, settings, tokens）
