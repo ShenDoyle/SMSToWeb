@@ -20,13 +20,11 @@
 | 手动停止容器 | 每次停止的命令 | `docker stop --timeout 90 smstoweb` |
 | Docker Compose | `compose.yaml` 对应服务下 | `stop_grace_period: 90s` |
 | systemd 服务 | `.service` 的 `[Service]` 段 | `TimeoutStopSec=90s` |
-| Fly.io / Railway | 平台控制台 | 本仓库**未验证**这两个平台能否把停机宽限设为 90s，请先查阅平台当前文档；不能设置时请理解「后台通知可能在重启时丢失」这一后果 |
+| Fly.io / Railway | 平台控制台 | 请先确认平台能否把停机宽限设为 90s；不能设置时，后台通知可能在重启时丢失 |
 
 可复制的示例模板：[compose.example.yaml](../../docs/deploy-templates/compose.example.yaml) · [smstoweb.service.example](../../docs/deploy-templates/smstoweb.service.example) · [docker-run.example.sh](../../docs/deploy-templates/docker-run.example.sh)。它们是**示例模板**，不是仓库内已生效的生产配置。
 
 **完成标志**：容器启动日志打印 `shutdown_grace=80s`，并且你能在自己的部署方式里确认停止宽限 ≥ 90s。
-
-> **本地验证 ≠ 生产已配置**：本项目在 WSL2 + Docker **本地环境**用真实 `docker stop --timeout 90` 验证过退出码 0、后台通知完成、SQLite 在任务完成后才关闭（证据在仓库外 `M1-fix/`）。这不等于你的生产环境已配置好，生产侧仍须由你执行上表配置。
 
 应用内部时间预算（**无需你设置**）：HTTP 在途 30s + 后台任务 drain 45s + 收尾 5s = **80s**；`SHUTDOWN_GRACE_MS` 可调大到 `120000`，但不能低于 `80000`。
 
@@ -134,7 +132,7 @@ curl "http://127.0.0.1:8787/api/push?token=<RECEIVE_TOKEN>" -H "Content-Type: ap
 
 - **定时清理**：进程内置每天 UTC 17:00（北京 01:00）自动清理，无需配置。也可改用平台调度器（Fly Machines Cron / Railway Cron）调 `GET /api/cron?token=<RECEIVE_TOKEN>`，二选一
 - **常驻进程优势**：无函数时长上限，`/api/wait` 长轮询与 Cloudflare Worker 体验一致，实时性最好
-- **免费额度**：Fly.io 已无免费额度（仅新账号 7 天 / 2 VM 小时试用，绑卡即转按量计费，微用量费用很低）；Railway 提供一次性 $5 试用额度（30 天有效），Hobby 计划 $5/月含等额使用额度——长期零成本首选 Cloudflare 主版本
+- **免费额度**：Fly.io 已无免费额度（仅新账号 7 天 / 2 VM 小时试用，绑卡即转按量计费，微用量费用很低）；Railway 提供一次性 $5 试用额度（30 天有效），Hobby 计划 $5/月含等额使用额度——长期零成本首选 Cloudflare
 - **数据备份**：Turso 模式下数据都在 Turso，换服务器只需重新配好环境变量，数据无损；本地 SQLite 模式定期备份 `SQLITE_PATH` 文件即可
 - **登录保护**：登录接口已内置限速——同一 IP 连续失败 5 次锁定 10 分钟（内存态，进程重启即清零）
 - **http 部署登录**：局域网 IP / 无 TLS 的 http 访问可直接登录（cookie 自动降级，不强制 Secure），Alook 等浏览器登录后跳转正常

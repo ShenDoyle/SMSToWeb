@@ -1,35 +1,29 @@
 # 多平台部署总览
 
-SMSToWeb 的全部六个平台（Cloudflare 主版本 + 五个移植平台）都在本目录。**每个平台子目录完全自包含**：
+SMSToWeb 支持六个平台，各平台目录都在本目录。**每个平台子目录完全自包含**：
 代码（入口 + 核心应用 + 数据库适配层）+ `schema.sql` + 该平台的详细部署教程（README.md）。
 
 | 平台 | 运行时 | 定时清理 | 详细教程 |
 |---|---|---|---|
-| **Cloudflare**（主版本） | Worker + D1 | 平台 cron | [cloudflare/README.md](cloudflare/README.md) |
+| **Cloudflare** | Worker + D1 | 平台 cron | [cloudflare/README.md](cloudflare/README.md) |
 | Vercel | Edge Function | 平台 cron | [vercel/README.md](vercel/README.md) |
 | Deno Deploy | Deno 原生 | `Deno.cron`（内置） | [deno/README.md](deno/README.md) |
 | Netlify | Functions v2（Node） | Scheduled Function | [netlify/README.md](netlify/README.md) |
 | EdgeOne Makers（腾讯） | Functions | 外部 cron 调 /api/cron | [edgeone/README.md](edgeone/README.md) |
 | Fly.io / Railway / VPS | Docker（Node 22）+ Turso/本地 SQLite | 进程内置 | [node/README.md](node/README.md) |
 
-六平台（含 Cloudflare）接口路径、鉴权逻辑、消息模型、管理页、多渠道通知转发、每日清理（UTC 17:00）完全一致，
-数据表结构相同，可随时互相迁移。
+六个平台共用同一套业务核心与数据格式，便于以后迁移。
 
-> **部署入口实情（按平台官方文档核实，2026-11-09）**
-> - **Cloudflare / Vercel / Netlify**：仓库内已有官方部署按钮，但都属于**「模板部署」**——点完仍需填密钥；Vercel / Netlify 还要先准备 Turso 数据库。Cloudflare 按钮会**自动创建并绑定 D1 数据库**；**建表不是按钮做的**，是应用的 `ensureSchema` 在首次请求自动完成（见 [UPGRADE](../docs/UPGRADE.md)）。
-> - **Deno Deploy / EdgeOne**：平台官方也有 Deploy Button，但本项目**未提供、也未做真实部署验证**，因此不宣称可用；按各平台教程走 Git 导入。
-> - **Node / Docker 自托管**：**没有任何官方一键部署**，按 [node/README.md](node/README.md) 手动部署，并且**必须配置 ≥90s 停止宽限**。
-> - 完整能力矩阵与官方来源：[部署能力矩阵](../docs/guide/10-部署能力矩阵.md)；普通用户最短路径：[快速开始](../docs/guide/02-快速开始.md)。
+> 各平台按钮可用性与配置要求见 [部署能力矩阵](../docs/guide/10-部署能力矩阵.md)；普通用户最短路径见 [快速开始](../docs/guide/02-快速开始.md)。
 
 ## 平台怎么选
 
-- **想要零成本 + 省心** → Cloudflare 主版本（D1 免费额度大，Worker 无时长问题）
+- **想要零成本 + 省心** → Cloudflare（D1 免费额度大，Worker 无时长问题）
 - **想体验多平台** → Deno Deploy（与 Worker 语义最接近，长轮询基本无截断）
 - **主要国内访问** → EdgeOne Makers（注意自定义域名需备案）
 - **已有服务器 / 想完全自控** → node/（Docker 自托管）
 
 > **长轮询与平台超时**：管理页通过 `GET /api/wait` 挂起等待新消息；核心把 `WAIT_MAX_SECONDS` 夹到 **3–25**、默认 **25**。各入口另有保守默认值：Vercel `20`、Netlify `8`、EdgeOne `20`（显式配置的环境变量优先）；Cloudflare / Deno / Node 不覆盖，保持 25。
-> 旧版此处同时出现「Netlify 60 秒上限」与「10 秒上限」两种互相矛盾的说法，且均未在本轮核实到平台官方依据。**请以你所用平台的现行官方文档为准**：若长轮询请求被提前截断，就调低该值；不要照抄本仓库给出的平台秒数。
 > 前端对失败做**指数退避**（2→30s）并在页面重新可见时立即补拉，即使被平台提前截断也**不会影响功能**，仅新消息提醒稍有延迟。
 
 ## 通用准备（所有非 Cloudflare 平台共用）
@@ -77,18 +71,17 @@ turso db shell sms-gateway < schema.sql   # 建表
 
 ```
 platforms/
-├── cloudflare/ # 主版本：worker.js + schema.sql + wrangler.toml + README.md（自包含）
+├── cloudflare/ # worker.js + schema.sql + wrangler.toml + README.md（自包含）
 ├── vercel/     # api/[[...route]].js + app.js + db.js + schema.sql + vercel.json + README.md
 ├── netlify/    # functions/{api,cron}.mjs + app.js + db.js + schema.sql + netlify.toml + README.md
 ├── deno/       # main.js + app.js + db.js + schema.sql + README.md
 ├── edgeone/    # functions/{[[default]].js,index.js} + app.js + db.js + schema.sql + README.md
 ├── node/       # server.mjs + lifecycle.mjs + app.js + db.js + schema.sql + Dockerfile + package.json + README.md
-├── shared/     # app.js / db.js 唯一源（gen_app.py 由此同步到各平台目录）
-└── gen_app.py  # 生成器：从 ../src/worker.js 生成 app.js 并同步全部平台（含 cloudflare 独立副本）
+├── shared/     # app.js / db.js（各平台共享的核心代码）
+└── gen_app.py  # 生成与同步脚本
 ```
 
 每个平台目录可单独作为部署根目录（Git 部署时把平台 Root Directory 指到对应子目录即可），
-零 npm 依赖、无需构建。`src/worker.js` 有更新后执行 `python platforms/gen_app.py`（**写入模式**）同步全部平台，再依次跑 `--check`（只校验 `SCHEMA_SQL` 块与 SQL 引用，**不校验六平台副本是否一致**）、`node tests/run.mjs`（**850 项**）与六平台字节比对。详见 [ARCHITECTURE §3](../docs/ARCHITECTURE.md)。
 
 > **Node 自托管用户必读**：应用默认停机宽限 **80s**（HTTP 30s + 后台任务 45s + 收尾 5s），容器 / 服务必须配 **≥90s**；Docker 默认仅 **10s**，会先 SIGKILL 进程，导致在途请求与后台通知被截断。四种部署方式各自的配置见 [停止宽限与部署配置](../docs/guide/07-停止宽限与部署配置.md)。
 

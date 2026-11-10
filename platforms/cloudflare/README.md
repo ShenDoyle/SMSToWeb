@@ -1,7 +1,7 @@
-# Cloudflare 部署教程（主版本，全程网页操作）
+# Cloudflare 部署教程
 
-这是项目的主版本：手机短信/通知 → Cloudflare Worker → D1 数据库 → 网页管理页。
-无需服务器、免费额度充足、全程网页点击即可完成，无需安装任何工具。
+各渠道消息（短信转发、应用通知、脚本、Webhook、自定义接入）→ Cloudflare Worker → D1 数据库 → 网页管理页。
+全程网页点击即可完成，无需安装任何工具。
 
 本目录**完全自包含**：[`worker.js`](worker.js)（部署源码）+ [`schema.sql`](schema.sql)（建表脚本）+ [`wrangler.toml`](wrangler.toml)（命令行部署可选配置），不依赖仓库其他文件。其余平台见 [平台总览](../README.md)。
 
@@ -148,4 +148,4 @@ npx wrangler deploy
 - **通知渠道没收到**：确认对应渠道变量已配置且值正确；看 Worker 实时日志有无 `notify forward failed:`；`duplicated:true` 的消息不会转发
 - **Worker 免费额度**：每天 10 万次请求，个人使用绰绰有余；D1 免费额度每天 500 万行读取
 - **长轮询**：管理页 `/api/wait` 挂起最长 25 秒等待新消息，Workers 无请求时长问题，实时性最好
-- **数据迁移**：从其他平台迁回 CF 时，导出 Turso 数据再导入 D1 即可（表结构完全一致）
+- **数据迁移**：从其他平台迁回 CF 时，导出 Turso 数据再导入 D1 即可（表结构相同）
