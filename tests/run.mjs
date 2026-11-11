@@ -811,13 +811,13 @@ async function main() {
     rl = await call("POST", "/api/tokens", eL, { headers: XLG, body: { name: "up-exp", note: "旧库带备注", expires_in_days: 30 }, cookie: "sms_auth=" + ((rl.setCookie.match(/sms_auth=([^;]*)/) || [])[1] || "") });
     check(rl.status === 200 && rl.data.success && typeof rl.data.expires_at === "string", "旧库补列后创建带备注+有效期令牌 → 200");
 
-    /* 7) 页脚版本号：管理页与登录页底部均展示 v1.1.0 */
+    /* 7) 页脚版本号：管理页与登录页底部均展示 v1.1.1 */
     const pg = await fetchApp(R("GET", "/", { cookie: ckE }), eE);
     const pgHtml = await pg.text();
-    check(pg.status === 200 && pgHtml.includes('<span class="ver">v1.1.0</span>'), "管理页页脚含版本号 v1.1.0");
+    check(pg.status === 200 && pgHtml.includes('<span class="ver">v1.1.1</span>'), "管理页页脚含版本号 v1.1.1");
     const lg = await fetchApp(R("GET", "/", {}), eE);
     const lgHtml = await lg.text();
-    check(lg.status === 200 && lgHtml.includes('<span class="ver">v1.1.0</span>'), "登录页页脚含版本号 v1.1.0");
+    check(lg.status === 200 && lgHtml.includes('<span class="ver">v1.1.1</span>'), "登录页页脚含版本号 v1.1.1");
     check(pgHtml.includes('id="setbtn"') && pgHtml.includes('openSettingsCenter("session")') && pgHtml.includes("登录有效期（本浏览器）"), "设置入口直连设置中心（登录有效期等分组在设置中心内）");
     check(pgHtml.includes("sms_ttl_min") && pgHtml.includes("登录有效期（本浏览器）"), "设置中心登录有效期分组为本浏览器独立配置（localStorage 键 sms_ttl_min）");
     check(pgHtml.includes("登录有效期（全局默认）") && pgHtml.includes("ds-scope--global") && pgHtml.includes("ds-scope--browser"), "设置中心区分全局与本浏览器作用域（作用域徽章）");

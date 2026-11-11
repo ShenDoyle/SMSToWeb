@@ -69,7 +69,7 @@ function escAttr(s) {
 function jsStr(s) {
   return JSON.stringify(s).replace(/</g, "\\u003c");
 }
-const APP_VERSION = "v1.1.0";
+const APP_VERSION = "v1.1.1";
 
 /* 把页面模板中的占位标记替换为实际配置值（用函数替换器，避免值里含 $& 等特殊序列被误解释） */
 function renderHtml(html, env) {
@@ -2383,7 +2383,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .barrow { display: flex; align-items: center; gap: 8px; font-size: 12px; margin: 4px 0; }
   .barrow .bl { width: 64px; color: var(--muted); flex: none; text-align: right; }
   .barrow .bt { flex: 1; background: var(--row-border); border-radius: 4px; height: 10px; overflow: hidden; }
-  .barrow .bf { height: 100%; background: var(--accent); border-radius: 4px; }
+  /* 填充条必须是块级：inline 元素的 width/height 不生效，会导致百分比宽度渲染为 0 */
+  .barrow .bf { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
   .barrow .bn { width: 34px; text-align: right; color: var(--muted); flex: none; }
   /* ---------- 移动端体验与浏览器兼容 ---------- */
   html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
@@ -2555,6 +2556,10 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .ds-alert b { font-weight: 600; color: var(--ds-color-text); }
   .ds-alert--warning { border-left-color: var(--ds-color-warning); }
   .ds-alert--danger { border-left-color: var(--ds-color-danger); color: var(--ds-color-danger); }
+  /* 设置中心 revision 冲突条：一句说明 + 就地「重新加载最新配置」，窄屏自动换行 */
+  .ds-alert.sc-conflict { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 10px; }
+  .sc-conflict > span { flex: 1 1 220px; min-width: 0; }
+  .sc-conflict > .ds-btn { flex: 0 0 auto; color: var(--ds-color-text); }
   .ds-empty { text-align: center; color: var(--ds-color-text-tertiary); padding: var(--ds-space-7) var(--ds-space-4);
     font-size: var(--ds-text-sm); }
   .ds-switch { position: relative; flex: none; width: 40px; height: 22px; border-radius: var(--ds-radius-pill);
@@ -2872,6 +2877,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     <div class="top-actions">
       <button class="tbtn" id="themebtn" data-i18n-title="themeTip">自动</button>
       <button class="tbtn" id="setbtn" data-i18n-title="settings" data-i18n="settings">⚙ 设置</button>
+      <button class="tbtn" id="logoutbtn" type="button" data-i18n-title="scLogoutTip" data-i18n="scLogout">退出</button>
     </div>
   </header>
 
@@ -2945,12 +2951,11 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         <div class="tabs" id="tabs" role="tablist" data-i18n-aria="devices" aria-label="设备标签"></div>
       </section>
       <section class="panel side-card">
-        <div class="side-title"><span data-i18n="settingsOverview">设置概览</span><button class="mini-link" id="sideSetBtn" type="button" data-i18n="openSettings">打开设置中心</button></div>
+        <div class="side-title"><span data-i18n="settingsOverview">设置概览</span><button class="mini-link" id="sideSetBtn" type="button" data-i18n="openSettings">打开设置中心</button><button class="mini-link" id="sideNotifyBtn" type="button" data-i18n="scNotifyConfig">配置通知渠道</button></div>
         <div class="settings-rows" id="sideSettings"></div>
       </section>
       <section class="panel side-card">
         <div class="side-title"><span data-i18n="quickOverview">快捷概览</span><button class="mini-link" id="sideStatsBtn" type="button" data-i18n="viewStats">查看统计</button></div>
-        <div class="side-rows" id="sideQuick"></div>
         <div class="side-row"><span data-i18n="unread">未读</span><strong><span id="unreadcount">0</span></strong></div>
       </section>
     </aside>
@@ -3023,7 +3028,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       var v = String(s || "").toLowerCase().replace(/_/g, "-");
       if (v === "zh" || v === "zh-cn" || v === "zh-hans") return "zh-CN";
       if (v === "zh-tw" || v === "zh-hk" || v === "zh-mo" || v === "zh-hant") return "zh-TW";
-      if (v === "pt") return "pt-BR";
+      if (v === "pt" || v === "pt-br") return "pt-BR";
       return LANGS.indexOf(v) >= 0 ? v : "";
     }
     var v = "";
@@ -3753,7 +3758,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scReadFail: "读取设置失败",
     scSaveFail: "保存失败",
     scSaveFailMsg: "保存失败：{e}",
-    scRevisionConflict: "设置已被其他会话修改，请关闭后重新打开再保存",
+    scRevisionConflict: "设置已被其他会话修改，请重新加载最新配置后再保存",
     scSavedTtl: "设置已保存（下次登录生效）",
     scSavedTtlGlobal: "设置已保存（本浏览器时长下次登录生效）",
     scKeepOneType: "至少保留一种转发类型",
@@ -3867,7 +3872,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scReadFail: "讀取設定失敗",
     scSaveFail: "儲存失敗",
     scSaveFailMsg: "儲存失敗：{e}",
-    scRevisionConflict: "設定已被其他工作階段修改，請關閉後重新開啟再儲存",
+    scRevisionConflict: "設定已被其他工作階段修改，請重新載入最新設定後再儲存",
     scSavedTtl: "設定已儲存（下次登入生效）",
     scSavedTtlGlobal: "設定已儲存（本瀏覽器時長下次登入生效）",
     scKeepOneType: "至少保留一種轉發類型",
@@ -3981,7 +3986,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scReadFail: "Failed to load settings",
     scSaveFail: "Save failed",
     scSaveFailMsg: "Save failed: {e}",
-    scRevisionConflict: "Settings were changed in another session — close and reopen before saving",
+    scRevisionConflict: "Settings were changed in another session — reload the latest settings before saving",
     scSavedTtl: "Saved (applies to your next sign-in)",
     scSavedTtlGlobal: "Saved (this browser's duration applies to your next sign-in)",
     scKeepOneType: "Keep at least one forward type",
@@ -4095,7 +4100,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scReadFail: "設定の読み込みに失敗しました",
     scSaveFail: "保存に失敗しました",
     scSaveFailMsg: "保存に失敗しました：{e}",
-    scRevisionConflict: "別のセッションで設定が変更されました。閉じて開き直してから保存してください",
+    scRevisionConflict: "別のセッションで設定が変更されました。最新の設定を再読み込みしてから保存してください",
     scSavedTtl: "保存しました（次回ログインから有効）",
     scSavedTtlGlobal: "保存しました（このブラウザーの期間は次回ログインから有効）",
     scKeepOneType: "転送する種類を 1 つ以上選んでください",
@@ -4209,7 +4214,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scReadFail: "설정을 불러오지 못했습니다",
     scSaveFail: "저장 실패",
     scSaveFailMsg: "저장 실패: {e}",
-    scRevisionConflict: "다른 세션에서 설정이 변경되었습니다. 닫았다가 다시 열고 저장하세요",
+    scRevisionConflict: "다른 세션에서 설정이 변경되었습니다. 최신 설정을 다시 불러온 뒤 저장하세요",
     scSavedTtl: "저장했습니다(다음 로그인부터 적용)",
     scSavedTtlGlobal: "저장했습니다(이 브라우저 기간은 다음 로그인부터 적용)",
     scKeepOneType: "전달 유형을 하나 이상 선택하세요",
@@ -4323,7 +4328,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scReadFail: "No se pudieron cargar los ajustes",
     scSaveFail: "Error al guardar",
     scSaveFailMsg: "Error al guardar: {e}",
-    scRevisionConflict: "Los ajustes cambiaron en otra sesión: cierre y reabra antes de guardar",
+    scRevisionConflict: "Los ajustes cambiaron en otra sesión: recarga los más recientes antes de guardar",
     scSavedTtl: "Guardado (se aplica al próximo inicio de sesión)",
     scSavedTtlGlobal: "Guardado (la duración de este navegador se aplica al próximo inicio)",
     scKeepOneType: "Mantenga al menos un tipo",
@@ -4437,7 +4442,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scReadFail: "Échec du chargement des réglages",
     scSaveFail: "Échec de l'enregistrement",
     scSaveFailMsg: "Échec de l'enregistrement : {e}",
-    scRevisionConflict: "Réglages modifiés dans une autre session : rouvrez avant d'enregistrer",
+    scRevisionConflict: "Réglages modifiés dans une autre session : rechargez les réglages à jour avant d'enregistrer",
     scSavedTtl: "Enregistré (applicable à la prochaine connexion)",
     scSavedTtlGlobal: "Enregistré (la durée de ce navigateur s'applique à la prochaine connexion)",
     scKeepOneType: "Conservez au moins un type",
@@ -4551,7 +4556,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scReadFail: "Einstellungen konnten nicht geladen werden",
     scSaveFail: "Speichern fehlgeschlagen",
     scSaveFailMsg: "Speichern fehlgeschlagen: {e}",
-    scRevisionConflict: "Einstellungen wurden in einer anderen Sitzung geändert – schließen und neu öffnen",
+    scRevisionConflict: "Einstellungen wurden in einer anderen Sitzung geändert – lade die neuesten Einstellungen vor dem Speichern neu",
     scSavedTtl: "Gespeichert (gilt ab der nächsten Anmeldung)",
     scSavedTtlGlobal: "Gespeichert (Browsergauer gilt ab der nächsten Anmeldung)",
     scKeepOneType: "Mindestens einen Typ behalten",
@@ -4665,7 +4670,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scReadFail: "Falha ao carregar ajustes",
     scSaveFail: "Falha ao salvar",
     scSaveFailMsg: "Falha ao salvar: {e}",
-    scRevisionConflict: "Ajustes alterados em outra sessão: feche e reabra antes de salvar",
+    scRevisionConflict: "Ajustes alterados em outra sessão: recarregue os mais recentes antes de salvar",
     scSavedTtl: "Salvo (vale no próximo login)",
     scSavedTtlGlobal: "Salvo (a duração deste navegador vale no próximo login)",
     scKeepOneType: "Mantenha ao menos um tipo",
@@ -4926,7 +4931,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scPushTypesHelp: "只接收勾选的类型，与全局规则同时生效（默认全部接收）。",
       scPushRulesHelp: "未填写的内容按「不修改」处理；已保存的敏感字段只显示脱敏结果。",
       scPushNameRequired: "请填写推送名称", scPushNeedTypes: "请至少选择一种接收类型",
-      scPushFieldNeed: "请填写「{f}」", scPushAdded: "已添加推送，保存后生效", scPushUpdated: "已更新推送，保存后生效",
+      scPushFieldNeed: "请填写「{f}」", scPushAdded: "已添加推送，保存后生效", scPushUpdated: "已更新推送，保存后生效", scSavedLocal: "本浏览器设置已保存", scReloadLatest: "重新加载最新配置", scReloadConfirm: "重新加载会丢弃当前未保存的修改，继续？", scPushRequired: "必填：{f}", scTargetDelConfirm: "确定删除推送「{n}」？",
       scEdit: "编辑", scBack: "上一步", scEnvChannels: "其他已配置渠道",
       scEnvChannelsHelp: "这些渠道还没有单独的推送卡片，仍会按全局规则发送；可以在这里停用或测试。",
       scImportEnvHelp: "把部署环境里的通知配置复制到设置页，方便统一查看；已有的项不会覆盖，环境变量始终优先。"
@@ -4952,7 +4957,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scPushTypesHelp: "只接收勾選的類型，與全域規則同時生效（預設全部接收）。",
       scPushRulesHelp: "未填寫的內容視為「不修改」；已儲存的機密欄位只顯示去識別化結果。",
       scPushNameRequired: "請填寫推送名稱", scPushNeedTypes: "請至少選擇一種接收類型",
-      scPushFieldNeed: "請填寫「{f}」", scPushAdded: "已新增推送，儲存後生效", scPushUpdated: "已更新推送，儲存後生效",
+      scPushFieldNeed: "請填寫「{f}」", scPushAdded: "已新增推送，儲存後生效", scPushUpdated: "已更新推送，儲存後生效", scSavedLocal: "本瀏覽器設定已儲存", scReloadLatest: "重新載入最新設定", scReloadConfirm: "重新載入會捨棄目前未儲存的修改，繼續？", scPushRequired: "必填：{f}", scTargetDelConfirm: "確定刪除推送「{n}」？",
       scEdit: "編輯", scBack: "上一步", scEnvChannels: "其他已設定管道",
       scEnvChannelsHelp: "這些管道還沒有獨立的推送卡片，仍會依全域規則傳送；可以在這裡停用或測試。",
       scImportEnvHelp: "把部署環境裡的通知設定複製到設定頁，方便統一檢視；既有的項目不會覆蓋，環境變數始終優先。"
@@ -4978,7 +4983,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scPushTypesHelp: "Only ticked types are delivered, together with the global rules (all types by default).",
       scPushRulesHelp: "Leave a field empty to keep the current value; stored sensitive fields show a masked value only.",
       scPushNameRequired: "Enter a push name", scPushNeedTypes: "Select at least one accepted type",
-      scPushFieldNeed: "Enter \"{f}\"", scPushAdded: "Push added; save to apply", scPushUpdated: "Push updated; save to apply",
+      scPushFieldNeed: "Enter \"{f}\"", scPushAdded: "Push added; save to apply", scPushUpdated: "Push updated; save to apply", scSavedLocal: "Browser settings saved", scReloadLatest: "Reload latest settings", scReloadConfirm: "Reloading discards your unsaved changes. Continue?", scPushRequired: "Required: {f}", scTargetDelConfirm: "Delete push \"{n}\"?",
       scEdit: "Edit", scBack: "Back", scEnvChannels: "Other configured channels",
       scEnvChannelsHelp: "These channels have no separate push card yet and still follow the global rules. You can disable or test them here.",
       scImportEnvHelp: "Copy notification settings from the deployment environment into this page for easier management. Existing items are not overwritten, and environment variables always take precedence."
@@ -5004,7 +5009,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scPushTypesHelp: "チェックしたタイプのみ受信します。全体ルールと併用されます（既定はすべて）。",
       scPushRulesHelp: "空欄は「変更なし」として扱われ、保存済みの機密項目は伏字のみ表示します。",
       scPushNameRequired: "プッシュ名を入力してください", scPushNeedTypes: "受信タイプを1つ以上選択してください",
-      scPushFieldNeed: "「{f}」を入力してください", scPushAdded: "プッシュを追加しました。保存後に有効になります", scPushUpdated: "プッシュを更新しました。保存後に有効になります",
+      scPushFieldNeed: "「{f}」を入力してください", scPushAdded: "プッシュを追加しました。保存後に有効になります", scPushUpdated: "プッシュを更新しました。保存後に有効になります", scSavedLocal: "このブラウザの設定を保存しました", scReloadLatest: "最新の設定を再読み込み", scReloadConfirm: "再読み込みすると未保存の変更は破棄されます。続行しますか？", scPushRequired: "必須：{f}", scTargetDelConfirm: "プッシュ「{n}」を削除しますか？",
       scEdit: "編集", scBack: "戻る", scEnvChannels: "その他の設定済みチャネル",
       scEnvChannelsHelp: "これらのチャネルはまだ個別のプッシュカードがなく、全体ルールに従って送信されます。ここで無効化やテストができます。",
       scImportEnvHelp: "デプロイ環境の通知設定をこのページにコピーして管理しやすくします。既存の項目は上書きされず、環境変数が常に優先されます。"
@@ -5030,7 +5035,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scPushTypesHelp: "선택한 유형만 수신하며 전역 규칙과 함께 적용됩니다(기본값 전체).",
       scPushRulesHelp: "빈 항목은 변경하지 않음으로 처리되며, 저장된 민감 항목은 마스킹된 값만 표시됩니다.",
       scPushNameRequired: "푸시 이름을 입력하세요", scPushNeedTypes: "수신 유형을 하나 이상 선택하세요",
-      scPushFieldNeed: "「{f}」을(를) 입력하세요", scPushAdded: "푸시가 추가되었습니다. 저장 후 적용됩니다", scPushUpdated: "푸시가 업데이트되었습니다. 저장 후 적용됩니다",
+      scPushFieldNeed: "「{f}」을(를) 입력하세요", scPushAdded: "푸시가 추가되었습니다. 저장 후 적용됩니다", scPushUpdated: "푸시가 업데이트되었습니다. 저장 후 적용됩니다", scSavedLocal: "이 브라우저 설정을 저장했습니다", scReloadLatest: "최신 설정 다시 불러오기", scReloadConfirm: "다시 불러오면 저장하지 않은 변경 사항이 사라집니다. 계속할까요?", scPushRequired: "필수: {f}", scTargetDelConfirm: "푸시 \"{n}\"을(를) 삭제할까요?",
       scEdit: "편집", scBack: "이전", scEnvChannels: "기타 설정된 채널",
       scEnvChannelsHelp: "이 채널들은 아직 개별 푸시 카드가 없으며 전역 규칙에 따라 전송됩니다. 여기서 비활성화하거나 테스트할 수 있습니다.",
       scImportEnvHelp: "배포 환경의 알림 설정을 이 페이지로 복사해 관리하기 쉽게 합니다. 기존 항목은 덮어쓰지 않으며 환경 변수가 항상 우선합니다."
@@ -5056,7 +5061,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scPushTypesHelp: "Solo se envían los tipos marcados, junto con las reglas globales (todos por defecto).",
       scPushRulesHelp: "Dejar un campo vacío no lo modifica; los campos sensibles guardados solo muestran un valor enmascarado.",
       scPushNameRequired: "Escribe un nombre para el envío", scPushNeedTypes: "Selecciona al menos un tipo",
-      scPushFieldNeed: "Escribe «{f}»", scPushAdded: "Envío añadido; guarda para aplicar", scPushUpdated: "Envío actualizado; guarda para aplicar",
+      scPushFieldNeed: "Escribe «{f}»", scPushAdded: "Envío añadido; guarda para aplicar", scPushUpdated: "Envío actualizado; guarda para aplicar", scSavedLocal: "Ajustes de este navegador guardados", scReloadLatest: "Recargar los ajustes más recientes", scReloadConfirm: "Recargar descartará los cambios sin guardar. ¿Continuar?", scPushRequired: "Obligatorio: {f}", scTargetDelConfirm: "¿Eliminar el envío «{n}»?",
       scEdit: "Editar", scBack: "Atrás", scEnvChannels: "Otros canales configurados",
       scEnvChannelsHelp: "Estos canales aún no tienen una tarjeta de envío propia y siguen las reglas globales. Puedes desactivarlos o probarlos aquí.",
       scImportEnvHelp: "Copia la configuración de notificaciones del entorno de despliegue en esta página para gestionarla mejor. Lo existente no se sobrescribe y las variables de entorno siempre tienen prioridad."
@@ -5082,7 +5087,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scPushTypesHelp: "Seuls les types cochés sont envoyés, avec les règles globales (tous par défaut).",
       scPushRulesHelp: "Laisser un champ vide ne le modifie pas ; les champs sensibles enregistrés n'affichent qu'une valeur masquée.",
       scPushNameRequired: "Saisissez un nom d'envoi", scPushNeedTypes: "Sélectionnez au moins un type",
-      scPushFieldNeed: "Saisissez « {f} »", scPushAdded: "Envoi ajouté ; enregistrez pour appliquer", scPushUpdated: "Envoi mis à jour ; enregistrez pour appliquer",
+      scPushFieldNeed: "Saisissez « {f} »", scPushAdded: "Envoi ajouté ; enregistrez pour appliquer", scPushUpdated: "Envoi mis à jour ; enregistrez pour appliquer", scSavedLocal: "Réglages de ce navigateur enregistrés", scReloadLatest: "Recharger les réglages à jour", scReloadConfirm: "Le rechargement annulera les modifications non enregistrées. Continuer ?", scPushRequired: "Obligatoire : {f}", scTargetDelConfirm: "Supprimer l'envoi « {n} » ?",
       scEdit: "Modifier", scBack: "Retour", scEnvChannels: "Autres canaux configurés",
       scEnvChannelsHelp: "Ces canaux n'ont pas encore de carte d'envoi dédiée et suivent les règles globales. Vous pouvez les désactiver ou les tester ici.",
       scImportEnvHelp: "Copiez la configuration de notification de l'environnement de déploiement dans cette page pour la gérer plus facilement. L'existant n'est pas écrasé et les variables d'environnement restent prioritaires."
@@ -5108,7 +5113,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scPushTypesHelp: "Nur angehakte Typen werden zugestellt, zusammen mit den globalen Regeln (standardmäßig alle).",
       scPushRulesHelp: "Ein leeres Feld bleibt unverändert; gespeicherte sensible Felder zeigen nur einen maskierten Wert.",
       scPushNameRequired: "Bitte einen Push-Namen eingeben", scPushNeedTypes: "Mindestens einen Typ auswählen",
-      scPushFieldNeed: "„{f}“ eingeben", scPushAdded: "Push hinzugefügt; zum Anwenden speichern", scPushUpdated: "Push aktualisiert; zum Anwenden speichern",
+      scPushFieldNeed: "„{f}“ eingeben", scPushAdded: "Push hinzugefügt; zum Anwenden speichern", scPushUpdated: "Push aktualisiert; zum Anwenden speichern", scSavedLocal: "Browsereinstellungen gespeichert", scReloadLatest: "Neueste Einstellungen neu laden", scReloadConfirm: "Beim Neuladen gehen ungespeicherte Änderungen verloren. Fortfahren?", scPushRequired: "Pflichtfeld: {f}", scTargetDelConfirm: "Push „{n}“ löschen?",
       scEdit: "Bearbeiten", scBack: "Zurück", scEnvChannels: "Weitere konfigurierte Kanäle",
       scEnvChannelsHelp: "Diese Kanäle haben noch keine eigene Push-Karte und folgen den globalen Regeln. Hier kannst du sie deaktivieren oder testen.",
       scImportEnvHelp: "Kopiert die Benachrichtigungseinstellungen aus der Bereitstellungsumgebung auf diese Seite zur einfacheren Verwaltung. Vorhandene Einträge werden nicht überschrieben, Umgebungsvariablen haben immer Vorrang."
@@ -5134,7 +5139,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scPushTypesHelp: "Apenas os tipos marcados são entregues, junto com as regras globais (todos por padrão).",
       scPushRulesHelp: "Deixar um campo vazio não o altera; campos sensíveis salvos mostram apenas um valor mascarado.",
       scPushNameRequired: "Informe um nome para o envio", scPushNeedTypes: "Selecione ao menos um tipo",
-      scPushFieldNeed: "Informe «{f}»", scPushAdded: "Envio adicionado; salve para aplicar", scPushUpdated: "Envio atualizado; salve para aplicar",
+      scPushFieldNeed: "Informe «{f}»", scPushAdded: "Envio adicionado; salve para aplicar", scPushUpdated: "Envio atualizado; salve para aplicar", scSavedLocal: "Configurações deste navegador salvas", scReloadLatest: "Recarregar as configurações mais recentes", scReloadConfirm: "Recarregar descarta as alterações não salvas. Continuar?", scPushRequired: "Obrigatório: {f}", scTargetDelConfirm: "Excluir o envio «{n}»?",
       scEdit: "Editar", scBack: "Voltar", scEnvChannels: "Outros canais configurados",
       scEnvChannelsHelp: "Esses canais ainda não têm um cartão de envio próprio e seguem as regras globais. Você pode desativá-los ou testá-los aqui.",
       scImportEnvHelp: "Copie as configurações de notificação do ambiente de implantação para esta página para facilitar a gestão. Itens existentes não são sobrescritos e as variáveis de ambiente sempre têm prioridade."
@@ -5179,6 +5184,524 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       for (var _xk in EXTRA_I18N[_xl]) I18N[_xl][_xk] = EXTRA_I18N[_xl][_xk];
     }
   })();
+
+  /* 接入令牌面板、系统弹层、退出登录与通知配置入口文案（九语种）：
+     补齐 L6135–6271 令牌面板区域的中文硬编码、closeModal 未保存确认（L5913）、
+     退出登录按钮与设置概览的通知配置入口。键名 scTok*、scLogout*、scNotifyConfig 自成一表，
+     合并进 I18N，不改变既有字典结构。 */
+  var TOK_I18N = {
+    "zh-CN": {
+      scTokEnvNote: "当前仍可用部署时环境变量令牌接入；建议创建命名令牌后停用引导令牌（设置 DISABLE_RECEIVE_TOKEN=true）。",
+      scTokLoading: "加载中…",
+      scTokNamePh: "令牌名称（字母/数字/_/-）",
+      scTokCreate: "＋ 新建令牌",
+      scTokExpForever: "永久有效",
+      scTokExpDays: "{n} 天后到期",
+      scTokExpCustom: "自定义到期日…",
+      scTokNotePh: "备注（可选，便于区分用途）",
+      scTokNameLabel: "令牌名称",
+      scTokExpLabel: "有效期",
+      scTokExpDateLabel: "到期日期",
+      scTokNoteLabel: "备注",
+      scTokLoadFail: "加载失败",
+      scTokEmpty: "还没有库内令牌。",
+      scTokForever: "永久",
+      scTokCreated: "创建 {t}",
+      scTokLastUsed: "最近使用 {t}",
+      scTokExpires: "到期 {t}",
+      scTokRevoked: "已吊销",
+      scTokExpired: "已过期",
+      scTokActive: "活跃",
+      scTokRename: "重命名",
+      scTokRotate: "轮换",
+      scTokRevoke: "吊销",
+      scTokName: "名称：",
+      scTokSaveWarn: "关闭后无法再次查看，请立即复制保存。",
+      scTokSavedClose: "我已保存，关闭",
+      scTokCopy: "复制",
+      scTokNameRequired: "请输入令牌名称",
+      scTokExpDateRequired: "请选择到期日期",
+      scTokNameTaken: "该名称已被使用（活跃令牌名唯一）",
+      scTokNameInvalid: "名称非法：仅限字母/数字/_/-，最长 64",
+      scTokNoteTooLong: "备注过长：最长 200 字",
+      scTokExpiryInvalid: "有效期无效：请选择预设天数或有效日期",
+      scTokCreateFail: "创建失败",
+      scTokCreatedTitle: "令牌已创建",
+      scTokAlreadyRevoked: "该令牌已是吊销状态",
+      scTokNotFound: "令牌不存在",
+      scTokRevokeFail: "吊销失败",
+      scTokRevokeConfirm: "确认吊销令牌「{name}」？使用该令牌的接入将立即失效（403）。",
+      scTokRotateConfirm: "确认轮换令牌「{name}」？旧令牌立即吊销失效，并生成同名新令牌。",
+      scTokRotatedTitle: "令牌已轮换",
+      scTokNotFoundOrRevoked: "令牌不存在或已吊销",
+      scTokRenamePrompt: "重命名令牌「{name}」\n仅限字母/数字/_/-，最长 64",
+      scTokNameEmpty: "令牌名称不能为空",
+      scTokRenamed: "令牌名称已更新",
+      scTokRenameFail: "重命名失败",
+      scTokRotateFail: "轮换失败",
+      scUnsavedConfirm: "设置有未保存的修改，关闭后这些修改将丢弃。确定关闭？",
+      scNotifyConfig: "配置通知渠道",
+      scLogout: "退出",
+      scLogoutTip: "退出登录",
+      scLogoutConfirm: "确定退出登录？",
+      scLogoutFailed: "退出失败，请重试"
+    },
+    "zh-TW": {
+      scTokEnvNote: "目前仍可用部署時環境變數權杖接入；建議建立命名權杖後停用引導權杖（設定 DISABLE_RECEIVE_TOKEN=true）。",
+      scTokLoading: "載入中…",
+      scTokNamePh: "權杖名稱（字母/數字/_/-）",
+      scTokCreate: "＋ 新增權杖",
+      scTokExpForever: "永久有效",
+      scTokExpDays: "{n} 天後到期",
+      scTokExpCustom: "自訂到期日…",
+      scTokNotePh: "備註（選填，便於區分用途）",
+      scTokNameLabel: "權杖名稱",
+      scTokExpLabel: "有效期",
+      scTokExpDateLabel: "到期日期",
+      scTokNoteLabel: "備註",
+      scTokLoadFail: "載入失敗",
+      scTokEmpty: "還沒有庫內權杖。",
+      scTokForever: "永久",
+      scTokCreated: "建立 {t}",
+      scTokLastUsed: "最近使用 {t}",
+      scTokExpires: "到期 {t}",
+      scTokRevoked: "已吊銷",
+      scTokExpired: "已過期",
+      scTokActive: "活躍",
+      scTokRename: "重新命名",
+      scTokRotate: "輪換",
+      scTokRevoke: "吊銷",
+      scTokName: "名稱：",
+      scTokSaveWarn: "關閉後無法再次查看，請立即複製保存。",
+      scTokSavedClose: "我已儲存，關閉",
+      scTokCopy: "複製",
+      scTokNameRequired: "請輸入權杖名稱",
+      scTokExpDateRequired: "請選擇到期日期",
+      scTokNameTaken: "該名稱已被使用（活躍權杖名唯一）",
+      scTokNameInvalid: "名稱非法：僅限字母/數字/_/-，最長 64",
+      scTokNoteTooLong: "備註過長：最長 200 字",
+      scTokExpiryInvalid: "有效期無效：請選擇預設天數或有效日期",
+      scTokCreateFail: "建立失敗",
+      scTokCreatedTitle: "權杖已建立",
+      scTokAlreadyRevoked: "該權杖已是吊銷狀態",
+      scTokNotFound: "權杖不存在",
+      scTokRevokeFail: "吊銷失敗",
+      scTokRevokeConfirm: "確認吊銷權杖「{name}」？使用該權杖的接入將立即失效（403）。",
+      scTokRotateConfirm: "確認輪換權杖「{name}」？舊權杖立即吊銷失效，並生成同名新權杖。",
+      scTokRotatedTitle: "權杖已輪換",
+      scTokNotFoundOrRevoked: "權杖不存在或已吊銷",
+      scTokRenamePrompt: "重新命名權杖「{name}」\n僅限字母/數字/_/-，最長 64",
+      scTokNameEmpty: "權杖名稱不能為空",
+      scTokRenamed: "權杖名稱已更新",
+      scTokRenameFail: "重新命名失敗",
+      scTokRotateFail: "輪換失敗",
+      scUnsavedConfirm: "設定有未儲存的修改，關閉後這些修改將丟棄。確定關閉？",
+      scNotifyConfig: "設定通知渠道",
+      scLogout: "登出",
+      scLogoutTip: "登出",
+      scLogoutConfirm: "確定登出？",
+      scLogoutFailed: "登出失敗，請重試"
+    },
+    "en": {
+      scTokEnvNote: "Environment-variable tokens from deployment still work; after creating named tokens, disable the bootstrap token (set DISABLE_RECEIVE_TOKEN=true).",
+      scTokLoading: "Loading…",
+      scTokNamePh: "Token name (letters/digits/_/-)",
+      scTokCreate: "＋ New token",
+      scTokExpForever: "Never expires",
+      scTokExpDays: "Expires in {n} days",
+      scTokExpCustom: "Custom expiry date…",
+      scTokNotePh: "Note (optional, to tell tokens apart)",
+      scTokNameLabel: "Token name",
+      scTokExpLabel: "Expiry",
+      scTokExpDateLabel: "Expiry date",
+      scTokNoteLabel: "Note",
+      scTokLoadFail: "Failed to load",
+      scTokEmpty: "No tokens stored yet.",
+      scTokForever: "permanent",
+      scTokCreated: "Created {t}",
+      scTokLastUsed: "Last used {t}",
+      scTokExpires: "Expires {t}",
+      scTokRevoked: "Revoked",
+      scTokExpired: "Expired",
+      scTokActive: "Active",
+      scTokRename: "Rename",
+      scTokRotate: "Rotate",
+      scTokRevoke: "Revoke",
+      scTokName: "Name: ",
+      scTokSaveWarn: "You cannot view it again after closing — copy and save it now.",
+      scTokSavedClose: "I've saved it, close",
+      scTokCopy: "Copy",
+      scTokNameRequired: "Please enter a token name",
+      scTokExpDateRequired: "Please choose an expiry date",
+      scTokNameTaken: "That name is already used (active token names are unique)",
+      scTokNameInvalid: "Invalid name: only letters/digits/_/-, max 64",
+      scTokNoteTooLong: "Note too long: max 200 characters",
+      scTokExpiryInvalid: "Invalid expiry: choose a preset duration or a valid date",
+      scTokCreateFail: "Failed to create",
+      scTokCreatedTitle: "Token created",
+      scTokAlreadyRevoked: "This token is already revoked",
+      scTokNotFound: "Token not found",
+      scTokRevokeFail: "Failed to revoke",
+      scTokRevokeConfirm: "Revoke token 「{name}」? Access using it becomes invalid immediately (403).",
+      scTokRotateConfirm: "Rotate token 「{name}」? The old token is revoked immediately and a new token with the same name is generated.",
+      scTokRotatedTitle: "Token rotated",
+      scTokNotFoundOrRevoked: "Token not found or already revoked",
+      scTokRenamePrompt: "Rename token 「{name}」\nOnly letters/digits/_/-, max 64",
+      scTokNameEmpty: "Token name cannot be empty",
+      scTokRenamed: "Token name updated",
+      scTokRenameFail: "Failed to rename",
+      scTokRotateFail: "Failed to rotate",
+      scUnsavedConfirm: "You have unsaved changes. Closing discards them. Close anyway?",
+      scNotifyConfig: "Configure notifications",
+      scLogout: "Log out",
+      scLogoutTip: "Log out",
+      scLogoutConfirm: "Log out?",
+      scLogoutFailed: "Logout failed, please retry"
+    },
+    "ja": {
+      scTokEnvNote: "デプロイ時の環境変数トークンも引き続き利用できます。名前付きトークンを作成したら、ブートストラップ・トークンを無効化してください（DISABLE_RECEIVE_TOKEN=true を設定）。",
+      scTokLoading: "読み込み中…",
+      scTokNamePh: "トークン名（英字/数字/_/-）",
+      scTokCreate: "＋ トークンを作成",
+      scTokExpForever: "無期限",
+      scTokExpDays: "{n} 日後に失効",
+      scTokExpCustom: "有効期限を指定…",
+      scTokNotePh: "メモ（任意、用途の区別用）",
+      scTokNameLabel: "トークン名",
+      scTokExpLabel: "有効期限",
+      scTokExpDateLabel: "失効日",
+      scTokNoteLabel: "メモ",
+      scTokLoadFail: "読み込み失敗",
+      scTokEmpty: "まだ庫内にトークンはありません。",
+      scTokForever: "無期限",
+      scTokCreated: "作成 {t}",
+      scTokLastUsed: "最終使用 {t}",
+      scTokExpires: "失効 {t}",
+      scTokRevoked: "失効済み",
+      scTokExpired: "期限切れ",
+      scTokActive: "有効",
+      scTokRename: "名前変更",
+      scTokRotate: "ローテーション",
+      scTokRevoke: "失効",
+      scTokName: "名前: ",
+      scTokSaveWarn: "閉じると再表示できません。今すぐコピーして保存してください。",
+      scTokSavedClose: "保存済み、閉じる",
+      scTokCopy: "コピー",
+      scTokNameRequired: "トークン名を入力してください",
+      scTokExpDateRequired: "失効日を選択してください",
+      scTokNameTaken: "その名前は既に使われています（有効トークン名は一意）",
+      scTokNameInvalid: "名前が無効です：英字/数字/_/- のみ、最大 64 文字",
+      scTokNoteTooLong: "メモが長すぎます：最大 200 文字",
+      scTokExpiryInvalid: "有効期限が無効です：所定の日数または有効な日付を選択してください",
+      scTokCreateFail: "作成失敗",
+      scTokCreatedTitle: "トークンを作成しました",
+      scTokAlreadyRevoked: "このトークンは既に失効しています",
+      scTokNotFound: "トークンが見つかりません",
+      scTokRevokeFail: "失効失敗",
+      scTokRevokeConfirm: "トークン「{name}」を失効しますか？このトークンでの接入は直ちに無効になります（403）。",
+      scTokRotateConfirm: "トークン「{name}」をローテーションしますか？古いトークンは即座に失効し、同名の新しいトークンが生成されます。",
+      scTokRotatedTitle: "トークンをローテーションしました",
+      scTokNotFoundOrRevoked: "トークンが見つからないか既に失効しています",
+      scTokRenamePrompt: "トークン「{name}」の名前を変更\n英字/数字/_/- のみ、最大 64 文字",
+      scTokNameEmpty: "トークン名は空にできません",
+      scTokRenamed: "トークン名を更新しました",
+      scTokRenameFail: "名前変更失敗",
+      scTokRotateFail: "ローテーション失敗",
+      scUnsavedConfirm: "未保存の変更があります。閉じると破棄されます。閉じますか？",
+      scNotifyConfig: "通知チャネルを設定",
+      scLogout: "ログアウト",
+      scLogoutTip: "ログアウト",
+      scLogoutConfirm: "ログアウトしますか？",
+      scLogoutFailed: "ログアウト失敗、もう一度お試しください"
+    },
+    "ko": {
+      scTokEnvNote: "배포 시 환경 변수 토큰도 계속 사용할 수 있습니다. 이름 있는 토큰을 만든 후 부트스트랩 토큰을 비활성화하세요(DISABLE_RECEIVE_TOKEN=true 설정).",
+      scTokLoading: "불러오는 중…",
+      scTokNamePh: "토큰 이름(문자/숫자/_/-)",
+      scTokCreate: "＋ 토큰 만들기",
+      scTokExpForever: "만료 없음",
+      scTokExpDays: "{n}일 후 만료",
+      scTokExpCustom: "사용자 지정 만료일…",
+      scTokNotePh: "메모(선택, 용도 구분용)",
+      scTokNameLabel: "토큰 이름",
+      scTokExpLabel: "만료",
+      scTokExpDateLabel: "만료일",
+      scTokNoteLabel: "메모",
+      scTokLoadFail: "불러오기 실패",
+      scTokEmpty: "아직 저장된 토큰이 없습니다.",
+      scTokForever: "만료 없음",
+      scTokCreated: "생성 {t}",
+      scTokLastUsed: "마지막 사용 {t}",
+      scTokExpires: "만료 {t}",
+      scTokRevoked: "해지됨",
+      scTokExpired: "만료됨",
+      scTokActive: "활성",
+      scTokRename: "이름 변경",
+      scTokRotate: "로테이션",
+      scTokRevoke: "해지",
+      scTokName: "이름: ",
+      scTokSaveWarn: "닫으면 다시 볼 수 없습니다. 지금 복사해 저장하세요.",
+      scTokSavedClose: "저장했으니 닫기",
+      scTokCopy: "복사",
+      scTokNameRequired: "토큰 이름을 입력하세요",
+      scTokExpDateRequired: "만료일을 선택하세요",
+      scTokNameTaken: "이름이 이미 사용 중입니다(활성 토큰 이름은 고유)",
+      scTokNameInvalid: "잘못된 이름: 문자/숫자/_/- 만 허용, 최대 64자",
+      scTokNoteTooLong: "메모가 너무 깁니다: 최대 200자",
+      scTokExpiryInvalid: "만료가 무효입니다: 기본 기간 또는 유효한 날짜를 선택하세요",
+      scTokCreateFail: "생성 실패",
+      scTokCreatedTitle: "토큰 생성됨",
+      scTokAlreadyRevoked: "이 토큰은 이미 해지되었습니다",
+      scTokNotFound: "토큰을 찾을 수 없습니다",
+      scTokRevokeFail: "해지 실패",
+      scTokRevokeConfirm: "토큰「{name}」을(를) 해지할까요? 이 토큰을 통한 접속은 즉시 무효가 됩니다(403).",
+      scTokRotateConfirm: "토큰「{name}」을(를) 로테이션할까요? 이전 토큰은 즉시 해지되고 같은 이름의 새 토큰이 생성됩니다.",
+      scTokRotatedTitle: "토큰 로테이션됨",
+      scTokNotFoundOrRevoked: "토큰을 찾을 수 없거나 이미 해지되었습니다",
+      scTokRenamePrompt: "토큰「{name}」 이름 변경\n문자/숫자/_/- 만 허용, 최대 64자",
+      scTokNameEmpty: "토큰 이름은 비울 수 없습니다",
+      scTokRenamed: "토큰 이름이 업데이트되었습니다",
+      scTokRenameFail: "이름 변경 실패",
+      scTokRotateFail: "갱신 실패",
+      scUnsavedConfirm: "저장되지 않은 변경 사항이 있습니다. 닫으면 버려집니다. 그래도 닫을까요?",
+      scNotifyConfig: "알림 채널 설정",
+      scLogout: "로그아웃",
+      scLogoutTip: "로그아웃",
+      scLogoutConfirm: "로그아웃하시겠습니까?",
+      scLogoutFailed: "로그아웃 실패, 다시 시도하세요"
+    },
+    "es": {
+      scTokEnvNote: "Los tokens de variables de entorno de la implementación siguen funcionando; tras crear tokens con nombre, desactiva el token de arranque (define DISABLE_RECEIVE_TOKEN=true).",
+      scTokLoading: "Cargando…",
+      scTokNamePh: "Nombre del token (letras/dígitos/_/-)",
+      scTokCreate: "＋ Nuevo token",
+      scTokExpForever: "Sin vencimiento",
+      scTokExpDays: "Expira en {n} días",
+      scTokExpCustom: "Fecha de vencimiento personalizada…",
+      scTokNotePh: "Nota (opcional, para distinguir)",
+      scTokNameLabel: "Nombre del token",
+      scTokExpLabel: "Vencimiento",
+      scTokExpDateLabel: "Fecha de vencimiento",
+      scTokNoteLabel: "Nota",
+      scTokLoadFail: "Error al cargar",
+      scTokEmpty: "Aún no hay tokens guardados.",
+      scTokForever: "permanente",
+      scTokCreated: "Creado {t}",
+      scTokLastUsed: "Último uso {t}",
+      scTokExpires: "Expira {t}",
+      scTokRevoked: "Revocado",
+      scTokExpired: "Expirado",
+      scTokActive: "Activo",
+      scTokRename: "Renombrar",
+      scTokRotate: "Rotar",
+      scTokRevoke: "Revocar",
+      scTokName: "Nombre: ",
+      scTokSaveWarn: "No podrás verlo de nuevo al cerrar; cópialo y guárdalo ahora.",
+      scTokSavedClose: "Ya lo guardé, cerrar",
+      scTokCopy: "Copiar",
+      scTokNameRequired: "Introduce un nombre de token",
+      scTokExpDateRequired: "Elige una fecha de vencimiento",
+      scTokNameTaken: "Ese nombre ya está en uso (los nombres de token activos son únicos)",
+      scTokNameInvalid: "Nombre inválido: solo letras/dígitos/_/-, máx. 64",
+      scTokNoteTooLong: "Nota demasiado larga: máx. 200 caracteres",
+      scTokExpiryInvalid: "Vencimiento inválido: elige una duración predefinida o una fecha válida",
+      scTokCreateFail: "Error al crear",
+      scTokCreatedTitle: "Token creado",
+      scTokAlreadyRevoked: "Este token ya está revocado",
+      scTokNotFound: "Token no encontrado",
+      scTokRevokeFail: "Error al revocar",
+      scTokRevokeConfirm: "¿Revocar el token 「{name}」? El acceso con él deja de funcionar de inmediato (403).",
+      scTokRotateConfirm: "¿Rotar el token 「{name}」? El token antiguo se revoca de inmediato y se genera uno nuevo con el mismo nombre.",
+      scTokRotatedTitle: "Token rotado",
+      scTokNotFoundOrRevoked: "Token no encontrado o ya revocado",
+      scTokRenamePrompt: "Renombrar token 「{name}」\nSolo letras/dígitos/_/-, máx. 64",
+      scTokNameEmpty: "El nombre del token no puede estar vacío",
+      scTokRenamed: "Nombre del token actualizado",
+      scTokRenameFail: "Error al renombrar",
+      scTokRotateFail: "Error al rotar",
+      scUnsavedConfirm: "Tienes cambios sin guardar. Al cerrar se descartarán. ¿Cerrar de todos modos?",
+      scNotifyConfig: "Configurar notificaciones",
+      scLogout: "Cerrar sesión",
+      scLogoutTip: "Cerrar sesión",
+      scLogoutConfirm: "¿Cerrar sesión?",
+      scLogoutFailed: "Error al cerrar sesión, inténtalo de nuevo"
+    },
+    "fr": {
+      scTokEnvNote: "Les jetons des variables d'environnement du déploiement restent valides ; après avoir créé des jetons nommés, désactivez le jeton d'initialisation (réglez DISABLE_RECEIVE_TOKEN=true).",
+      scTokLoading: "Chargement…",
+      scTokNamePh: "Nom du jeton (lettres/chiffres/_/-)",
+      scTokCreate: "＋ Nouveau jeton",
+      scTokExpForever: "Sans expiration",
+      scTokExpDays: "Expire dans {n} jours",
+      scTokExpCustom: "Date d'expiration personnalisée…",
+      scTokNotePh: "Note (facultative, pour distinguer)",
+      scTokNameLabel: "Nom du jeton",
+      scTokExpLabel: "Expiration",
+      scTokExpDateLabel: "Date d'expiration",
+      scTokNoteLabel: "Note",
+      scTokLoadFail: "Échec du chargement",
+      scTokEmpty: "Aucun jeton enregistré pour l'instant.",
+      scTokForever: "permanent",
+      scTokCreated: "Créé {t}",
+      scTokLastUsed: "Dernier usage {t}",
+      scTokExpires: "Expire {t}",
+      scTokRevoked: "Révoqué",
+      scTokExpired: "Expiré",
+      scTokActive: "Actif",
+      scTokRename: "Renommer",
+      scTokRotate: "Rotation",
+      scTokRevoke: "Révoquer",
+      scTokName: "Nom : ",
+      scTokSaveWarn: "Vous ne pourrez plus le voir après fermeture — copiez-le et enregistrez-le maintenant.",
+      scTokSavedClose: "J'ai enregistré, fermer",
+      scTokCopy: "Copier",
+      scTokNameRequired: "Saisissez un nom de jeton",
+      scTokExpDateRequired: "Choisissez une date d'expiration",
+      scTokNameTaken: "Ce nom est déjà utilisé (les noms de jetons actifs sont uniques)",
+      scTokNameInvalid: "Nom invalide : lettres/chiffres/_/- uniquement, max 64",
+      scTokNoteTooLong: "Note trop longue : max 200 caractères",
+      scTokExpiryInvalid: "Expiration invalide : choisissez une durée prédéfinie ou une date valide",
+      scTokCreateFail: "Échec de la création",
+      scTokCreatedTitle: "Jeton créé",
+      scTokAlreadyRevoked: "Ce jeton est déjà révoqué",
+      scTokNotFound: "Jeton introuvable",
+      scTokRevokeFail: "Échec de la révocation",
+      scTokRevokeConfirm: "Révoquer le jeton 「{name}」 ? L'accès via ce jeton devient immédiatement invalide (403).",
+      scTokRotateConfirm: "Rotation du jeton 「{name}」 ? L'ancien jeton est révoqué immédiatement et un nouveau jeton du même nom est généré.",
+      scTokRotatedTitle: "Jeton rotatif créé",
+      scTokNotFoundOrRevoked: "Jeton introuvable ou déjà révoqué",
+      scTokRenamePrompt: "Renombrar le jeton 「{name}」\nLettres/chiffres/_/- uniquement, max 64",
+      scTokNameEmpty: "Le nom du jeton ne peut pas être vide",
+      scTokRenamed: "Nom du jeton mis à jour",
+      scTokRenameFail: "Échec du renommage",
+      scTokRotateFail: "Échec de la rotation",
+      scUnsavedConfirm: "Vous avez des modifications non enregistrées. Les fermer les ignore. Fermer quand même ?",
+      scNotifyConfig: "Configurer les notifications",
+      scLogout: "Se déconnecter",
+      scLogoutTip: "Se déconnecter",
+      scLogoutConfirm: "Se déconnecter ?",
+      scLogoutFailed: "Échec de la déconnexion, réessayez"
+    },
+    "de": {
+      scTokEnvNote: "Token aus Umgebungsvariablen der Bereitstellung funktionieren weiter; nach dem Anlegen benannter Token den Bootstrap-Token deaktivieren (DISABLE_RECEIVE_TOKEN=true setzen).",
+      scTokLoading: "Wird geladen…",
+      scTokNamePh: "Token-Name (Buchstaben/Ziffern/_/-)",
+      scTokCreate: "＋ Neues Token",
+      scTokExpForever: "Unbefristet",
+      scTokExpDays: "Läuft in {n} Tagen ab",
+      scTokExpCustom: "Benutzerdefiniertes Ablaufdatum…",
+      scTokNotePh: "Notiz (optional, zur Unterscheidung)",
+      scTokNameLabel: "Token-Name",
+      scTokExpLabel: "Ablauf",
+      scTokExpDateLabel: "Ablaufdatum",
+      scTokNoteLabel: "Notiz",
+      scTokLoadFail: "Laden fehlgeschlagen",
+      scTokEmpty: "Noch keine Token gespeichert.",
+      scTokForever: "unbefristet",
+      scTokCreated: "Erstellt {t}",
+      scTokLastUsed: "Zuletzt genutzt {t}",
+      scTokExpires: "Läuft ab {t}",
+      scTokRevoked: "Widerrufen",
+      scTokExpired: "Abgelaufen",
+      scTokActive: "Aktiv",
+      scTokRename: "Umbenennen",
+      scTokRotate: "Rotieren",
+      scTokRevoke: "Widerrufen",
+      scTokName: "Name: ",
+      scTokSaveWarn: "Nach dem Schließen nicht mehr sichtbar — jetzt kopieren und speichern.",
+      scTokSavedClose: "Gespeichert, schließen",
+      scTokCopy: "Kopieren",
+      scTokNameRequired: "Bitte Token-Namen eingeben",
+      scTokExpDateRequired: "Bitte Ablaufdatum wählen",
+      scTokNameTaken: "Dieser Name ist bereits vergeben (aktive Token-Namen sind eindeutig)",
+      scTokNameInvalid: "Ungültiger Name: nur Buchstaben/Ziffern/_/-, max. 64",
+      scTokNoteTooLong: "Notiz zu lang: max. 200 Zeichen",
+      scTokExpiryInvalid: "Ungültiger Ablauf: wählen Sie eine vorgegebene Dauer oder ein gültiges Datum",
+      scTokCreateFail: "Erstellen fehlgeschlagen",
+      scTokCreatedTitle: "Token erstellt",
+      scTokAlreadyRevoked: "Dieses Token ist bereits widerrufen",
+      scTokNotFound: "Token nicht gefunden",
+      scTokRevokeFail: "Widerruf fehlgeschlagen",
+      scTokRevokeConfirm: "Token 「{name}」 widerrufen? Der Zugriff darüber wird sofort ungültig (403).",
+      scTokRotateConfirm: "Token 「{name}」 rotieren? Das alte Token wird sofort widerrufen und ein neues Token mit demselben Namen erzeugt.",
+      scTokRotatedTitle: "Token rotiert",
+      scTokNotFoundOrRevoked: "Token nicht gefunden oder bereits widerrufen",
+      scTokRenamePrompt: "Token 「{name}」 umbenennen\nNur Buchstaben/Ziffern/_/-, max. 64",
+      scTokNameEmpty: "Token-Name darf nicht leer sein",
+      scTokRenamed: "Token-Name aktualisiert",
+      scTokRenameFail: "Umbenennen fehlgeschlagen",
+      scTokRotateFail: "Rotation fehlgeschlagen",
+      scUnsavedConfirm: "Es gibt nicht gespeicherte Änderungen. Schließen verwirft sie. Trotzdem schließen?",
+      scNotifyConfig: "Benachrichtigungen konfigurieren",
+      scLogout: "Abmelden",
+      scLogoutTip: "Abmelden",
+      scLogoutConfirm: "Abmelden?",
+      scLogoutFailed: "Abmelden fehlgeschlagen, bitte erneut versuchen"
+    },
+    "pt-BR": {
+      scTokEnvNote: "Tokens de variáveis de ambiente da implantação ainda funcionam; após criar tokens nomeados, desative o token inicial (defina DISABLE_RECEIVE_TOKEN=true).",
+      scTokLoading: "Carregando…",
+      scTokNamePh: "Nome do token (letras/dígitos/_/-)",
+      scTokCreate: "＋ Novo token",
+      scTokExpForever: "Sem expiração",
+      scTokExpDays: "Expira em {n} dias",
+      scTokExpCustom: "Data de expiração personalizada…",
+      scTokNotePh: "Nota (opcional, para distinguir)",
+      scTokNameLabel: "Nome do token",
+      scTokExpLabel: "Expiração",
+      scTokExpDateLabel: "Data de expiração",
+      scTokNoteLabel: "Nota",
+      scTokLoadFail: "Falha ao carregar",
+      scTokEmpty: "Nenhum token armazenado ainda.",
+      scTokForever: "permanente",
+      scTokCreated: "Criado {t}",
+      scTokLastUsed: "Último uso {t}",
+      scTokExpires: "Expira {t}",
+      scTokRevoked: "Revogado",
+      scTokExpired: "Expirado",
+      scTokActive: "Ativo",
+      scTokRename: "Renomear",
+      scTokRotate: "Rotacionar",
+      scTokRevoke: "Revogar",
+      scTokName: "Nome: ",
+      scTokSaveWarn: "Não poderá ver de novo após fechar; copie e salve agora.",
+      scTokSavedClose: "Já salvei, fechar",
+      scTokCopy: "Copiar",
+      scTokNameRequired: "Digite um nome de token",
+      scTokExpDateRequired: "Escolha uma data de expiração",
+      scTokNameTaken: "Esse nome já está em uso (nomes de token ativos são únicos)",
+      scTokNameInvalid: "Nome inválido: apenas letras/dígitos/_/-, máx. 64",
+      scTokNoteTooLong: "Nota muito longa: máx. 200 caractères",
+      scTokExpiryInvalid: "Expiração inválida: escolha uma duração predefinida ou uma data válida",
+      scTokCreateFail: "Falha ao criar",
+      scTokCreatedTitle: "Token criado",
+      scTokAlreadyRevoked: "Este token já está revogado",
+      scTokNotFound: "Token não encontrado",
+      scTokRevokeFail: "Falha ao revogar",
+      scTokRevokeConfirm: "Revogar o token 「{name}」? O acesso por ele passa a ser inválido imediatamente (403).",
+      scTokRotateConfirm: "Rotacionar o token 「{name}」? O token antigo é revogado imediatamente e um novo token com o mesmo nome é gerado.",
+      scTokRotatedTitle: "Token rotacionado",
+      scTokNotFoundOrRevoked: "Token não encontrado ou já revogado",
+      scTokRenamePrompt: "Renomear token 「{name}」\nApenas letras/dígitos/_/-, máx. 64",
+      scTokNameEmpty: "O nome do token não pode ficar vazio",
+      scTokRenamed: "Nome do token atualizado",
+      scTokRenameFail: "Falha ao renomear",
+      scTokRotateFail: "Falha ao rotacionar",
+      scUnsavedConfirm: "Há alterações não salvas. Fechar as descarta. Fechar mesmo assim?",
+      scNotifyConfig: "Configurar notificações",
+      scLogout: "Sair",
+      scLogoutTip: "Sair",
+      scLogoutConfirm: "Sair?",
+      scLogoutFailed: "Falha ao sair, tente novamente"
+    }
+  };
+  (function () {
+    for (var _tl in TOK_I18N) {
+      if (!I18N[_tl]) I18N[_tl] = {};
+      for (var _tk in TOK_I18N[_tl]) I18N[_tl][_tk] = TOK_I18N[_tl][_tk];
+    }
+  })();
+
   function fmtMinutes(n) {
     var v = parseInt(n, 10);
     if (!v || v < 0) v = 30;
@@ -5910,12 +6433,31 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   function closeModal() {
     /* 设置中心存在未保存修改时先确认，避免静默丢失；其它弹层（SC.dirty 为 false）行为不变 */
     if (typeof SC !== "undefined" && SC && SC.dirty) {
-      if (!window.confirm("设置有未保存的修改，关闭后这些修改将丢弃。确定关闭？")) return;
+      if (!window.confirm(T("scUnsavedConfirm"))) return;
       SC.dirty = false;
     }
     $("modal").hidden = true; $("modalbody").innerHTML = ""; tokenSecret = null;
     /* 关闭设置中心时同步收起第二层推送编辑器，避免残留遮罩 */
     var pm = $("pushmodal"); if (pm) pm.hidden = true;
+  }
+  /* 退出登录：复用后端 /api/logout（无状态语义——仅清除浏览器 Cookie）；
+     先真正调用接口，再清理前端可能持有的敏感临时状态，最后整页重载回到登录页。
+     网络失败或接口异常时仅提示、不伪造退出成功、不单纯跳转。 */
+  function doLogout() {
+    var btn = $("logoutbtn");
+    if (btn) btn.disabled = true;
+    fetch("/api/logout", { method: "POST", headers: { "Content-Type": "application/json" } })
+      .then(function (r) { return r.json().catch(function () { return {}; }); })
+      .then(function (d) {
+        tokenSecret = null; tokListCache = [];
+        if (d && d.success) { location.reload(); return; }
+        if (btn) btn.disabled = false;
+        toast(T("scLogoutFailed"));
+      })
+      .catch(function () {
+        if (btn) btn.disabled = false;
+        toast(T("scLogoutFailed"));
+      });
   }
   /* ---------------- 重要操作密码确认 ----------------
      默认开启：危险/敏感操作执行前要求输入登录密码（即 ADMIN_PASSWORD），校验通过后才继续。
@@ -6078,7 +6620,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       closeModal(); load();
     };
   }
-  /* 未读数以服务端为准（避免只改前端数字） */
+  /* 未读数以服务端为准（避免只改前端数字）。消息列表接口不返回 unread，
+     故这里仍需读取一次 /api/stats；首屏只此一处（已移除侧栏重复统计请求）。 */
   function refreshUnreadCount() {
     return fetch("/api/stats").then(function (r) { return r.json(); }).then(function (res) {
       if (res && res.success && typeof res.unread === "number") {
@@ -6134,11 +6677,11 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   }
   function openTokens() {
     openModal(
-      '<h3>接入令牌</h3>' +
-      '<div class="toknote" id="toknote" hidden>当前仍可用部署时环境变量令牌接入；建议创建命名令牌后停用引导令牌（设置 DISABLE_RECEIVE_TOKEN=true）。</div>' +
-      '<div id="toklist"><div class="tokmeta">加载中…</div></div>' +
-      '<div class="toknewrow"><input class="ds-input" type="text" id="tokname" maxlength="64" placeholder="令牌名称（字母/数字/_/-）" autocomplete="off" aria-label="令牌名称"><button class="tbtn" id="tokcreate">＋ 新建令牌</button></div>' +
-      '<div class="toknewrow"><select class="ds-select" id="tokexp" aria-label="有效期"><option value="0">永久有效</option><option value="7">7 天后到期</option><option value="30">30 天后到期</option><option value="90">90 天后到期</option><option value="365">365 天后到期</option><option value="custom">自定义到期日…</option></select><input class="ds-input" type="date" id="tokexpdate" hidden aria-label="到期日期"><input class="ds-input" type="text" id="toknotenew" maxlength="200" placeholder="备注（可选，便于区分用途）" autocomplete="off" aria-label="备注"></div>'
+      '<h3>' + T("scTokenTitle") + '</h3>' +
+      '<div class="toknote" id="toknote" hidden>' + T("scTokEnvNote") + '</div>' +
+      '<div id="toklist"><div class="tokmeta">' + T("scTokLoading") + '</div></div>' +
+      '<div class="toknewrow"><input class="ds-input" type="text" id="tokname" maxlength="64" placeholder="' + esc(T("scTokNamePh")) + '" autocomplete="off" aria-label="' + esc(T("scTokNameLabel")) + '"><button class="tbtn" id="tokcreate">' + T("scTokCreate") + '</button></div>' +
+      '<div class="toknewrow"><select class="ds-select" id="tokexp" aria-label="' + esc(T("scTokExpLabel")) + '"><option value="0">' + T("scTokExpForever") + '</option><option value="7">' + T("scTokExpDays", { n: 7 }) + '</option><option value="30">' + T("scTokExpDays", { n: 30 }) + '</option><option value="90">' + T("scTokExpDays", { n: 90 }) + '</option><option value="365">' + T("scTokExpDays", { n: 365 }) + '</option><option value="custom">' + T("scTokExpCustom") + '</option></select><input class="ds-input" type="date" id="tokexpdate" hidden aria-label="' + esc(T("scTokExpDateLabel")) + '"><input class="ds-input" type="text" id="toknotenew" maxlength="200" placeholder="' + esc(T("scTokNotePh")) + '" autocomplete="off" aria-label="' + esc(T("scTokNoteLabel")) + '"></div>'
     );
     $("tokcreate").onclick = createTokenUi;
     $("tokname").onkeydown = function (ev) { if (ev.key === "Enter") createTokenUi(); };
@@ -6153,12 +6696,12 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     }).then(function (d) {
       var box = $("toklist");
       if (!box || !d) return;
-      if (!d.success) { box.innerHTML = '<div class="tokmeta">加载失败</div>'; return; }
+      if (!d.success) { box.innerHTML = '<div class="tokmeta">' + T("scTokLoadFail") + '</div>'; return; }
       var list = d.list || [];
       var nowStr = String(d.now || ""); /* 服务端 UTC 时间：客户端时钟不可信，过期判定用它 */
       tokListCache = list;
       var note = $("toknote"); if (note) note.hidden = list.length > 0; /* 空态引导：库内无令牌时提示迁移路径 */
-      if (!list.length) { box.innerHTML = '<div class="tokmeta">还没有库内令牌。</div>'; return; }
+      if (!list.length) { box.innerHTML = '<div class="tokmeta">' + T("scTokEmpty") + '</div>'; return; }
       var html = "";
       list.forEach(function (t) {
         var rev = t.revoked_at !== null && t.revoked_at !== undefined;
@@ -6166,17 +6709,17 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         var expired = !rev && !!exp && !!nowStr && exp < nowStr;
         html += '<div class="tokrow' + ((rev || expired) ? ' revoked' : '') + '">' +
           '<div class="tokmain"><div class="tokname">' + esc(t.name) + '</div>' +
-          '<div class="tokmeta">' + esc(t.token_prefix || "") + '… · 创建 ' + esc(fmtTokTime(t.created_at)) +
-          ' · 最近使用 ' + esc(fmtTokTime(t.last_used_at)) +
-          (exp ? ' · 到期 ' + esc(fmtTokTime(exp)) : ' · 永久') +
+          '<div class="tokmeta">' + esc(t.token_prefix || "") + '… · ' + esc(T("scTokCreated")) + ' ' + esc(fmtTokTime(t.created_at)) +
+          ' · ' + esc(T("scTokLastUsed")) + ' ' + esc(fmtTokTime(t.last_used_at)) +
+          (exp ? ' · ' + esc(T("scTokExpires")) + ' ' + esc(fmtTokTime(exp)) : ' · ' + esc(T("scTokForever"))) +
           (t.note ? ' · ' + esc(String(t.note)) : '') + '</div></div>' +
-          '<span class="tokbadge">' + (rev ? "已吊销" : (expired ? "已过期" : "活跃")) + '</span>' +
+          '<span class="tokbadge">' + T(rev ? "scTokRevoked" : (expired ? "scTokExpired" : "scTokActive")) + '</span>' +
           (rev ? "" : (expired
-            ? '<span class="tokacts"><button class="tbtn" data-tokrev="' + esc(t.id) + '">吊销</button></span>'
+            ? '<span class="tokacts"><button class="tbtn" data-tokrev="' + esc(t.id) + '">' + T("scTokRevoke") + '</button></span>'
             : '<span class="tokacts">' +
-              '<button class="tbtn" data-tokren="' + esc(t.id) + '">重命名</button>' +
-              '<button class="tbtn" data-tokrot="' + esc(t.id) + '">轮换</button>' +
-              '<button class="tbtn" data-tokrev="' + esc(t.id) + '">吊销</button></span>')) +
+              '<button class="tbtn" data-tokren="' + esc(t.id) + '">' + T("scTokRename") + '</button>' +
+              '<button class="tbtn" data-tokrot="' + esc(t.id) + '">' + T("scTokRotate") + '</button>' +
+              '<button class="tbtn" data-tokrev="' + esc(t.id) + '">' + T("scTokRevoke") + '</button></span>')) +
           '</div>';
       });
       box.innerHTML = html;
@@ -6188,16 +6731,16 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         var rotB = ev.target.closest ? ev.target.closest("[data-tokrot]") : null;
         if (rotB) { rotateTokenUi(rotB.getAttribute("data-tokrot")); return; }
       };
-    }).catch(function () { var b = $("toklist"); if (b) b.innerHTML = '<div class="tokmeta">加载失败</div>'; });
+    }).catch(function () { var b = $("toklist"); if (b) b.innerHTML = '<div class="tokmeta">' + T("scTokLoadFail") + '</div>'; });
   }
   function showTokenSecret(title, name, plain) {
     tokenSecret = plain;
     openModal(
       '<h3>' + esc(title) + '</h3>' +
-      '<div class="tokmeta">名称：' + esc(name) + '</div>' +
+      '<div class="tokmeta">' + T("scTokName") + ' ' + esc(name) + '</div>' +
       '<div class="toksecret">' + esc(plain) + '</div>' +
-      '<div class="tokwarn">关闭后无法再次查看，请立即复制保存。</div>' +
-      '<div class="btnrow"><button class="tbtn" id="tokcopy">复制</button><button class="tbtn" id="tokdone">我已保存，关闭</button></div>'
+      '<div class="tokwarn">' + T("scTokSaveWarn") + '</div>' +
+      '<div class="btnrow"><button class="tbtn" id="tokcopy">' + T("scTokCopy") + '</button><button class="tbtn" id="tokdone">' + T("scTokSavedClose") + '</button></div>'
     );
     $("tokcopy").onclick = function () { doCopy(tokenSecret || "", $("tokcopy")); };
     $("tokdone").onclick = closeModal;
@@ -6205,13 +6748,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   function createTokenUi() {
     var inp = $("tokname");
     var name = inp ? inp.value.trim() : "";
-    if (!name) { toast("请输入令牌名称"); if (inp) inp.focus(); return; }
+    if (!name) { toast(T("scTokNameRequired")); if (inp) inp.focus(); return; }
     var payload = { name: name };
     var ninp = $("toknotenew");
     if (ninp && ninp.value.trim()) payload.note = ninp.value.trim();
     var sel = $("tokexp"), dinp = $("tokexpdate");
     if (sel && sel.value === "custom") {
-      if (!dinp || !dinp.value) { toast("请选择到期日期"); if (dinp) dinp.focus(); return; }
+      if (!dinp || !dinp.value) { toast(T("scTokExpDateRequired")); if (dinp) dinp.focus(); return; }
       payload.expires_at = dinp.value;
     } else if (sel && sel.value !== "0") {
       payload.expires_in_days = parseInt(sel.value, 10) || 0;
@@ -6219,61 +6762,65 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     tokApi("POST", "/api/tokens", payload).then(function (res) {
       if (res.s === 401) { location.reload(); return; }
       if (!res.d || !res.d.success) {
-        toast(res.d && res.d.error === "NAME_TAKEN" ? "该名称已被使用（活跃令牌名唯一）"
-          : res.d && res.d.error === "INVALID_NAME" ? "名称非法：仅限字母/数字/_/-，最长 64"
-          : res.d && res.d.error === "INVALID_NOTE" ? "备注过长：最长 200 字"
-          : res.d && res.d.error === "INVALID_EXPIRY" ? "有效期无效：请选择预设天数或有效日期"
-          : "创建失败");
+        toast(res.d && res.d.error === "NAME_TAKEN" ? T("scTokNameTaken")
+          : res.d && res.d.error === "INVALID_NAME" ? T("scTokNameInvalid")
+          : res.d && res.d.error === "INVALID_NOTE" ? T("scTokNoteTooLong")
+          : res.d && res.d.error === "INVALID_EXPIRY" ? T("scTokExpiryInvalid")
+          : T("scTokCreateFail"));
         return;
       }
-      showTokenSecret("令牌已创建", name, res.d.token);
-    }).catch(function () { toast("创建失败"); });
+      showTokenSecret(T("scTokCreatedTitle"), name, res.d.token);
+    }).catch(function () { toast(T("scTokCreateFail")); });
   }
   function tokNameOf(id) {
     var t = tokListCache.filter(function (x) { return x.id === id; })[0];
     return t ? t.name : id;
   }
   function revokeTokenUi(id) {
-    if (!confirm("确认吊销令牌「" + tokNameOf(id) + "」？使用该令牌的接入将立即失效（403）。")) return;
+    if (!confirm(T("scTokRevokeConfirm", { name: tokNameOf(id) }))) return;
     askPassword(function () {
       tokApi("POST", "/api/tokens/revoke", { id: id }).then(function (res) {
         if (res.s === 401) { location.reload(); return; }
-        if (res.d && res.d.success) { toast(res.d.revoked ? "已吊销" : "该令牌已是吊销状态"); loadTokens(); }
-        else if (res.d && res.d.error === "NOT_FOUND") { toast("令牌不存在"); loadTokens(); }
-        else toast("吊销失败");
-      }).catch(function () { toast("吊销失败"); });
+        if (res.d && res.d.success) { toast(res.d.revoked ? T("scTokRevoked") : T("scTokAlreadyRevoked")); loadTokens(); }
+        else if (res.d && res.d.error === "NOT_FOUND") { toast(T("scTokNotFound")); loadTokens(); }
+        else toast(T("scTokRevokeFail"));
+      }).catch(function () { toast(T("scTokRevokeFail")); });
     });
   }
   function rotateTokenUi(id) {
-    if (!confirm("确认轮换令牌「" + tokNameOf(id) + "」？旧令牌立即吊销失效，并生成同名新令牌。")) return;
+    if (!confirm(T("scTokRotateConfirm", { name: tokNameOf(id) }))) return;
     askPassword(function () {
       tokApi("POST", "/api/tokens/rotate", { id: id }).then(function (res) {
         if (res.s === 401) { location.reload(); return; }
-        if (res.d && res.d.success) { showTokenSecret("令牌已轮换", tokNameOf(id), res.d.token); }
-        else if (res.d && res.d.error === "NOT_FOUND") { toast("令牌不存在"); loadTokens(); }
-        else toast("轮换失败");
-      }).catch(function () { toast("轮换失败"); });
+        if (res.d && res.d.success) { showTokenSecret(T("scTokRotatedTitle"), tokNameOf(id), res.d.token); }
+        else if (res.d && res.d.error === "NOT_FOUND") { toast(T("scTokNotFound")); loadTokens(); }
+        else toast(T("scTokRotateFail"));
+      }).catch(function () { toast(T("scTokRotateFail")); });
     });
   }
   function renameTokenUi(id) {
     var old = tokNameOf(id);
-    var nm = prompt("重命名令牌「" + old + "」\n仅限字母/数字/_/-，最长 64", old);
+    var nm = prompt(T("scTokRenamePrompt", { name: old }), old);
     if (nm === null) return;
     nm = String(nm).trim();
-    if (!nm) { toast("令牌名称不能为空"); return; }
+    if (!nm) { toast(T("scTokNameEmpty")); return; }
     tokApi("POST", "/api/tokens/rename", { id: id, name: nm }).then(function (res) {
       if (res.s === 401) { location.reload(); return; }
-      if (res.d && res.d.success) { toast("令牌名称已更新"); loadTokens(); return; }
-      if (res.d && res.d.error === "NAME_TAKEN") { toast("该名称已被使用（活跃令牌名唯一）"); return; }
-      if (res.d && res.d.error === "INVALID_NAME") { toast("名称非法：仅限字母/数字/_/-，最长 64"); return; }
-      if (res.d && res.d.error === "NOT_FOUND") { toast("令牌不存在或已吊销"); loadTokens(); return; }
-      toast("重命名失败");
-    }).catch(function () { toast("重命名失败"); });
+      if (res.d && res.d.success) { toast(T("scTokRenamed")); loadTokens(); return; }
+      if (res.d && res.d.error === "NAME_TAKEN") { toast(T("scTokNameTaken")); return; }
+      if (res.d && res.d.error === "INVALID_NAME") { toast(T("scTokNameInvalid")); return; }
+      if (res.d && res.d.error === "NOT_FOUND") { toast(T("scTokNotFoundOrRevoked")); loadTokens(); return; }
+      toast(T("scTokRenameFail"));
+    }).catch(function () { toast(T("scTokRenameFail")); });
   }
   function registerSW() {
     try { if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(function () {}); } catch (e) {}
   }
+  var loadSeq = 0;
   function load(incremental) {
+    /* 竞态保护：快速切换搜索/筛选/分页时，仅最新一次「非增量」加载可落地渲染，
+       旧请求晚返回也不会覆盖新状态（增量/轮询加载不受影响，保持追加语义）。 */
+    var seq = ++loadSeq;
     /* 非增量加载（首屏/筛选/分页/刷新）一律重置分页会话：清游标与已加载深度，
        避免 page 与 cursor 两种模型共享状态互相污染 */
     if (!incremental) {
@@ -6292,6 +6839,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         return r.json();
       })
       .then(function (res) {
+        if (!incremental && seq !== loadSeq) return;
         if (!res.success) throw new Error(res.error || "load failed");
         state.total = res.total; state.pages = res.pages;
         var list = res.list || [];
@@ -6341,7 +6889,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         renderFull(list, freshSet, res);
         state.lastQ = q;
       })
-      .catch(function (e) { showRetry(e); });
+      .catch(function (e) {
+        /* 竞态保护（失败路径）：showRetry 会整体替换 #list，没有追加语义，
+           因此过期请求（含增量/轮询）失败时一律不得触碰当前 UI；
+           仅最新一次加载仍可展示错误与重试入口。 */
+        if (seq !== loadSeq) return;
+        showRetry(e);
+      });
   }
   /* 来源下拉：从 /api/sources 动态聚合所有来源（含自定义 cron/alert 等），替代原先写死的三项 */
   function srcLabel(s) {
@@ -6386,21 +6940,12 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         scMini(T("scLanguage"), LANG_NAMES[LANG], "browser");
     }).catch(function () {});
   }
-  /* 右侧栏：快捷概览（读取真实统计） */
-  function loadSideStats() {
-    return fetch("/api/stats").then(function (r) { return r.json(); }).then(function (d) {
-      var box = $("sideQuick");
-      if (!box || !d || !d.success) return;
-      var today = 0, days = d.days || [];
-      if (days.length) today = days[days.length - 1].n || 0;
-      box.innerHTML =
-        '<div class="side-row"><span>' + esc(T("statTotal")) + '</span><strong>' + (d.total || 0) + '</strong></div>' +
-        '<div class="side-row"><span>' + esc(T("statToday")) + '</span><strong>' + today + '</strong></div>' +
-        '<div class="side-row"><span>' + esc(T("statStarred")) + '</span><strong>' + (d.starred || 0) + '</strong></div>';
-    }).catch(function () {});
-  }
-  function refreshSide() { loadSideSettings(); loadSideStats(); }
-  function refreshAll() { refreshSide(); return Promise.all([loadSources(), loadDevices()]).then(load); }
+  /* 右侧栏系统统计（P3）改为按需：统一由「查看统计」按钮打开 openStats 弹层读取 /api/stats，
+     首屏不再常驻统计行，也不再额外发起一次 /api/stats 请求。 */
+  function refreshSide() { loadSideSettings(); }
+  /* 首屏工作台：短信列表立即加载，不再被来源/设备等辅助接口串行阻塞；
+     两条辅助请求并行自行更新 UI（来源下拉、设备标签），互不阻塞首条消息出现。 */
+  function refreshAll() { refreshSide(); loadSources(); loadDevices(); return load(); }
   function syncClear() { $("clearq").hidden = !$("q").value; }
   $("q").addEventListener("input", function () {
     syncClear();
@@ -6448,6 +6993,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   $("fstar").onclick = function () { setFilterMode(state.filterMode === "starred" ? "all" : "starred"); };
   $("refreshbtn").onclick = function () { refreshAll(); };
   $("sideSetBtn").onclick = function () { openSettingsCenter("session"); };
+  $("sideNotifyBtn").onclick = function () { openSettingsCenter("notify"); };
+  $("logoutbtn").onclick = function () { if (!window.confirm(T("scLogoutConfirm"))) return; doLogout(); };
   $("sideStatsBtn").onclick = openStats;
   /* 导出：按当前筛选条件下载 CSV / JSON（附件下载，不跳转页面） */
   function exportUrl(fmt) {
@@ -6519,7 +7066,10 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         });
     }, delay || 0);
   }
-  pollLoop();
+  /* 长轮询在首屏消息首次加载完成后再启动：避免与首屏 load() 并发触发重复请求，
+     也保证轮询游标以首批真实数据为基线（不再从 last_id=0 空跑一次）。 */
+  var pollStarted = false;
+  function startPoll() { if (pollStarted) return; pollStarted = true; pollLoop(); }
   /* 消息开关（自动复制 / 后台通知 / 提示音）在设置中心内维护；此处只负责应用已保存状态 */
   function applyMsgToggles() {
     state.autoCopy = localStorage.getItem("sms_autocopy") !== "0";
@@ -6570,7 +7120,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     { key: "biz", label: "scTabBiz" },
     { key: "security", label: "scTabSec" }
   ];
-  var SC = { d: null, section: "session", dirty: false, targets: [], tgSeq: 0 };
+  var SC = { d: null, section: "session", dirty: false, targets: [], tgSeq: 0, conflict: null, saving: false, lastSaveAt: 0 };
 
   function scBadge(kind) {
     var k = kind === "global" ? "global" : "browser";
@@ -6585,20 +7135,58 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   }
   function scBusy(btn, on) { if (btn) { btn.disabled = !!on; btn.setAttribute("data-loading", on ? "1" : "0"); } }
 
+  /* 多目标通知：以后端返回的脱敏视图作为编辑模型（敏感字段不回传明文） */
+  function scTargetsFrom(d) {
+    return ((d.notify && d.notify.targets) || []).map(function (t) {
+      return { id: t.id, channel: t.channel, name: t.name, enabled: !!t.enabled,
+        types: (t.types || ["verify", "sms", "notify"]).slice(),
+        fields: t.fields || {}, configured: !!t.configured, _new: false };
+    });
+  }
   function openSettingsCenter(section) {
     SC.section = section || "session";
     SC.dirty = false;
+    SC.conflict = null;
     nfFetchSettings().then(function (d) {
       if (!d || !d.success) { toast(T("scReadFail")); return; }
       SC.d = d;
-      /* 多目标通知：以后端返回的脱敏视图作为编辑模型（敏感字段不回传明文） */
-      SC.targets = ((d.notify && d.notify.targets) || []).map(function (t) {
-        return { id: t.id, channel: t.channel, name: t.name, enabled: !!t.enabled,
-          types: (t.types || ["verify", "sms", "notify"]).slice(),
-          fields: t.fields || {}, configured: !!t.configured, _new: false };
-      });
+      SC.targets = scTargetsFrom(d);
       scRenderShell();
     }).catch(function () { toast(T("scReadFail")); });
+  }
+  /* 保存后 / 冲突恢复时回读服务端最新视图：保持当前分组与弹层不关闭，
+     多目标场景可以连续编辑；新目标由服务端分配 id，必须回读才能继续编辑与测试。 */
+  function scReload() {
+    var sec = SC.section;
+    return nfFetchSettings().then(function (d) {
+      if (!d || !d.success) { toast(T("scReadFail")); return false; }
+      SC.d = d;
+      SC.targets = scTargetsFrom(d);
+      SC.section = sec;
+      SC.dirty = false;
+      SC.conflict = null;
+      scRenderShell();
+      return true;
+    }).catch(function () { toast(T("scReadFail")); return false; });
+  }
+  /* revision 冲突：就地给出可执行的恢复路径，避免「关掉重开」死胡同；
+     用户的未提交编辑保持原样，只有明确点「重新加载」才会丢弃。 */
+  function scShowConflict(serverRev) {
+    var body = $("scbody");
+    if (!body) return;
+    var old = $("scconflict");
+    if (old && old.parentNode) old.parentNode.removeChild(old);
+    var box = document.createElement("div");
+    box.id = "scconflict";
+    box.className = "ds-alert ds-alert--danger sc-conflict";
+    box.innerHTML = '<span>' + T("scRevisionConflict") + '</span>'
+      + '<button class="ds-btn" id="screload" type="button">' + T("scReloadLatest") + '</button>';
+    body.insertBefore(box, body.firstChild);
+    var rb = $("screload");
+    if (rb) rb.onclick = function () {
+      if (!window.confirm(T("scReloadConfirm"))) return;
+      scReload();
+    };
   }
   function scRenderShell() {
     var tabs = SET_SECTIONS.map(function (x) {
@@ -6627,6 +7215,11 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     $("scrcancel").onclick = function () { scMarkDirty(false); scRenderBody(); toast(T("scCancelDone")); };
     $("scrdefault").onclick = scReset;
     $("scrsave").onclick = scSave;
+    /* 安全分组只有说明与令牌入口，没有可提交的配置：
+       隐藏「保存/恢复默认」，避免用户点了才收到「此页无需保存」的无效反馈 */
+    var secOnly = SC.section === "security";
+    $("scrsave").hidden = secOnly;
+    $("scrdefault").hidden = secOnly;
     scMarkDirty(false);
     scRenderBody();
   }
@@ -6646,6 +7239,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       var tok = $("sctokbtn");
       if (tok) tok.onclick = function () { closeModal(); openTokens(); };
     }
+    /* 冲突提示在切换分组后仍然可见（否则用户会以为冲突已消失） */
+    if (SC.conflict !== null && SC.conflict !== undefined) scShowConflict(SC.conflict);
   }
 
   /* ---- 登录与会话：本浏览器（localStorage） + 全局默认（settings 表） ---- */
@@ -6837,8 +7432,11 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   function pushFormHtml() {
     var ch = scChannelSpec(PUSH.channel);
     if (!ch) return pushPickHtml();
-    var html = '<span class="pushchan">' + esc(scChannelName(ch)) + '</span>'
-      + '<div class="setrow"><label for="pfname">' + T("scPushName") + '</label>'
+    var html = '<span class="pushchan">' + esc(scChannelName(ch)) + '</span>';
+    /* 先说明该渠道的必填项，避免用户填完才被逐项拦下 */
+    var needFields = ch.need || [];
+    if (needFields.length) html += '<div class="ds-help">' + esc(T("scPushRequired", { f: needFields.map(nfLabel).join(" · ") })) + '</div>';
+    html += '<div class="setrow"><label for="pfname">' + T("scPushName") + '</label>'
       + '<input type="text" id="pfname" class="ds-input" maxlength="64" autocomplete="off" placeholder="'
       + esc(T("scTargetNamePh")) + '" value="' + esc(PUSH.name) + '"></div>'
       + '<div class="setrow"><label>' + T("scPushTypes") + '</label><span>';
@@ -6944,7 +7542,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     }
     if (act === "edit") { openPushEditor(t); return; }
     if (act === "del") {
-      if (!confirm(T("confirmDelN", { n: 1 }))) return;
+      if (!window.confirm(T("scTargetDelConfirm", { n: t.name || t.channel }))) return;
       SC.targets = SC.targets.filter(function (x) { return x.id !== id; });
       scMarkDirty(true); scRenderBody(); toast(T("scTargetRemoved")); return;
     }
@@ -7068,20 +7666,38 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     });
   }
 
+  /* 「全局默认登录时长」是否真的被改动：只有它才需要写库，才需要密码确认 */
+  function scGlobalTtlChanged() {
+    var gl = $("scgttl");
+    if (!gl) return false;
+    var g = parseInt(gl.value, 10);
+    if (!Number.isInteger(g) || g < 5 || g > 43200) return false;
+    return g !== parseInt(SC.d && SC.d.session_ttl_minutes, 10);
+  }
   function scSave() {
     var btn = $("scrsave");
     if (SC.section === "security") { toast(T("scNoSave")); return; }
-    /* 通知凭据与登录有效时间属敏感设置：保存前要求登录密码确认 */
+    /* 重复点击守卫：请求在途、或刚保存完且没有任何新改动时，重复点击不再发起第二次写入
+       （双击会产生两次 PUT，第二次带着已刷新的 revision 触发误报冲突）；
+       只要用户改过内容（dirty）就正常放行，不会吞掉真实保存 */
+    if (SC.saving) return;
+    if (Date.now() - SC.lastSaveAt < 800 && !SC.dirty) return;
+    /* 通知凭据属敏感设置、登录有效时间属全局设置：写库前要求登录密码确认 */
     var raw = function () {
       if (SC.section === "session") return scSaveSession(btn);
       if (SC.section === "notify") return scSaveNotify(btn);
       return scSaveBiz(btn);
     };
-    if (SC.section === "notify" || SC.section === "session") { askPassword(raw); return; }
+    if (SC.section === "notify") { askPassword(raw); return; }
+    /* 语言 / 分页 / 本浏览器时长只写 localStorage，不产生任何服务端写入，
+       不必再要求输入密码；只有全局默认时长变化时才走密码确认 */
+    if (SC.section === "session" && scGlobalTtlChanged()) { askPassword(raw); return; }
     return raw();
   }
   function scPut(body, btn, okMsg) {
     scBusy(btn, true);
+    SC.saving = true;
+    function done() { scBusy(btn, false); SC.saving = false; SC.lastSaveAt = Date.now(); }
     return fetch("/api/settings", {
       method: "PUT", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -7089,19 +7705,27 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       if (r.status === 401) { location.reload(); return null; }
       return r.json();
     }).then(function (res) {
-      scBusy(btn, false);
+      done();
       if (!res) return false;
       if (res.success) {
         if (typeof res.revision === "number") SC.d.revision = res.revision;
         scMarkDirty(false);
-        closeModal();
+        SC.conflict = null;
+        /* 保存后不再整层关闭设置中心：回读最新视图并留在当前分组，
+           避免「保存一次就要重新打开」以及新增目标拿不到服务端 id */
+        scReload();
         toast(okMsg || T("saved"));
         return true;
       }
-      if (res.error === "REVISION_CONFLICT") { toast(T("scRevisionConflict")); return false; }
+      if (res.error === "REVISION_CONFLICT") {
+        SC.conflict = typeof res.revision === "number" ? res.revision : 0;
+        scShowConflict(SC.conflict);
+        toast(T("scRevisionConflict"));
+        return false;
+      }
       toast(res.error ? T("scSaveFailMsg", { e: res.error }) : T("scSaveFail"));
       return false;
-    }).catch(function () { scBusy(btn, false); toast(T("scSaveFail")); return false; });
+    }).catch(function () { done(); toast(T("scSaveFail")); return false; });
   }
   function scSaveSession(btn) {
     var sel = $("scbttl"), inp = $("scbttlmin"), gl = $("scgttl");
@@ -7146,36 +7770,50 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     }
     if (localChanged || limitChanged || langChanged) {
       applyLocal();
-      scMarkDirty(false); closeModal(); toast(T("scSavedTtl"));
+      /* 只改了本浏览器的项：提示语必须与真实范围一致（不写成「下次登录生效」） */
+      scMarkDirty(false);
+      SC.lastSaveAt = Date.now();
+      toast(T("scSavedLocal"));
       afterSaved();
       return;
     }
     toast(T("scNoChanges"));
   }
-  function scSaveNotify(btn) {
-    /* 本浏览器偏好（消息开关 / 免打扰）：与全局通知规则同一次保存 */
-    function saveBrowserPrefs() {
-      var ac = $("scautocopy"), cc = $("scodecopy"), nb = $("scnotifyon"), sb = $("scsoundon"), dn = $("scdndon");
-      if (ac) { state.autoCopy = ac.checked; try { localStorage.setItem("sms_autocopy", state.autoCopy ? "1" : "0"); } catch (e) {} }
-      if (cc) { state.codeCopy = cc.checked; try { localStorage.setItem("sms_codecopy", state.codeCopy ? "1" : "0"); } catch (e) {} }
-      if (nb) {
-        state.notify = nb.checked; try { localStorage.setItem("sms_notify", state.notify ? "1" : "0"); } catch (e) {}
-        if (state.notify && window.Notification && Notification.permission === "default") Notification.requestPermission();
-      }
-      if (sb) { state.sound = sb.checked; try { localStorage.setItem("sms_sound", state.sound ? "1" : "0"); } catch (e) {} }
-      if (dn) {
-        var start = Math.min(23, Math.max(0, parseInt($("scdnds").value, 10) || 0));
-        var end = Math.min(23, Math.max(0, parseInt($("scdnde").value, 10) || 0));
-        try { localStorage.setItem("sms_dnd", JSON.stringify({ on: !!dn.checked, start: start, end: end })); } catch (e) {}
-      }
-      /* 复制按钮显隐需立即反映到列表 */
-      load();
+  /* 本浏览器偏好（消息开关 / 免打扰）：先读成纯数据快照，保存成功后再落地，
+     避免「服务端保存失败但本地开关已经改了」这种反馈与状态不一致 */
+  function readBrowserPrefs() {
+    var ac = $("scautocopy"), cc = $("scodecopy"), nb = $("scnotifyon"), sb = $("scsoundon"), dn = $("scdndon");
+    return {
+      autoCopy: ac ? !!ac.checked : null,
+      codeCopy: cc ? !!cc.checked : null,
+      notify: nb ? !!nb.checked : null,
+      sound: sb ? !!sb.checked : null,
+      dnd: dn ? {
+        on: !!dn.checked,
+        start: Math.min(23, Math.max(0, parseInt($("scdnds") && $("scdnds").value, 10) || 0)),
+        end: Math.min(23, Math.max(0, parseInt($("scdnde") && $("scdnde").value, 10) || 0)),
+      } : null,
+    };
+  }
+  function applyBrowserPrefs(p) {
+    if (!p) return;
+    if (p.autoCopy !== null) { state.autoCopy = p.autoCopy; try { localStorage.setItem("sms_autocopy", state.autoCopy ? "1" : "0"); } catch (e) {} }
+    if (p.codeCopy !== null) { state.codeCopy = p.codeCopy; try { localStorage.setItem("sms_codecopy", state.codeCopy ? "1" : "0"); } catch (e) {} }
+    if (p.notify !== null) {
+      state.notify = p.notify; try { localStorage.setItem("sms_notify", state.notify ? "1" : "0"); } catch (e) {}
+      if (state.notify && window.Notification && Notification.permission === "default") Notification.requestPermission();
     }
-    saveBrowserPrefs();
+    if (p.sound !== null) { state.sound = p.sound; try { localStorage.setItem("sms_sound", state.sound ? "1" : "0"); } catch (e) {} }
+    if (p.dnd) { try { localStorage.setItem("sms_dnd", JSON.stringify(p.dnd)); } catch (e) {} }
+    /* 复制按钮显隐需立即反映到列表 */
+    load();
+  }
+  function scSaveNotify(btn) {
     var types = [];
     var nodes = document.querySelectorAll("[data-nftype]");
     for (var i = 0; i < nodes.length; i++) if (nodes[i].checked) types.push(nodes[i].getAttribute("data-nftype"));
     if (!types.length) { toast(T("scKeepOneType")); return; }
+    var prefs = readBrowserPrefs();
     var schema = SC.d.notify_schema || { channels: [] };
     var body = {
       revision: SC.d.revision,
@@ -7225,7 +7863,11 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       });
       body.notify.channels[ch.key] = c;
     });
-    return scPut(body, btn);
+    return scPut(body, btn).then(function (ok) {
+      /* 只有服务端确认保存成功才落地本浏览器偏好，失败时保持原状并如实提示 */
+      if (ok) applyBrowserPrefs(prefs);
+      return ok;
+    });
   }
   function scSaveBiz(btn) {
     var days = parseInt($("sysdays").value, 10);
@@ -7256,7 +7898,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       document.title = SITE_NAME;
       pollErr = 0;
       /* 隐藏期间长轮询已暂停（pollTimer 为空），回到前台立即重启，避免等下一轮延迟 */
-      if (!pollTimer) pollLoop(0);
+      if (!pollTimer && pollStarted) pollLoop(0);
       load(true);
     }
   });
@@ -7488,7 +8130,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   })();
   loadQHist();
   registerSW();
-  refreshAll();
+  /* 先渲染首屏消息，再启动长轮询（成功/失败都启动，保证实时性不依赖首屏成败） */
+  refreshAll().then(startPoll, startPoll);
 })();
 </script>
 </body>
@@ -7558,7 +8201,7 @@ const LOGIN_HTML = String.raw`<!DOCTYPE html>
       var v = String(s || "").toLowerCase().replace(/_/g, "-");
       if (v === "zh" || v === "zh-cn" || v === "zh-hans") return "zh-CN";
       if (v === "zh-tw" || v === "zh-hk" || v === "zh-mo" || v === "zh-hant") return "zh-TW";
-      if (v === "pt") return "pt-BR";
+      if (v === "pt" || v === "pt-br") return "pt-BR";
       return LANGS.indexOf(v) >= 0 ? v : "";
     }
     var v = "";
