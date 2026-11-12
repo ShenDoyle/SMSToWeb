@@ -69,7 +69,7 @@ function escAttr(s) {
 function jsStr(s) {
   return JSON.stringify(s).replace(/</g, "\\u003c");
 }
-const APP_VERSION = "v1.1.1";
+const APP_VERSION = "v1.1.2";
 
 /* 把页面模板中的占位标记替换为实际配置值（用函数替换器，避免值里含 $& 等特殊序列被误解释） */
 function renderHtml(html, env) {
@@ -79,6 +79,42 @@ function renderHtml(html, env) {
     .replace(/__SITE_ICON__/g, function () { return escAttr(siteIcon(env)); })
     .replace(/__DEFAULT_ICON_JSON__/g, function () { return jsStr(DEFAULT_SITE_ICON); })
     .replace(/__APP_VERSION__/g, function () { return escAttr(APP_VERSION); });
+}
+
+/* ==== ENG-01 OPT-1：HTML 文档缓存策略（no-store → no-cache + 稳定 ETag） ====
+   动机：no-store 使每次刷新都重传 ~520KB 完整页面（ENG-01-A1 实测冷热传输一致）。
+   语义与安全边界：
+   - no-cache ≠ 不缓存：允许共享缓存存储，但每次使用前必须回源验证（If-None-Match）。
+   - ETag 对「最终渲染后的 HTML」做 SHA-256（站点名/图标/版本变化都会改变内容 → ETag 随之变化），
+     不使用时间戳等不稳定值；同一内容恒定同一 ETag。
+   - 认证隔离：登录页（LOGIN_HTML）与主页面（PAGE_HTML）内容不同 → ETag 不同。
+     登出/过期后回源计算的是另一种 HTML，ETag 必不匹配 → 返回 200 新页面，
+     共享缓存不可能把 A 的认证页喂给 B（每次使用都强制回源验证）。
+   - 版本更新：APP_VERSION 内嵌于页面，发版即内容变化 → ETag 变化 → 全员 200。
+   - 私有数据接口（/api/*）维持 no-store 不变。 */
+async function serveHtml(rawHtml, env, request) {
+  const body = renderHtml(rawHtml, env);
+  const headers = {
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "no-cache",
+    "Vary": "Cookie",
+    ...SECURITY_HEADERS,
+  };
+  try {
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body)));
+    let etag = '"';
+    for (let i = 0; i < 16; i++) etag += digest[i].toString(16).padStart(2, "0");
+    etag += '"';
+    headers.ETag = etag;
+    const inm = request && request.headers ? (request.headers.get("if-none-match") || "") : "";
+    if (inm.split(",").map(function (s) { return s.trim(); }).indexOf(etag) !== -1) {
+      return new Response(null, { status: 304, headers: headers });
+    }
+  } catch (e) {
+    /* WebCrypto 不可用等极端情况：退化为 no-cache 无 ETag（仍比 no-store 省传输，
+       且绝不会因缓存验证失败而返回错误内容） */
+  }
+  return new Response(body, { headers: headers });
 }
 
 /* 设备标签（网页标签展示值）由 App 消息模板的 name 字段提供，自定义命名；
@@ -2057,103 +2093,232 @@ async function handleWait(url, env) {
 /* ===== DS TOKENS v1：全项目唯一设计令牌源 =====
    管理页与登录页都通过 ${DS_TOKENS_CSS} 注入同一字符串；禁止各页面再复制一套变量。 */
 const DS_TOKENS_CSS = String.raw`
-  /* ===== DS TOKENS v1（全项目唯一设计令牌源；登录页与后台共用同一套语义变量） =====
-     命名规则：--ds-<类别>-<语义>；下方「兼容别名」把既有 --bg/--card/--accent 等映射到令牌，
-     旧选择器无需改动即自动继承新体系。新增颜色一律先在此定义语义令牌，不得在页面内写死色值。 */
+  /* ===== DS TOKENS v2（全项目唯一设计令牌源；登录页与后台共用同一套语义变量） =====
+     三层结构：
+       L1 palette   —— 只收纳「被多个语义令牌共用」的原始值，不追求把每个色值都抽成变量
+       L2 semantic  —— 组件只允许使用这一层；语义与主题解耦
+       L3 component —— 仅当组件确有独立表现时才建，禁止为抽象而抽象
+
+     主题真源：浅色定义在 :root（默认值即浅色真源），深色只在 html[data-theme="dark"] 里
+     覆盖「与浅色不同」的令牌。data-theme 由 <head> 内联脚本在首帧前写入（light|dark，
+     auto 已解析为具体值），因此不再需要 @media (prefers-color-scheme) 令牌块，也不再需要
+     html[data-theme="light"] 整份副本：任一次改色只会落在一个主题段里，不需要在四份色板间人工对齐。 */
   :root {
-    /* 颜色 · 背景 */
-    --ds-color-bg-page: #f5f6f7;
-    --ds-color-bg-surface: #fff;
-    --ds-color-bg-subtle: #f5f6f7;
-    /* 颜色 · 文本 */
-    --ds-color-text: #20242a;
-    --ds-color-text-secondary: #6b7280;
-    --ds-color-text-tertiary: #9aa3ab;
-    /* 颜色 · 主色与状态 */
+    /* ---------- L1 Palette：共用原始值（同一值被 2 个以上语义令牌引用时才提炼） ---------- */
+    --ds-palette-white: #ffffff;
+    --ds-palette-green-tint: #e7f4ec;   /* primary-subtle / success-subtle / code-bg 共用 */
+    --ds-palette-red-tint: #fef2f2;     /* danger-subtle */
+    --ds-palette-orange-tint: #fff7ed;  /* warning-subtle */
+    --ds-palette-blue-tint: #eff6ff;    /* info-subtle */
+    --ds-palette-ink: #111827;          /* 反色表面（toast） */
+
+    /* ---------- L2 Semantic · 背景与表面（三级层次 + 交互表面 + 浮层） ---------- */
+    --ds-color-bg-page: #f2f4f6;
+    --ds-color-bg-surface: #ffffff;
+    /* 浏览器顶部色带（meta theme-color）：与页面底色一致，避免出现割裂色条 */
+    --ds-color-chrome: #f2f4f6;
+    --ds-color-bg-subtle: #f6f8f9;
+    --ds-color-bg-raised: #ffffff;
+    /* 交互表面：hover/active 是「元素被指到/被按下」，与「层级抬升」是两件事，故独立成组 */
+    --ds-color-surface-hover: #f6f8f9;
+    --ds-color-surface-active: #eef1f4;
+    /* 遮罩：所有弹层共用同一个压暗值，禁止组件各写 rgba(0,0,0,.42) */
+    --ds-color-overlay: rgba(15, 23, 32, .48);   /* 承接原硬编码 .52 的视觉强度，浅色下不压黑背景 */
+    /* 反色表面：Toast 等「浮在内容之上、与页面反色」的短反馈 */
+    --ds-color-inverse-bg: var(--ds-palette-ink);
+    --ds-color-inverse-fg: var(--ds-palette-white);
+    /* 反色表面上的类型标记色：Toast 的类型标识（成功/警告/危险/信息）。
+       与 --ds-color-success 等页面语义色分开，因为反色底是深色，页面语义色在其上对比不足 */
+    --ds-color-on-inverse-success: #4ade80;
+    --ds-color-on-inverse-warning: #fbbf24;
+    --ds-color-on-inverse-danger: #f87171;
+    --ds-color-on-inverse-info: #60a5fa;
+
+    /* ---------- L2 Semantic · 文本（四级，后两级各有明确使用边界） ---------- */
+    --ds-color-text: #171b20;
+    --ds-color-text-secondary: #5b6673;
+    /* 三级文本：白底 5.27:1 / 页底 4.78:1（旧 #8a94a0 仅 3.08:1 不达 AA）。用于时间、辅助说明、图标按钮 */
+    --ds-color-text-tertiary: #626d7a;
+    /* 禁用文本：仅用于 disabled 控件，WCAG 对 disabled 文本不作对比度要求 */
+    --ds-color-text-disabled: #9aa4ae;
+
+    /* ---------- L2 Semantic · 主色与状态 ---------- */
+    /* 品牌主色：作为「文本/边框/图标」的强调色（浅色 4.9:1 on page bg） */
     --ds-color-primary: #15803d;
     --ds-color-primary-hover: #116632;
-    --ds-color-primary-subtle: #e7f4ec;
+    --ds-color-primary-active: #0f5a2c;
+    /* 实心主色面（按钮/Logo）：与上面的强调色分开，深色下需要更深才能承载白字 4.5:1 */
+    --ds-color-primary-fill: #15803d;
+    --ds-color-primary-fill-hover: #116632;
+    --ds-color-primary-subtle: var(--ds-palette-green-tint);
+    --ds-color-on-primary: var(--ds-palette-white);
+
     --ds-color-success: #15803d;
+    --ds-color-success-subtle: var(--ds-palette-green-tint);
     --ds-color-warning: #ea580c;
+    --ds-color-warning-subtle: var(--ds-palette-orange-tint);
     --ds-color-danger: #dc2626;
+    --ds-color-danger-subtle: var(--ds-palette-red-tint);
     --ds-color-info: #2563eb;
+    --ds-color-info-subtle: var(--ds-palette-blue-tint);
+    /* 作用域徽章专用前景：warning 同色系加深，保证 12px 小字在浅底 >=4.5:1 */
+    --ds-scope-browser-fg: #c2410c;
     --ds-color-unread: #15803d;
     --ds-color-disabled: #c7ced4;
-    /* 颜色 · 边框与分割 */
-    --ds-color-border: #d8dce0;
-    --ds-color-border-subtle: #e3e6e9;
-    --ds-color-divider: #eef1f3;
-    --ds-color-link: #2563eb;
-    /* 字体 */
+
+    /* 焦点：全产品统一一个焦点色（品牌绿系），不再有蓝色焦点环与绿色焦点环并存 */
+    --ds-color-focus: #15803d;
+    /* 历史命名兼容：--ds-color-link 与焦点同色（旧规则仍引用它），新代码请用 --ds-color-focus */
+    --ds-color-link: var(--ds-color-focus);
+
+    /* ---------- L2 Semantic · 边框与分割 ---------- */
+    --ds-color-border: #dce1e6;
+    --ds-color-border-subtle: #e7eaee;
+    --ds-color-divider: #eef1f4;
+
+    /* ---------- L3 Component ---------- */
+    /* 表单控件底面：浅色与卡片同白，靠略深的 1px 边框立形；深色必须抬亮一档否则溶进卡片 */
+    --ds-field-bg: #ffffff;
+    --ds-field-border: #ccd3da;
+    /* 来源徽章：来源类型属于业务枚举色，不参与主题切换（深色下仍以白字 + 实心色块保证可读） */
+    --ds-srctag-notify-bg: #2563eb;
+    --ds-srctag-alert-bg: #ea580c;
+    --ds-srctag-cron-bg: #7c3aed;
+    --ds-srctag-other-bg: #475569;
+    /* 验证码胶囊 */
+    --ds-code-bg: #e7f4ec;
+    --ds-code-border: #b7dfc6;
+    --ds-code-text: #116632;
+    --ds-color-sender: #0f766e;
+
+    /* ---------- 字体 ---------- */
     --ds-font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
     --ds-font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-    --ds-text-xs: 12px; --ds-text-sm: 13px; --ds-text-md: 14px;
-    --ds-text-lg: 16px; --ds-text-xl: 18px; --ds-text-2xl: 20px;
-    --ds-leading: 1.6; --ds-leading-tight: 1.3;
-    --ds-weight-normal: 400; --ds-weight-medium: 600; --ds-weight-bold: 700;
-    /* 尺寸与间距 */
+    /* 字号：原 --ds-text-* 与 --ds-color-text-* 语义冲突，统一改为 --ds-font-size-* */
+    --ds-font-size-xs: 12px;
+    --ds-font-size-sm: 13px;
+    --ds-font-size-md: 14px;
+    --ds-font-size-lg: 16px;
+    --ds-font-weight-normal: 400;
+    --ds-font-weight-semibold: 600;
+    --ds-font-weight-bold: 700;
+    --ds-line-height-base: 1.6;
+    --ds-line-height-tight: 1.3;
+    --ds-line-height-relaxed: 1.78;
+
+    /* ---------- 尺寸与间距 ---------- */
     --ds-space-1: 4px; --ds-space-2: 6px; --ds-space-3: 8px; --ds-space-4: 12px;
     --ds-space-5: 16px; --ds-space-6: 24px; --ds-space-7: 32px;
-    --ds-content-max: 760px;
-    --ds-control-h: 36px; --ds-control-h-sm: 32px;
+    /* 内容宽度：与 .wrap 实际宽度保持一致（旧值 760px 是重构前的残留） */
+    --ds-content-max: 1120px;
+    --ds-control-h-sm: 32px; --ds-control-h: 36px; --ds-control-h-lg: 44px;
+    /* 触控目标最小边长：移动端可点区域不得小于此值 */
+    --ds-touch-min: 44px;
+    --ds-icon-sm: 16px; --ds-icon-md: 20px;
     --ds-radius-sm: 6px; --ds-radius-md: 8px; --ds-radius-lg: 10px;
-    --ds-radius-xl: 14px; --ds-radius-pill: 999px;
+    --ds-radius-xl: 14px; --ds-radius-2xl: 18px; --ds-radius-full: 999px;
     --ds-border-w: 1px;
-    --ds-shadow-1: 0 1px 3px rgba(0,0,0,.12);
-    --ds-shadow-2: 0 8px 24px rgba(0,0,0,.14);
-    --ds-shadow-3: 0 10px 28px rgba(15,23,42,.16);
-    --ds-focus-ring: 0 0 0 2px var(--ds-color-link);
-    /* 组件令牌（保持原语义，供既有选择器直用） */
-    --ds-color-sender: #0f766e;
-    --ds-code-bg: #e7f4ec; --ds-code-border: #b7dfc6; --ds-code-text: #116632; --ds-code-hover: #d5ebdd;
-    /* ---------- 兼容别名（旧变量 → 令牌；迁移期保留，全部走令牌取值） ---------- */
+
+    /* ---------- 阴影（只表达「浮起」层级；列表行之间不用阴影） ---------- */
+    --ds-shadow-1: 0 1px 2px rgba(16,24,40,.05), 0 1px 3px rgba(16,24,40,.04);
+    --ds-shadow-2: 0 6px 16px rgba(16,24,40,.08), 0 18px 44px rgba(16,24,40,.10);
+    --ds-shadow-3: 0 8px 20px rgba(16,24,40,.10), 0 24px 56px rgba(16,24,40,.14);
+    --ds-shadow-sheet: 0 24px 64px rgba(16,24,40,.18);
+    --ds-focus-ring: 0 0 0 3px var(--ds-ring);
+
+    /* ---------- 动效 ---------- */
+    --ds-duration-fast: 120ms;
+    --ds-duration-base: 180ms;
+    --ds-duration-slow: 240ms;
+    --ds-ease: cubic-bezier(.2,.7,.3,1);
+    --ds-ring: rgba(21,128,61,.28);
+
+    /* ---------- 层级（禁止组件里再写裸数字） ---------- */
+      --ds-z-sticky: 10;
+    --ds-z-dropdown: 1000;
+      --ds-z-modal: 1300;
+    --ds-z-modal-stacked: 1310;  /* 叠在普通弹层之上的二次弹层（推送编辑、密码确认） */
+    --ds-z-popover: 1400;        /* 语言菜单等，需浮在弹层之上 */
+    --ds-z-toast: 1500;          /* 提示条永远可见，且提示条容器不参与 inert 隔离 */
+
+    /* ---------- 兼容别名（旧变量 → 令牌；旧选择器无需改动） ---------- */
     --bg: var(--ds-color-bg-page); --card: var(--ds-color-bg-surface);
     --text: var(--ds-color-text); --muted: var(--ds-color-text-secondary); --faint: var(--ds-color-text-tertiary);
     --border: var(--ds-color-border); --card-border: var(--ds-color-border-subtle); --row-border: var(--ds-color-divider);
     --accent: var(--ds-color-primary); --accent-deep: var(--ds-color-primary-hover);
     --accent-bg: var(--ds-color-primary-subtle); --badge-bg: var(--ds-color-primary-subtle);
-    --sender: var(--ds-color-sender); --link: var(--ds-color-link);
-    --code-bg: var(--ds-code-bg); --code-border: var(--ds-code-border); --code-text: var(--ds-code-text); --code-hover: var(--ds-code-hover);
+    --sender: var(--ds-color-sender); --link: var(--ds-color-focus);
     --del: var(--ds-color-text-tertiary); --del-hover: var(--ds-color-danger);
     --tabx: var(--ds-color-text-tertiary); --sw-off: var(--ds-color-disabled);
   }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --ds-color-bg-page: #14171a; --ds-color-bg-surface: #1d2126; --ds-color-bg-subtle: #14171a;
-      --ds-color-text: #e6e9ec; --ds-color-text-secondary: #9aa3ab; --ds-color-text-tertiary: #6b7480;
-      --ds-color-primary: #22a04f; --ds-color-primary-hover: #1a8a41; --ds-color-primary-subtle: #12351f;
-      --ds-color-success: #22a04f; --ds-color-warning: #fb923c; --ds-color-danger: #f87171;
-      --ds-color-info: #6ea8ff; --ds-color-unread: #22a04f; --ds-color-disabled: #3a424a;
-      --ds-color-border: #33393f; --ds-color-border-subtle: #2a3036; --ds-color-divider: #262c31;
-      --ds-color-link: #6ea8ff; --ds-color-sender: #4fd1a5;
-      --ds-code-bg: #12351f; --ds-code-border: #2f6a45; --ds-code-text: #86efac; --ds-code-hover: #17452a;
-      --tabx: var(--ds-color-text-tertiary);
-    }
-  }
-  /* 主题三态（data-theme 覆盖系统偏好）：只覆盖 DS 令牌，兼容别名自动跟随 */
+
+  /* ---------- 深色主题：只覆盖与浅色不同的令牌（一份，不再有 media 副本） ---------- */
   html[data-theme="dark"] {
-    --ds-color-bg-page: #14171a; --ds-color-bg-surface: #1d2126; --ds-color-bg-subtle: #14171a;
-    --ds-color-text: #e6e9ec; --ds-color-text-secondary: #9aa3ab; --ds-color-text-tertiary: #6b7480;
-    --ds-color-primary: #22a04f; --ds-color-primary-hover: #1a8a41; --ds-color-primary-subtle: #12351f;
-    --ds-color-success: #22a04f; --ds-color-warning: #fb923c; --ds-color-danger: #f87171;
-    --ds-color-info: #6ea8ff; --ds-color-unread: #22a04f; --ds-color-disabled: #3a424a;
-    --ds-color-border: #33393f; --ds-color-border-subtle: #2a3036; --ds-color-divider: #262c31;
-    --ds-color-link: #6ea8ff; --ds-color-sender: #4fd1a5;
-    --ds-code-bg: #12351f; --ds-code-border: #2f6a45; --ds-code-text: #86efac; --ds-code-hover: #17452a;
-    --tabx: var(--ds-color-text-tertiary);
+    --ds-color-bg-page: #0f1216;
+    --ds-color-bg-surface: #171b20;
+    --ds-color-chrome: #0f1216;
+    --ds-color-bg-subtle: #12161a;
+    --ds-color-bg-raised: #1d2329;
+    --ds-color-surface-hover: #1b2127;
+    --ds-color-surface-active: #232a30;
+    --ds-color-overlay: rgba(0, 0, 0, .62);   /* UX-07B 实测裁定：深色页面本身很暗，需更浓遮罩才能压住背景 */
+    --ds-color-inverse-bg: #e9ecef;
+    --ds-color-inverse-fg: #14171a;
+    --ds-color-on-inverse-success: #15803d;
+    --ds-color-on-inverse-warning: #b45309;
+    --ds-color-on-inverse-danger: #b91c1c;
+    --ds-color-on-inverse-info: #1d4ed8;
+
+    --ds-color-text: #e9ecef;
+    --ds-color-text-secondary: #9aa4ae;
+    --ds-color-text-tertiary: #7d8792;   /* 4.74:1（旧 #717b86 仅 4.01:1） */
+    --ds-color-text-disabled: #6b7683;
+
+    --ds-color-primary: #22a04f;
+    --ds-color-primary-hover: #1f8f47;
+    --ds-color-primary-active: #1a7a3c;
+    /* 深色实心面加深到 #1a7d3e：白字 5.19:1（原 #22a04f 上白字仅 3.42:1） */
+    --ds-color-primary-fill: #1a7d3e;
+    --ds-color-primary-fill-hover: #166b35;
+    --ds-color-primary-subtle: #102e1d;
+    --ds-color-on-primary: #ffffff;
+
+    --ds-color-success: #34b06a;
+    --ds-color-success-subtle: #102e1d;
+    --ds-color-warning: #f59e42;
+    --ds-color-warning-subtle: #2c1f12;
+    --ds-color-danger: #f4736b;
+    --ds-color-danger-subtle: #2c1616;
+    --ds-color-info: #6aa5ff;
+    --ds-color-info-subtle: #14243a;
+    --ds-scope-browser-fg: #fb923c;
+    --ds-color-unread: #22a04f;
+    --ds-color-disabled: #333b43;
+
+    --ds-color-focus: #34b06a;
+    --ds-color-link: var(--ds-color-focus);
+
+    --ds-color-border: #2b3238;
+    --ds-color-border-subtle: #232a30;
+    --ds-color-divider: #1f252b;
+
+    --ds-field-bg: #1d2329;
+    --ds-field-border: #3a434c;
+    --ds-srctag-notify-bg: #2563eb;
+    --ds-srctag-alert-bg: #c2410c;
+    --ds-srctag-cron-bg: #7c3aed;
+    --ds-srctag-other-bg: #475569;
+    --ds-code-bg: #102e1d;
+    --ds-code-border: #2c6242;
+    --ds-code-text: #86efac;
+    --ds-color-sender: #7fc9b0;
+
+    --ds-shadow-1: 0 1px 2px rgba(0,0,0,.40), 0 1px 3px rgba(0,0,0,.32);
+    --ds-shadow-2: 0 6px 16px rgba(0,0,0,.48), 0 18px 44px rgba(0,0,0,.52);
+    --ds-shadow-3: 0 8px 20px rgba(0,0,0,.52), 0 24px 56px rgba(0,0,0,.58);
+    --ds-shadow-sheet: 0 24px 64px rgba(0,0,0,.62);
+    --ds-ring: rgba(34,160,79,.34);
   }
-  html[data-theme="light"] {
-    --ds-color-bg-page: #f5f6f7; --ds-color-bg-surface: #fff; --ds-color-bg-subtle: #f5f6f7;
-    --ds-color-text: #20242a; --ds-color-text-secondary: #6b7280; --ds-color-text-tertiary: #9aa3ab;
-    --ds-color-primary: #15803d; --ds-color-primary-hover: #116632; --ds-color-primary-subtle: #e7f4ec;
-    --ds-color-success: #15803d; --ds-color-warning: #ea580c; --ds-color-danger: #dc2626;
-    --ds-color-info: #2563eb; --ds-color-unread: #15803d; --ds-color-disabled: #c7ced4;
-    --ds-color-border: #d8dce0; --ds-color-border-subtle: #e3e6e9; --ds-color-divider: #eef1f3;
-    --ds-color-link: #2563eb; --ds-color-sender: #0f766e;
-    --ds-code-bg: #e7f4ec; --ds-code-border: #b7dfc6; --ds-code-text: #116632; --ds-code-hover: #d5ebdd;
-    --tabx: var(--ds-color-text-tertiary);
-  }
-  :root { --input-border: var(--ds-color-border); }
 `;
 
 const PAGE_HTML = String.raw`<!DOCTYPE html>
@@ -2169,8 +2334,28 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
 <link rel="apple-touch-icon" href="__SITE_ICON__">
 <link rel="icon" href="__SITE_ICON__">
 <link rel="manifest" href="/manifest.webmanifest">
-<meta name="theme-color" content="#15803d" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#14171a" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f2f4f6">
+<script>
+/* 首帧前确定主题：data-theme 是运行时唯一真源（auto 在此解析为 light/dark），
+   这样样式表只需 :root(浅) + html[data-theme="dark"](深) 两段，且深色不闪白。 */
+(function () {
+  var t = "light";
+  try {
+    var saved = localStorage.getItem("sms_theme") || "auto";
+    if (saved === "light" || saved === "dark") t = saved;
+    else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) t = "dark";
+  } catch (e) {}
+  document.documentElement.setAttribute("data-theme", t);
+  /* 浏览器色带取值来自令牌，不在 JS 里另存色值；样式解析完成后再同步一次 */
+  document.addEventListener("DOMContentLoaded", function () {
+    try {
+      var m = document.querySelector('meta[name="theme-color"]');
+      var v = getComputedStyle(document.documentElement).getPropertyValue("--ds-color-chrome").trim();
+      if (m && v) m.setAttribute("content", v);
+    } catch (e) {}
+  });
+})();
+</script>
 <title>__SITE_NAME__</title>
 <style>
   ${DS_TOKENS_CSS}
@@ -2183,15 +2368,15 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .tabs { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 8px; margin-bottom: 8px; }
   .tab { flex: none; padding: 5px 12px; border: 1px solid var(--border); border-radius: 999px;
          background: var(--card); cursor: pointer; font-size: 13px; color: var(--text); white-space: nowrap; }
-  .tab.active { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+  .tab.active { background: var(--ds-color-primary-fill); border-color: var(--ds-color-primary-fill); color: var(--ds-color-on-primary); font-weight: var(--ds-font-weight-semibold); }
   .toolbar { display: flex; gap: 8px; margin-bottom: 8px; }
-  .toolbar input[type=search] { flex: 1; padding: 8px 12px; border: 1px solid var(--border);
-         border-radius: 8px; font-size: 14px; background: var(--card); color: var(--text); }
-  .toolbar select { padding: 8px 8px; border: 1px solid var(--border); border-radius: 8px;
-         font-size: 13px; background: var(--card); color: var(--text); }
+  .toolbar input[type=search] { flex: 1; padding: 8px 12px; border: 1px solid var(--ds-field-border);
+         border-radius: 8px; font-size: 14px; background: var(--ds-field-bg); color: var(--text); }
+  .toolbar select { padding: 8px 8px; border: 1px solid var(--ds-field-border); border-radius: 8px;
+         font-size: 13px; background: var(--ds-field-bg); color: var(--text); }
   /* 设置下拉菜单：统计 / 消息开关 / 免打扰 / 筛选 / 操作，全部左对齐 */
   .setwrap { position: relative; display: inline-flex; }
-  .setmenu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 70; min-width: 224px;
+  .setmenu { position: absolute; right: 0; top: calc(100% + 6px); z-index: var(--ds-z-dropdown); min-width: 224px;
              max-width: calc(100vw - 32px); max-height: calc(100vh - 96px); overflow-y: auto;
              background: var(--card); border: 1px solid var(--border); border-radius: 12px;
              box-shadow: 0 10px 28px rgba(15, 23, 42, .16); padding: 6px; display: none; }
@@ -2221,8 +2406,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
                  background: var(--sw-off); border: 1px solid var(--border);
                  transition: background .2s ease, border-color .2s ease; }
   .opt .switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px;
-                        border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.28);
-                        transition: transform .2s ease; }
+                        border-radius: 50%; background: var(--ds-palette-white); box-shadow: var(--ds-shadow-1);
+                        transition: transform var(--ds-duration-base) var(--ds-ease); }
   .opt input:checked + .switch { background: var(--accent); border-color: var(--accent); }
   .opt input:checked + .switch::after { transform: translateX(18px); }
   .opt input:focus-visible + .switch { outline: 2px solid var(--link); outline-offset: 2px; }
@@ -2237,19 +2422,19 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .sender { font-weight: 700; font-size: 16px; color: var(--sender); }
   .del { margin-left: auto; border: none; background: none; color: var(--del); cursor: pointer; font-size: 12px; padding: 2px 4px; }
   .del:hover { color: var(--del-hover); }
-  .srctag { flex: none; font-size: 11px; font-weight: 700; color: var(--badge-bg); background: var(--accent);
+  .srctag { flex: none; font-size: 11px; font-weight: 700; color: var(--ds-color-primary-subtle); background: var(--ds-color-primary-fill);
             border-radius: 5px; padding: 1px 7px; }
   /* 验证码：与 DS 统一（强调色块 + 等宽字体 + 足够对比度），不改变复制与识别逻辑 */
-  .code-line { margin: 6px 0 2px; color: var(--ds-color-text-secondary); font-size: var(--ds-text-xs); }
+  .code-line { margin: 6px 0 2px; color: var(--ds-color-text-secondary); font-size: var(--ds-font-size-xs); }
   .code-line b { font-size: 18px; letter-spacing: 1.5px; margin-right: 8px; display: inline-block;
-                 font-family: var(--ds-font-mono); font-weight: var(--ds-weight-bold);
+                 font-family: var(--ds-font-mono); font-weight: var(--ds-font-weight-bold);
                  color: var(--ds-code-text); background: var(--ds-code-bg);
                  border: 1px solid var(--ds-code-border); padding: 1px 8px; border-radius: var(--ds-radius-sm); }
   .copy { border: 1px solid var(--ds-color-border); background: var(--ds-color-bg-surface); color: var(--ds-color-text-secondary);
-          border-radius: var(--ds-radius-sm); padding: 2px 10px; cursor: pointer; font-size: var(--ds-text-xs);
+          border-radius: var(--ds-radius-sm); padding: 2px 10px; cursor: pointer; font-size: var(--ds-font-size-xs);
           min-height: 28px; }
   .copy:hover { background: var(--ds-code-bg); border-color: var(--ds-code-border); color: var(--ds-code-text); }
-  .copy:focus-visible { outline: 2px solid var(--ds-color-link); outline-offset: 2px; }
+  .copy:focus-visible { outline: 2px solid var(--ds-color-focus); outline-offset: 2px; }
   .line { margin-top: 4px; }
   .content { word-break: break-word; white-space: pre-wrap; }
   /* 摘要卡片：固定两行截断；是否显示「查看全文」由 JS 实测溢出决定（不按字数猜） */
@@ -2259,15 +2444,15 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   /* 批量操作区（列表页独立，不在设置中心） */
   .bulkbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 4px 0 8px; }
   .bulkbar .bulkmeta { color: var(--ds-color-text-secondary); font-size: 12px; }
-  /* 详情弹窗：正文为主体 */
-  .detail-body { white-space: pre-wrap; word-break: break-word; line-height: 1.7; font-size: 15px;
+  /* 详情弹窗：正文为主体（UX-07B：14.5px → 15px，内边距与最大高度上调，长短信更适合连续阅读） */
+  .detail-body { white-space: pre-wrap; word-break: break-word; line-height: var(--ds-line-height-relaxed); font-size: 15px;
                  color: var(--ds-color-text); background: var(--ds-color-bg-subtle);
                  border: 1px solid var(--ds-color-border-subtle); border-radius: var(--ds-radius-lg);
-                 padding: 12px; margin: 4px 0 10px; max-height: 46vh; overflow: auto; }
+                 padding: 16px 18px; margin: 12px 0 4px; max-height: 48vh; overflow: auto; }
   .detail-body .empty-text { color: var(--ds-color-text-tertiary); font-size: 13px; }
   .detail-meta { border: 1px solid var(--ds-color-border-subtle); border-radius: var(--ds-radius-lg);
                  padding: 2px 12px 6px; margin-bottom: 12px; }
-  .detail-sec { font-size: var(--ds-text-xs); color: var(--ds-color-text-tertiary); margin: 8px 0 2px; }
+  .detail-sec { font-size: var(--ds-font-size-xs); color: var(--ds-color-text-tertiary); margin: 8px 0 2px; }
   .detail-actionrow { display: flex; flex-wrap: wrap; gap: 8px; }
   .detail-actionrow + .detail-actionrow { margin-top: 10px; }
   .content a { color: var(--link); word-break: break-all; }
@@ -2275,7 +2460,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .foot-line { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
   .recv { flex: none; font-weight: 600; font-size: 12px; color: var(--muted); cursor: pointer; user-select: none; }
   .recv:hover { color: var(--text); }
-  .empty { text-align: center; color: var(--faint); padding: 40px 0; }
+  .empty { text-align: center; color: var(--ds-color-text-secondary); padding: 56px 16px; font-size: 13.5px; line-height: 1.8; }
+  .empty small { color: var(--ds-color-text-secondary); font-size: 12px; display: inline-block; margin-top: 6px; }
   .pager { display: flex; gap: 8px; justify-content: center; align-items: center; margin-top: 16px; }
   /* 未读入口：数量徽章 + 文字（不只靠颜色） */
   .unreadpill { display: inline-flex; align-items: center; gap: 4px; margin-left: 8px; }
@@ -2288,27 +2474,54 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .tabop { margin-left: 2px; color: var(--faint); font-weight: 700; padding: 0 2px; font-size: 12px; }
   .tabop:hover { color: var(--accent); }
   .toast { position: fixed; left: 50%; bottom: 48px; transform: translate(-50%, 12px);
-           background: #111827; color: #fff; padding: 9px 18px; border-radius: 999px;
-           font-size: 13px; opacity: 0; pointer-events: none; transition: all .25s ease; z-index: 99; }
+           background: var(--ds-color-inverse-bg); color: var(--ds-color-inverse-fg);
+           padding: 9px 18px; border-radius: var(--ds-radius-full); font-size: var(--ds-font-size-sm);
+           opacity: 0; pointer-events: none;
+           transition: opacity var(--ds-duration-base) var(--ds-ease), transform var(--ds-duration-base) var(--ds-ease);
+           z-index: var(--ds-z-toast);
+           display: inline-flex; align-items: center; gap: 8px;
+           max-width: min(92vw, 520px); box-sizing: border-box; }
   .toast.show { opacity: 1; transform: translate(-50%, 0); }
-  .foot { text-align: center; font-size: 12px; margin-top: 28px; color: var(--faint); }
-  .foot a { color: var(--faint); }
+  /* 类型只体现在前置标记与内描边上，正文一律用反色前景——两种主题下都是最高可读，
+     也不与「复制成功」「保存失败」这类原文案抢注意力 */
+  .toast-dot { flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%;
+               background: var(--ds-color-on-inverse-info); }
+  .toast-txt { min-width: 0; overflow-wrap: anywhere; }
+  .toast--success { box-shadow: inset 0 0 0 1px var(--ds-color-on-inverse-success); }
+  .toast--success .toast-dot { background: var(--ds-color-on-inverse-success); }
+  .toast--warning { box-shadow: inset 0 0 0 1px var(--ds-color-on-inverse-warning); }
+  .toast--warning .toast-dot { background: var(--ds-color-on-inverse-warning); }
+  .toast--error { box-shadow: inset 0 0 0 1px var(--ds-color-on-inverse-danger); }
+  .toast--error .toast-dot { background: var(--ds-color-on-inverse-danger); }
+  .toast--info { box-shadow: inset 0 0 0 1px var(--ds-color-on-inverse-info); }
+  .toast--loading { box-shadow: inset 0 0 0 1px var(--ds-color-on-inverse-info); }
+  .toast--loading .toast-dot { width: 10px; height: 10px; background: none; border-radius: 50%;
+                               border: 2px solid var(--ds-color-on-inverse-info);
+                               border-right-color: transparent; animation: toastspin .8s linear infinite; }
+  @keyframes toastspin { to { transform: rotate(360deg); } }
+  /* 手动关闭：命中区 ≥28px（提示条本身不是主要操作，不再占 44px） */
+  .toast-close { flex: 0 0 auto; appearance: none; background: none; border: 0; color: inherit;
+                 opacity: .72; font: inherit; line-height: 1; cursor: pointer;
+                 padding: 4px 6px; margin: -2px -8px -2px 0; border-radius: 50%; }
+  .toast-close:hover { opacity: 1; }
+  .toast-close:focus-visible { outline: 2px solid currentColor; outline-offset: 1px; }
+  .foot { text-align: center; font-size: 12px; margin-top: 28px; color: var(--ds-color-text-secondary); }
+  .foot a { color: var(--ds-color-text-secondary); }
   .gh { position: fixed; top: 14px; right: 14px; color: var(--faint); opacity: .75;
-        transition: opacity .2s, color .2s; z-index: 50; }
+        transition: opacity var(--ds-duration-base) var(--ds-ease), color var(--ds-duration-base) var(--ds-ease); z-index: var(--ds-z-sticky); }
   .gh:hover { opacity: 1; color: var(--text); }
-  @media (prefers-color-scheme: dark) {
-    .toast { background: #e6e9ec; color: #14171a; }
-  }
+  /* Toast 配色由 --ds-color-inverse-bg / -fg 承担，跟随 data-theme；
+     不再按系统偏好单独覆盖（旧规则会让「系统深色 + 手选浅色」显示反色错的提示条） */
   .toolbar, .pager { flex-wrap: wrap; }
   .searchwrap { position: relative; flex: 1; display: flex; min-width: 140px; }
   .searchwrap input { width: 100%; }
   .searchwrap .clr { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); border: none; background: none;
-         color: var(--faint); font-size: 16px; cursor: pointer; padding: 0 4px; line-height: 1; }
+         color: var(--faint); font-size: var(--ds-icon-sm); cursor: pointer; padding: 0 4px; line-height: 1; }
   .clr:hover { color: var(--text); }
   .tbtn { border: 1px solid var(--border); background: var(--card); color: var(--text); border-radius: 8px;
           padding: 5px 10px; font-size: 12px; cursor: pointer; }
   .tbtn:hover { border-color: var(--accent); color: var(--accent); }
-  .langmenu { position: fixed; z-index: 200; background: var(--card); border: 1px solid var(--border);
+  .langmenu { position: fixed; z-index: var(--ds-z-popover); background: var(--ds-color-bg-raised); border: var(--ds-border-w) solid var(--ds-color-border);
               border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.14); padding: 4px; min-width: 150px; }
   .langitem { padding: 8px 14px; border-radius: 7px; cursor: pointer; font-size: 13px; white-space: nowrap; color: var(--text); }
   .langitem:hover { background: var(--ds-color-bg-subtle); }
@@ -2316,13 +2529,14 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .content.fold { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
   .more { border: none; background: none; color: var(--link); cursor: pointer; font-size: 12px; padding: 2px 0; }
   .more:hover { text-decoration: underline; }
-  .card.flash { animation: slidein .25s ease-out, flash 1.6s ease-out; }
+  .card.flash { animation: slidein var(--ds-duration-slow) var(--ds-ease), flash 1.6s ease-out; }
   @keyframes flash { 0% { background: var(--accent-bg); } 100% { background: var(--card); } }
   .skc { height: 62px; border-radius: 10px; background: var(--row-border); margin-bottom: 8px; animation: pulse 1.2s ease-in-out infinite; }
   @keyframes pulse { 0%, 100% { opacity: .45; } 50% { opacity: 1; } }
-  .newpill { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); background: var(--accent);
-             color: #fff; border: none; border-radius: 999px; padding: 8px 16px; font-size: 13px; font-weight: 600;
-             cursor: pointer; z-index: 98; }
+  .newpill { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); background: var(--ds-color-primary-fill);
+             color: var(--ds-color-on-primary); border: none; border-radius: var(--ds-radius-full); padding: 8px 16px;
+             font-size: var(--ds-font-size-sm); font-weight: var(--ds-font-weight-semibold);
+             cursor: pointer; z-index: var(--ds-z-dropdown); }
   .newpill:hover { background: var(--accent-deep); }
   .nlabel { flex: none; font-size: 11px; font-weight: 700; color: var(--accent); background: var(--badge-bg); border-radius: 5px; padding: 1px 6px; }
   .area { color: var(--faint); font-size: 12px; }
@@ -2339,31 +2553,36 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   body.selecting .card { padding-left: 36px; }
   .selwrap input { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; }
   .selbar { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); display: flex; align-items: center; gap: 8px;
-            background: var(--card); border: 1px solid var(--border); border-radius: 999px; padding: 8px 12px; z-index: 97; }
+            background: var(--ds-color-bg-surface); border: var(--ds-border-w) solid var(--ds-color-border);
+            border-radius: var(--ds-radius-full); padding: 8px 12px; z-index: var(--ds-z-dropdown); }
   .selbar span { font-size: 13px; color: var(--muted); }
   /* 来源徽章配色 */
-  .srctag.s-notify { background: #2563eb; color: #fff; }
-  .srctag.s-alert { background: var(--ds-color-warning); color: #fff; }
-  .srctag.s-cron { background: #7c3aed; color: #fff; }
-  .srctag.s-other { background: #475569; color: #fff; }
+  .srctag.s-notify { background: var(--ds-srctag-notify-bg); color: var(--ds-color-on-primary); }
+  .srctag.s-alert { background: var(--ds-srctag-alert-bg); color: var(--ds-color-on-primary); }
+  .srctag.s-cron { background: var(--ds-srctag-cron-bg); color: var(--ds-color-on-primary); }
+  .srctag.s-other { background: var(--ds-srctag-other-bg); color: var(--ds-color-on-primary); }
   /* Toast 堆叠 */
-  .toastroot { position: fixed; left: 50%; bottom: 48px; transform: translateX(-50%); display: flex; flex-direction: column-reverse;
-               gap: 8px; align-items: center; z-index: 99; pointer-events: none; }
+  /* column（不是 column-reverse）：容器贴底，最新一条永远在最下方——多一条时旧提示被顶上去，
+     视觉焦点始终落在刚出现的反馈上 */
+  .toastroot { position: fixed; left: 50%; bottom: 48px; transform: translateX(-50%); display: flex; flex-direction: column;
+               justify-content: flex-end; gap: 8px; align-items: center; z-index: var(--ds-z-toast); pointer-events: none; }
   .toastroot .toast { position: static; transform: translateY(12px); opacity: 0; pointer-events: auto; }
   .toastroot .toast.show { opacity: 1; transform: none; }
   .undo-btn { margin-left: 8px; border: 1px solid currentColor; background: none; color: inherit; border-radius: 6px; padding: 2px 8px; font-size: 12px; cursor: pointer; }
   @media (prefers-reduced-motion: reduce) {
-    .card, .card.flash, .toast, .tab, .switch, .switch::after { animation: none !important; transition: none !important; }
+    .card, .card.flash, .toast, .tab, .switch, .switch::after,
+    .sc-tab, .chip, .tbtn, .barrow .bf, .top-actions .tbtn, .msg-actions .star, .msg-actions .del,
+    input, button { animation: none !important; transition: none !important; }
   }
   .headacts { display: flex; gap: 6px; flex: none; }
   .selbar[hidden] { display: none; }
   /* 弹层 */
-  .modal { position: fixed; inset: 0; background: rgba(0,0,0,.42); display: flex; align-items: center; justify-content: center; z-index: 100; padding: 16px; }
+  .modal { position: fixed; inset: 0; background: var(--ds-color-overlay); display: flex; align-items: center; justify-content: center; z-index: var(--ds-z-modal); padding: 16px; }
   .modal[hidden] { display: none; }
-  .sheet { position: relative; background: var(--card); color: var(--text); border-radius: 14px; width: 100%; max-width: 560px; max-height: 86vh; overflow: auto; padding: 18px 18px 22px; border: 1px solid var(--border); }
-  .mx { position: absolute; top: 8px; right: 10px; border: none; background: none; color: var(--muted); font-size: 22px; line-height: 1; cursor: pointer; }
+  .sheet { position: relative; background: var(--ds-color-bg-raised); color: var(--ds-color-text); border-radius: var(--ds-radius-xl); width: 100%; max-width: 560px; max-height: 86vh; overflow: auto; padding: 18px 18px 22px; border: var(--ds-border-w) solid var(--ds-color-border); }
+  .mx { position: absolute; top: 8px; right: 10px; border: none; background: none; color: var(--muted); font-size: var(--ds-icon-md); line-height: 1; cursor: pointer; }
   .mx:hover { color: var(--text); }
-  .sheet h3 { font-size: 16px; margin: 0 20px 10px 0; }
+  .sheet h3 { font-size: var(--ds-font-size-lg); line-height: var(--ds-line-height-tight); margin: 0 20px 10px 0; }
   .drow { display: flex; justify-content: space-between; gap: 12px; padding: 6px 0; border-bottom: 1px solid var(--row-border); font-size: 13px; }
   .drow span:first-child { color: var(--muted); flex: none; }
   .drow span:last-child { text-align: right; word-break: break-all; }
@@ -2372,20 +2591,34 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   /* 收藏 / 未读 */
   .star { border: none; background: none; color: var(--faint); cursor: pointer; font-size: 15px; padding: 0 2px; margin-left: 2px; }
   .star.on { color: var(--ds-color-warning); }
-  .undot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); margin-left: 6px; vertical-align: middle; }
+  .undot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--ds-color-unread); margin-left: 6px; vertical-align: middle; }
   .tbtn.on { border-color: var(--accent); color: var(--accent); background: var(--badge-bg); }
-  mark { background: var(--code-bg); color: var(--code-text); border-radius: 3px; padding: 0 2px; }
+  mark { background: var(--ds-code-bg); color: var(--ds-code-text); border-radius: 3px; padding: 0 2px; }
   /* 统计 */
-  .statgrid { display: flex; gap: 10px; margin: 6px 0 14px; }
-  .statbox { flex: 1; background: var(--bg); border-radius: 10px; padding: 10px; text-align: center; }
-  .statbox b { display: block; font-size: 20px; }
-  .statbox span { font-size: 12px; color: var(--muted); }
-  .barrow { display: flex; align-items: center; gap: 8px; font-size: 12px; margin: 4px 0; }
-  .barrow .bl { width: 64px; color: var(--muted); flex: none; text-align: right; }
-  .barrow .bt { flex: 1; background: var(--row-border); border-radius: 4px; height: 10px; overflow: hidden; }
+  /* 统计：三个数字共享一个容器（靠分隔线分组），不再各包一张浅灰卡片 */
+  .statgrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; margin: 2px 0 4px;
+              background: var(--ds-color-bg-subtle); border: 1px solid var(--ds-color-border-subtle);
+              border-radius: var(--ds-radius-lg); padding: 14px 0; }
+  .statbox { background: none; padding: 0 12px; text-align: center; border-radius: 0; }
+  .statbox + .statbox { border-left: 1px solid var(--ds-color-border); }
+  .statbox b { display: block; font-size: 24px; font-weight: 700; line-height: 1.25;
+               font-variant-numeric: tabular-nums; letter-spacing: -.02em; color: var(--ds-color-text); }
+  .statbox span { font-size: 11.5px; color: var(--ds-color-text-secondary); }
+  /* UX-07B：统计分区标题从行内 style 收敛为类，与详情/设置的分区标题同一套层级 */
+  .stat-sec { margin-top: 18px; }
+  .stat-sec:first-of-type { margin-top: 16px; }
+  .stat-sec h5 { margin: 0 0 8px; font-size: 12px; font-weight: 600; letter-spacing: .02em;
+                 color: var(--ds-color-text-secondary); }
+  .stat-empty { font-size: 12px; color: var(--ds-color-text-tertiary); padding: 2px 2px 4px; }
+  .barrow { display: flex; align-items: center; gap: 10px; font-size: 12px; margin: 8px 0; }
+  .barrow .bl { width: 60px; color: var(--ds-color-text-secondary); flex: none; text-align: right;
+                font-variant-numeric: tabular-nums; }
+  .barrow .bt { flex: 1; background: var(--ds-color-border-subtle); border-radius: 999px; height: 8px; overflow: hidden; }
   /* 填充条必须是块级：inline 元素的 width/height 不生效，会导致百分比宽度渲染为 0 */
-  .barrow .bf { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
-  .barrow .bn { width: 34px; text-align: right; color: var(--muted); flex: none; }
+  .barrow .bf { display: block; height: 100%; background: var(--ds-color-primary); border-radius: 999px;
+                transition: width var(--ds-duration-slow) var(--ds-ease); }
+  .barrow .bn { width: 36px; text-align: right; color: var(--ds-color-text-secondary); flex: none;
+                font-variant-numeric: tabular-nums; }
   /* ---------- 移动端体验与浏览器兼容 ---------- */
   html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
   body { padding-bottom: calc(40px + env(safe-area-inset-bottom, 0px));
@@ -2401,6 +2634,14 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .sheet { -webkit-overflow-scrolling: touch; overscroll-behavior: contain; }
   .toastroot { padding-left: env(safe-area-inset-left, 0px); padding-right: env(safe-area-inset-right, 0px);
                bottom: calc(48px + env(safe-area-inset-bottom, 0px)); }
+  /* 小屏：提示条左右各留 12px，长文案换行而不是横向溢出（桌面端仍居中，此块必须限定宽度） */
+  @media (max-width: 660px) {
+    .toastroot { left: 12px; right: 12px; transform: none; }
+    .toastroot .toast { max-width: 100%; }
+    .toast { max-width: calc(100vw - 24px); }
+    /* 抽屉打开时提示条移到顶部：底部抽屉的保存/取消就在 toast 原位，压住等于挡住主操作 */
+    html.dlg-open .toastroot { bottom: auto; top: calc(12px + env(safe-area-inset-top, 0px)); }
+  }
   .selbar { bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
   .newpill { bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
   /* 接入令牌面板（设置菜单入口 → 复用 .modal/.sheet 弹层，移动端自动底部抽屉） */
@@ -2409,7 +2650,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .tokname { font-weight: 600; font-size: 14px; word-break: break-all; }
   .tokmeta { font-size: 12px; opacity: .65; margin-top: 2px; }
   .tokrow.revoked .tokname, .tokrow.revoked .tokmeta { opacity: .45; }
-  .tokbadge { font-size: var(--ds-text-xs); padding: 1px 8px; border-radius: var(--ds-radius-pill);
+  .tokbadge { font-size: var(--ds-font-size-xs); padding: 1px 8px; border-radius: var(--ds-radius-full);
               background: var(--ds-color-bg-subtle); color: var(--ds-color-text-secondary); white-space: nowrap; }
   .tokrow.revoked .tokbadge { opacity: .6; }
   .tokacts { display: flex; gap: 6px; }
@@ -2419,56 +2660,132 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .toknewrow { display: flex; align-items: center; gap: 8px; margin: 12px 0 4px; flex-wrap: wrap; }
   .toknewrow [hidden] { display: none !important; }
   .foot .ver { opacity: .6; }
-  .toksecret { font-family: var(--ds-font-mono); font-size: var(--ds-text-sm); word-break: break-all;
+  .toksecret { font-family: var(--ds-font-mono); font-size: var(--ds-font-size-sm); word-break: break-all;
                padding: 10px; border-radius: var(--ds-radius-md); background: var(--ds-color-bg-subtle); user-select: all; }
   /* 设置表单（通知设置 / 业务设置）：弹层内可滚动，沿用令牌面板的输入风格 */
   .setform { max-height: 62vh; overflow: auto; padding-right: 4px; }
-  .setgrp { padding: 10px 0 6px; border-top: 1px solid var(--ds-color-divider); }
-  .setgrp:first-child { border-top: 0; }
-  .setgrp h4 { margin: 0 0 6px; font-size: 14px; display: flex; align-items: center; gap: 8px; }
-  .setgrp h4 .tokbadge { margin-left: auto; }
   .setrow { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 13px; flex-wrap: wrap; }
-  .setrow > label { flex: 0 0 auto; min-width: 76px; color: var(--muted); }
-  /* 本浏览器偏好：五项开关固定一行，触屏点整块即可切换 */
-  .setrow > label:empty { display: none; }
-  .prefgrid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; margin: 4px 0 10px; }
-  .prefitem { display: flex; align-items: center; justify-content: space-between; gap: 6px;
-              min-height: 38px; padding: 6px 8px; border: var(--ds-border-w) solid var(--ds-color-border-subtle);
-              border-radius: var(--ds-radius-md); background: var(--ds-color-bg-subtle);
-              font-size: var(--ds-text-xs); color: var(--ds-color-text-secondary); cursor: pointer; }
-  .prefitem span { min-width: 0; line-height: 1.35; overflow-wrap: anywhere; }
-  .prefitem input { flex: none; }
+  .setrow > label { flex: 0 1 auto; min-width: 76px; color: var(--ds-color-text-secondary); }
+  /* ===== 设置中心 v2：分区标题 + 扁平分组 + 行式设置项（不再逐项套卡片） ===== */
+  .sc-sheet { max-width: 720px; }
+  .sc-head { margin: 0 0 14px; }
+  .sc-head h4 { margin: 0; font-size: 15px; font-weight: 600; color: var(--ds-color-text); }
+  .sc-head p { margin: 3px 0 0; font-size: var(--ds-font-size-xs);
+               line-height: var(--ds-line-height-base); color: var(--ds-color-text-secondary); }
+  .sc-group { padding: 16px 0 4px; border-top: 1px solid var(--ds-color-divider); }
+  .sc-group:first-child { border-top: 0; padding-top: 2px; }
+  .sc-gtitle { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 0 0 6px;
+               font-size: 13px; font-weight: 600; color: var(--ds-color-text); }
+  .sc-gtitle .ds-badge { font-weight: 500; }
+  .sc-gdesc { margin: 0 0 8px; font-size: var(--ds-font-size-xs);
+              line-height: var(--ds-line-height-base); color: var(--ds-color-text-secondary); }
+  .sc-item { display: flex; align-items: center; gap: 14px; padding: 11px 0;
+             border-bottom: 1px solid var(--ds-color-divider); }
+  .sc-item:last-child { border-bottom: 0; }
+  .sc-item-main { flex: 1 1 auto; min-width: 0; }
+  .sc-ilabel { font-size: 13.5px; color: var(--ds-color-text); line-height: 1.4; }
+  .sc-idesc { margin-top: 2px; font-size: var(--ds-font-size-xs); line-height: var(--ds-line-height-base);
+              color: var(--ds-color-text-secondary); }
+  .sc-ictl { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
+  .sc-ictl .ds-input, .sc-ictl .ds-select { min-width: 132px; }
+  .sc-ictl .ds-check { width: 40px; height: 22px; } /* 行式开关命中区，见 .sc-switch */
+  .sc-ictl--wide { flex: 1 1 260px; justify-content: flex-end; }
+  .sc-ictl--wide .ds-input, .sc-ictl--wide .ds-select { flex: 1 1 auto; min-width: 0; width: 100%; }
+  /* 行式开关：label 包住控件，整行文字也可点，触控目标 ≥ 40px */
+  .sc-switch { position: relative; flex: none; width: 48px; height: 28px; margin: 0; cursor: pointer; }
+  .sc-switch input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+  .sc-switch .sc-knob { position: absolute; inset: 0; border-radius: 999px;
+    background: var(--ds-color-disabled); border: 1px solid var(--ds-color-border);
+    transition: background .18s ease, border-color .18s ease; }
+  .sc-switch .sc-knob::after { content: ""; position: absolute; top: 2px; left: 2px; width: 22px; height: 22px;
+    border-radius: 50%; background: var(--ds-palette-white); box-shadow: var(--ds-shadow-1);
+    transition: transform var(--ds-duration-base) var(--ds-ease); }
+  .sc-switch input:checked + .sc-knob { background: var(--ds-color-primary); border-color: var(--ds-color-primary); }
+  .sc-switch input:checked + .sc-knob::after { transform: translateX(20px); }
+  .sc-switch input:focus-visible + .sc-knob { outline: 2px solid var(--ds-color-focus); outline-offset: 2px; }
+  @media (prefers-reduced-motion: reduce) {
+    .sc-switch .sc-knob, .sc-switch .sc-knob::after { transition: none; }
+  }
+  /* 通知渠道一览：11 个渠道的配置状态 + 直达新增 */
+  .sc-chgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 6px; margin: 8px 0 4px; }
+  .sc-ch { display: flex; align-items: center; gap: 6px; min-height: 38px; padding: 4px 8px;
+           border: 1px solid var(--ds-color-border-subtle); border-radius: var(--ds-radius-md);
+           background: var(--ds-color-bg-surface); font-size: var(--ds-font-size-sm); color: var(--ds-color-text);
+           transition: border-color var(--ds-duration-fast) var(--ds-ease); }
+  @media (hover: hover) { .sc-ch:hover { border-color: var(--ds-color-border); } }
+  .sc-ch--on { border-color: var(--ds-color-primary); background: var(--ds-color-primary-subtle); color: var(--ds-color-primary); }
+  .sc-ch-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .sc-ch-n { flex: none; font-variant-numeric: tabular-nums; }
+  .sc-ch-add { flex: none; width: 24px; height: 24px; border-radius: 6px; border: 1px solid var(--ds-color-border);
+               background: transparent; color: var(--ds-color-text-secondary); cursor: pointer;
+               font-size: 15px; line-height: 1; display: grid; place-items: center;
+               transition: background var(--ds-duration-fast) var(--ds-ease), color var(--ds-duration-fast) var(--ds-ease); }
+  .sc-ch-add:hover { background: var(--ds-color-primary-subtle); border-color: var(--ds-color-primary); color: var(--ds-color-primary); }
+  .sc-ch-add:hover { border-color: var(--ds-color-primary); color: var(--ds-color-primary); }
+  /* 通知目标行：名称/渠道/状态在左，配置摘要与操作在右 */
+  .sc-target { display: flex; align-items: flex-start; gap: 12px; padding: 10px 0;
+               border-bottom: 1px solid var(--ds-color-divider); }
+  .sc-target:last-child { border-bottom: 0; }
+  .sc-target--off { opacity: .68; }
+  .sc-target-main { flex: 1 1 auto; min-width: 0; }
+  .sc-target-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .sc-target-name { font-size: 13.5px; font-weight: 600; color: var(--ds-color-text); word-break: break-word; }
+  .sc-target-meta { margin-top: 3px; font-size: var(--ds-font-size-xs); color: var(--ds-color-text-secondary);
+                    line-height: var(--ds-line-height-base); word-break: break-word; }
+  .sc-target-acts { flex: 0 0 auto; display: flex; align-items: center; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+  .sc-target-acts .tbtn { min-height: 30px; padding: 3px 9px; font-size: 12px; }
+  .sc-empty { padding: 14px 0; font-size: 12.5px; color: var(--ds-color-text-secondary); }
+  /* 加载骨架 / 分区切换与保存状态条 */
+  .sc-skel { padding: 6px 0; }
+  .sc-skel-bar { height: 12px; border-radius: 6px; margin: 12px 0;
+    background: linear-gradient(90deg, var(--ds-color-bg-subtle) 25%, var(--ds-color-border-subtle) 37%, var(--ds-color-bg-subtle) 63%);
+    background-size: 400% 100%; animation: scshimmer 1.3s ease-in-out infinite; }
+  .sc-skel-bar:nth-child(2) { width: 72%; }
+  .sc-skel-bar:nth-child(3) { width: 88%; }
+  @keyframes scshimmer { 0% { background-position: 100% 50%; } 100% { background-position: 0 50%; } }
+  @media (prefers-reduced-motion: reduce) { .sc-skel-bar { animation: none; } }
+  .sc-loaderr { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+                padding: 14px 0; font-size: 13px; color: var(--ds-color-text-secondary); }
+  .sc-status { display: inline-flex; align-items: center; gap: 6px; margin-right: auto;
+               font-size: var(--ds-font-size-xs); line-height: 1.4; }
+  .sc-status--pending { color: var(--ds-color-text-secondary); }
+  .sc-status--success { color: var(--ds-color-success); }
+  .sc-status--error { color: var(--ds-color-danger); }
+  .sc-status--conflict { color: var(--ds-color-warning); }
+  .sc-status[hidden] { display: none; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+             overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+  /* 保存条粘在弹层底部：内容再长也不用滚到底才能保存 */
+  .sc-foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 18px -22px -16px;
+             padding: 12px 22px calc(12px + env(safe-area-inset-bottom, 0px));
+             background: var(--ds-color-bg-surface); border-top: 1px solid var(--ds-color-divider);
+             position: sticky; bottom: 0; z-index: var(--ds-z-sticky); }
+  .sc-foot .sc-status { flex: 1 1 140px; }
+  .sc-foot .sc-btns { display: flex; gap: 8px; margin-left: auto; flex-wrap: wrap; }
+  /* 本浏览器偏好项已改为行式 .sc-item（见上），旧五列网格样式已移除 */
   .setrow input[type="text"], .setrow input[type="password"], .setrow input[type="number"], .setrow select,
   .toknewrow input, .toknewrow select {
-    flex: 1 1 140px; min-width: 0; min-height: var(--ds-control-h-sm); padding: 6px 8px;
-    border: var(--ds-border-w) solid var(--ds-color-border); border-radius: var(--ds-radius-md);
-    background: var(--ds-color-bg-surface); color: var(--ds-color-text); font-size: var(--ds-text-sm); }
+    flex: 1 1 200px; min-width: 0; min-height: var(--ds-control-h-sm); padding: 6px 8px;
+    border: var(--ds-border-w) solid var(--ds-field-border); border-radius: var(--ds-radius-md);
+    background: var(--ds-field-bg); color: var(--ds-color-text); font-size: var(--ds-font-size-sm); }
   .setrow .clr { position: static; right: auto; top: auto; transform: none; flex: 0 0 auto; font-size: 12px; display: inline-flex; align-items: center; gap: 4px; color: var(--muted); white-space: nowrap; }
   .setrow #scdnds, .setrow #scdnde { flex: 0 1 76px; min-width: 60px; }
   .setrow .settest { flex: 0 0 auto; }
-  /* 通知推送：已配置列表 / 方案选择 / 第二层编辑弹层 */
-  .pushlist { display: flex; flex-direction: column; gap: 8px; margin: 6px 0 4px; }
-  .pushcard { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--bg); }
-  .pushcard--off { opacity: .62; }
-  .pushcard-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .pushcard-name { font-weight: 600; font-size: 13.5px; word-break: break-all; }
-  .pushbadge { font-size: var(--ds-text-xs); padding: 1px 8px; border-radius: var(--ds-radius-pill);
-               background: var(--ds-color-bg-subtle); color: var(--ds-color-text-secondary); white-space: nowrap; }
-  .pushbadge.on { background: var(--badge-bg); color: var(--accent); }
-  .pushbadge.off { color: var(--muted); }
-  .pushcard-meta { font-size: 12px; color: var(--muted); margin-top: 4px; }
-  .pushcard-fields { font-size: 11.5px; color: var(--faint); margin-top: 2px; word-break: break-all; }
-  .pushcard-acts { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
-  .pushempty { font-size: 12.5px; color: var(--muted); padding: 10px 0; }
+  /* 通知推送：方案选择 / 第二层编辑弹层（列表本身已改为行式 .sc-target） */
   .pushpicks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 6px 0 4px; }
   .pushpick { border: 1px solid var(--border); background: var(--card); color: var(--text); border-radius: 10px;
               padding: 12px 10px; font-size: 13px; cursor: pointer; min-height: 44px; }
   .pushpick:hover { border-color: var(--accent); color: var(--accent); }
   .pushchan { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px;
               background: var(--badge-bg); color: var(--accent); margin-bottom: 6px; }
-  .pushmodal { z-index: 140; }
+  .pushmodal { z-index: var(--ds-z-modal-stacked); }
   .pushsheet { max-width: 520px; max-height: 86vh; overflow: auto; }
   .pushsheet .setrow > label { min-width: 72px; }
+  /* 敏感字段控件列：输入 + 状态 + 清除勾选纵向排列，窄屏也不挤压文案 */
+  .sc-credwrap { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
+  /* 输入框在纵向容器里不参与高度拉伸（否则会被 .setrow 的 flex:1 撑成高块） */
+  .pushsheet .sc-credwrap > .ds-input { flex: 0 0 auto; width: 100%; }
+  .sc-credwrap .ds-help { margin: 0; }
   .setnote { font-size: 12px; opacity: .65; line-height: 1.6; margin: 4px 0 8px; }
   .tokwarn { color: var(--ds-color-danger); font-size: 13px; font-weight: 600; margin: 10px 0; }
   @media (min-width: 561px) {
@@ -2491,7 +2808,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     .setmenu { position: fixed; left: 16px; right: 16px; top: auto; width: auto;
                bottom: calc(16px + env(safe-area-inset-bottom, 0px));
                min-width: 0; max-width: none; max-height: 72vh; }
-    .selbar { width: calc(100% - 24px); justify-content: space-between; border-radius: 14px; }
+    .selbar { width: calc(100% - 24px); border-radius: 14px; }
     .barrow .bl { width: 54px; }
   }
   /* 无精确指针（手机/平板）：开关加大到 44x26，便于拇指操作 */
@@ -2507,50 +2824,60 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   }
   .ds-btn { border: var(--ds-border-w) solid var(--ds-color-border); background: var(--ds-color-bg-surface);
             color: var(--ds-color-text); border-radius: var(--ds-radius-md); padding: 5px 10px;
-            font-size: var(--ds-text-sm); cursor: pointer; min-height: var(--ds-control-h-sm);
+            font-size: var(--ds-font-size-sm); font-weight: var(--ds-font-weight-normal);
+            cursor: pointer; min-height: var(--ds-control-h);
             transition: border-color .15s ease, color .15s ease, background .15s ease; }
   .ds-btn:hover:not(:disabled) { border-color: var(--ds-color-primary); color: var(--ds-color-primary); }
-  .ds-btn:disabled { opacity: .5; cursor: not-allowed; }
-  .ds-btn--primary { background: var(--ds-color-primary); border-color: var(--ds-color-primary); color: #fff; font-weight: var(--ds-weight-medium); }
-  .ds-btn--primary:hover:not(:disabled) { background: var(--ds-color-primary-hover); border-color: var(--ds-color-primary-hover); color: #fff; }
+  .ds-btn:active:not(:disabled) { background: var(--ds-color-surface-active); }
+  .ds-btn:disabled { opacity: .5; color: var(--ds-color-text-disabled); cursor: not-allowed; }
+  .ds-btn--primary { background: var(--ds-color-primary-fill); border-color: var(--ds-color-primary-fill); color: var(--ds-color-on-primary); font-weight: var(--ds-font-weight-semibold); }
+  .ds-btn--primary:hover:not(:disabled) { background: var(--ds-color-primary-fill-hover); border-color: var(--ds-color-primary-fill-hover); color: var(--ds-color-on-primary); }
+  .ds-btn--primary:active:not(:disabled) { background: var(--ds-color-primary-active); border-color: var(--ds-color-primary-active); }
   .ds-btn--danger { border-color: var(--ds-color-danger); color: var(--ds-color-danger); }
-  .ds-btn--danger:hover:not(:disabled) { background: var(--ds-color-danger); color: #fff; }
+  .ds-btn--danger:hover:not(:disabled) { background: var(--ds-color-danger); color: var(--ds-color-on-primary); }
   .ds-btn--block { width: 100%; }
   .ds-btn[data-loading="1"] { opacity: .7; cursor: progress; }
   .ds-btn[data-loading="1"]::after { content: ""; display: inline-block; width: 10px; height: 10px;
     margin-left: 6px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
     animation: dsspin .7s linear infinite; vertical-align: -1px; }
   @keyframes dsspin { to { transform: rotate(360deg); } }
+  /* UX-09 U9-11：loading 视觉此前只挂在 .ds-btn 上，而列表/设置里发起请求的是 .tbtn，
+     于是"禁用 + 完全无变化"，用户点完不知道在跑。这里复用同一套 spinner，不新增组件。 */
+  .tbtn[data-loading="1"] { opacity: .7; cursor: progress; }
+  .tbtn[data-loading="1"]::after { content: ""; display: inline-block; width: 8px; height: 8px;
+    margin-left: 5px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+    animation: dsspin .7s linear infinite; vertical-align: -1px; }
+  @media (prefers-reduced-motion: reduce) { .tbtn[data-loading="1"]::after { animation: none; opacity: .6; } }
   .ds-input, .ds-select { min-height: var(--ds-control-h-sm); padding: 6px 8px;
-    border: var(--ds-border-w) solid var(--ds-color-border); border-radius: var(--ds-radius-md);
-    background: var(--ds-color-bg-surface); color: var(--ds-color-text); font-size: var(--ds-text-sm); }
+    border: var(--ds-border-w) solid var(--ds-field-border); border-radius: var(--ds-radius-md);
+    background: var(--ds-field-bg); color: var(--ds-color-text); font-size: var(--ds-font-size-sm); }
   .ds-input::placeholder { color: var(--ds-color-text-tertiary); }
   .ds-input[aria-invalid="true"], .ds-input:invalid { border-color: var(--ds-color-danger); }
   .ds-field { display: flex; flex-direction: column; gap: var(--ds-space-1); margin: var(--ds-space-3) 0; }
-  .ds-field > label { font-size: var(--ds-text-sm); font-weight: var(--ds-weight-medium); color: var(--ds-color-text); }
-  .ds-help { font-size: var(--ds-text-xs); line-height: var(--ds-leading); color: var(--ds-color-text-secondary); }
-  .ds-error-text { font-size: var(--ds-text-xs); color: var(--ds-color-danger); }
+  .ds-field > label { font-size: var(--ds-font-size-sm); font-weight: var(--ds-font-weight-semibold); color: var(--ds-color-text); }
+  .ds-help { font-size: var(--ds-font-size-xs); line-height: var(--ds-line-height-base); color: var(--ds-color-text-secondary); }
+  .ds-error-text { font-size: var(--ds-font-size-xs); color: var(--ds-color-danger); }
   .ds-card { background: var(--ds-color-bg-surface); border: var(--ds-border-w) solid var(--ds-color-border-subtle);
     border-radius: var(--ds-radius-lg); padding: var(--ds-space-4); }
   .ds-group-title { display: flex; align-items: center; gap: var(--ds-space-2);
-    font-size: var(--ds-text-md); font-weight: var(--ds-weight-medium); color: var(--ds-color-text);
+    font-size: var(--ds-font-size-md); font-weight: var(--ds-font-weight-semibold); color: var(--ds-color-text);
     margin: var(--ds-space-4) 0 var(--ds-space-2); padding-top: var(--ds-space-3);
     border-top: var(--ds-border-w) solid var(--ds-color-divider); }
   .ds-group-title:first-child { border-top: 0; padding-top: 0; }
-  .ds-badge { display: inline-flex; align-items: center; gap: 4px; font-size: var(--ds-text-xs);
-    font-weight: var(--ds-weight-medium); padding: 1px 8px; border-radius: var(--ds-radius-pill);
+  .ds-badge { display: inline-flex; align-items: center; gap: 4px; font-size: var(--ds-font-size-xs);
+    font-weight: var(--ds-font-weight-semibold); padding: 1px 8px; border-radius: var(--ds-radius-full);
     background: var(--ds-color-bg-subtle); color: var(--ds-color-text-secondary); white-space: nowrap; }
-  .ds-badge--success { background: var(--ds-color-primary-subtle); color: var(--ds-color-success); }
-  .ds-badge--warning { background: rgba(234,88,12,.12); color: var(--ds-color-warning); }
-  .ds-badge--danger { background: rgba(220,38,38,.12); color: var(--ds-color-danger); }
-  .ds-badge--info { background: rgba(37,99,235,.12); color: var(--ds-color-info); }
+  .ds-badge--success { background: var(--ds-color-success-subtle); color: var(--ds-color-success); }
+  .ds-badge--warning { background: var(--ds-color-warning-subtle); color: var(--ds-color-warning); }
+  .ds-badge--danger { background: var(--ds-color-danger-subtle); color: var(--ds-color-danger); }
+  .ds-badge--info { background: var(--ds-color-info-subtle); color: var(--ds-color-info); }
   /* 配置作用域徽章：全局 / 本浏览器（图标+文字，不只依赖颜色） */
-  .ds-scope { display: inline-flex; align-items: center; gap: 4px; font-size: var(--ds-text-xs);
-    padding: 1px 8px; border-radius: var(--ds-radius-pill); border: var(--ds-border-w) solid var(--ds-color-border); }
+  .ds-scope { display: inline-flex; align-items: center; gap: 4px; font-size: var(--ds-font-size-xs);
+    padding: 1px 8px; border-radius: var(--ds-radius-full); border: var(--ds-border-w) solid var(--ds-color-border); }
   .ds-scope--global { color: var(--ds-color-info); }
-  .ds-scope--browser { color: var(--ds-color-warning); }
-  .ds-alert { display: block; font-size: var(--ds-text-xs);
-    line-height: var(--ds-leading); padding: var(--ds-space-3) var(--ds-space-3);
+  .ds-scope--browser { color: var(--ds-scope-browser-fg, var(--ds-color-warning)); }
+  .ds-alert { display: block; font-size: var(--ds-font-size-xs);
+    line-height: var(--ds-line-height-base); padding: var(--ds-space-3) var(--ds-space-3);
     border-radius: var(--ds-radius-md); border-left: 3px solid var(--ds-color-info);
     background: var(--ds-color-bg-subtle); color: var(--ds-color-text-secondary); margin: var(--ds-space-3) 0; }
   .ds-alert b { font-weight: 600; color: var(--ds-color-text); }
@@ -2561,43 +2888,69 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .sc-conflict > span { flex: 1 1 220px; min-width: 0; }
   .sc-conflict > .ds-btn { flex: 0 0 auto; color: var(--ds-color-text); }
   .ds-empty { text-align: center; color: var(--ds-color-text-tertiary); padding: var(--ds-space-7) var(--ds-space-4);
-    font-size: var(--ds-text-sm); }
-  .ds-switch { position: relative; flex: none; width: 40px; height: 22px; border-radius: var(--ds-radius-pill);
+    font-size: var(--ds-font-size-sm); }
+  .ds-switch { position: relative; flex: none; width: 40px; height: 22px; border-radius: var(--ds-radius-full);
     background: var(--ds-color-disabled); border: var(--ds-border-w) solid var(--ds-color-border);
     transition: background .2s ease, border-color .2s ease; }
   .ds-switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px;
-    border-radius: 50%; background: #fff; box-shadow: var(--ds-shadow-1); transition: transform .2s ease; }
+    border-radius: 50%; background: var(--ds-palette-white); box-shadow: var(--ds-shadow-1);
+    transition: transform var(--ds-duration-base) var(--ds-ease); }
   input:checked + .ds-switch { background: var(--ds-color-primary); border-color: var(--ds-color-primary); }
   input:checked + .ds-switch::after { transform: translateX(18px); }
   .ds-check, .ds-radio { width: 16px; height: 16px; accent-color: var(--ds-color-primary); cursor: pointer; }
+  /* 复选框统一外观：原生勾选方块与大圆角控件风格不一致，改为 token 化方框 + 自绘对勾 */
+  input[type="checkbox"].ds-check { -webkit-appearance: none; appearance: none; margin: 0;
+    width: 18px; height: 18px; flex: none; border: 1px solid var(--ds-color-border);
+    border-radius: 5px; background: var(--ds-color-bg-surface); cursor: pointer; position: relative;
+    transition: background var(--ds-duration-fast) var(--ds-ease), border-color var(--ds-duration-fast) var(--ds-ease); }
+  input[type="checkbox"].ds-check:hover { border-color: var(--ds-color-primary); }
+  input[type="checkbox"].ds-check:checked { background: var(--ds-color-primary); border-color: var(--ds-color-primary); }
+  input[type="checkbox"].ds-check:checked::after { content: ""; position: absolute; left: 5px; top: 2px;
+    width: 5px; height: 9px; border: solid var(--ds-color-on-primary); border-width: 0 2px 2px 0; transform: rotate(42deg); }
+  input[type="checkbox"].ds-check:focus-visible { outline: 2px solid var(--ds-color-focus); outline-offset: 2px; }
+  .ds-inline { color: var(--ds-color-text); }
   /* 重要操作密码确认层（独立于通用弹层，避免覆盖设置中心的未保存内容） */
-  .pwdmodal { position: fixed; inset: 0; background: rgba(0,0,0,.42); display: flex; align-items: center;
-    justify-content: center; z-index: 130; padding: var(--ds-space-5); }
+  .pwdmodal { position: fixed; inset: 0; background: var(--ds-color-overlay); display: flex; align-items: center;
+    justify-content: center; z-index: var(--ds-z-modal-stacked); padding: var(--ds-space-5); }
   .pwdmodal[hidden] { display: none; }
   .pwdsheet { width: 100%; max-width: 380px; background: var(--ds-color-bg-surface); color: var(--ds-color-text);
     border: var(--ds-border-w) solid var(--ds-color-border-subtle); border-radius: var(--ds-radius-lg);
     padding: var(--ds-space-5); box-shadow: 0 12px 32px rgba(0,0,0,.18); }
-  .pwdsheet h3 { margin: 0 0 var(--ds-space-2); font-size: var(--ds-text-md); font-weight: var(--ds-weight-medium); }
-  .pwdhelp { margin: 0 0 var(--ds-space-3); font-size: var(--ds-text-sm); line-height: var(--ds-leading);
+  .pwdsheet h3 { margin: 0 0 var(--ds-space-2); font-size: var(--ds-font-size-md); font-weight: var(--ds-font-weight-semibold); }
+  .pwdhelp { margin: 0 0 var(--ds-space-3); font-size: var(--ds-font-size-sm); line-height: var(--ds-line-height-base);
     color: var(--ds-color-text-secondary); }
-  .pwderr { margin-top: var(--ds-space-2); font-size: var(--ds-text-xs); color: var(--ds-color-danger); }
+  .pwderr { margin-top: var(--ds-space-2); font-size: var(--ds-font-size-xs); color: var(--ds-color-danger); }
   .pwdacts { display: flex; justify-content: flex-end; gap: var(--ds-space-2); margin-top: var(--ds-space-4); }
-  .ds-modal { position: fixed; inset: 0; background: rgba(0,0,0,.42); display: flex; align-items: center;
-    justify-content: center; z-index: 100; padding: var(--ds-space-5); }
+  /* 统一确认弹层（替代原生 confirm）：同一套弹层视觉与焦点栈，深浅色自动跟随 */
+  .dscf .pwdhelp { margin-bottom: var(--ds-space-4); }
+  .dscf .pwdacts .ds-btn { min-height: 36px; padding: 6px 16px; }
+  .ds-modal { position: fixed; inset: 0; background: var(--ds-color-overlay); display: flex; align-items: center;
+    justify-content: center; z-index: var(--ds-z-modal); padding: var(--ds-space-5); }
   .ds-modal[hidden] { display: none; }
   .ds-sheet { position: relative; background: var(--ds-color-bg-surface); color: var(--ds-color-text);
     border-radius: var(--ds-radius-xl); width: 100%; max-width: 560px; max-height: 86vh; overflow: auto;
     padding: var(--ds-space-5); border: var(--ds-border-w) solid var(--ds-color-border); }
   .ds-dialog-actions { display: flex; flex-wrap: wrap; gap: var(--ds-space-3); justify-content: flex-end; margin-top: var(--ds-space-4); }
-  /* 设置中心：分组标签行（独立胶囊，桌面横向滚动、窄屏两列网格，保证间距清晰可点） */
-  .ds-tabs { display: flex; gap: 8px; overflow-x: auto; padding: 2px 0 12px; margin-bottom: 12px;
-             border-bottom: 1px solid var(--ds-color-divider);
-             -webkit-overflow-scrolling: touch; scrollbar-width: thin; }
+  /* 设置中心：分区标签行。短标签 + 自动换行，任何语言都不横向溢出、不靠滑动发现 */
+  .ds-tabs { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 0 12px; margin-bottom: 14px;
+             border-bottom: 1px solid var(--ds-color-divider); }
   .ds-tabs > .tab { min-height: 32px; padding: 5px 14px; }
-  .ds-tabs::-webkit-scrollbar { height: 3px; }
-  .ds-inline { display: inline-flex; align-items: center; gap: 4px; margin-right: 10px; font-size: var(--ds-text-sm); }
+  /* 分区导航：未选中为「无框文字」，选中为主色浅底 + 主色字 —— 一屏只有一处强强调 */
+  .sc-tab { flex: 0 0 auto; min-height: 32px; padding: 6px 13px; border-radius: 8px;
+            border: 1px solid transparent; background: transparent;
+            color: var(--ds-color-text-secondary); font-size: 13px; line-height: 1.2;
+            cursor: pointer; white-space: nowrap;
+            transition: background var(--ds-duration-fast) var(--ds-ease), color var(--ds-duration-fast) var(--ds-ease); }
+  /* hover 只在有精确指针的设备上生效，避免触屏点完后残留 hover 高亮（看着像两个选中态） */
+  @media (hover: hover) {
+    .sc-tab:hover { background: var(--ds-color-bg-subtle); color: var(--ds-color-text); }
+  }
+  .sc-tab[aria-selected="true"] { background: var(--ds-color-primary-subtle);
+            border-color: var(--ds-color-primary); color: var(--ds-color-primary); font-weight: 600; }
+  .sc-tab:focus-visible { outline: 2px solid var(--ds-color-focus); outline-offset: 2px; }
+  .ds-inline { display: inline-flex; align-items: center; gap: 4px; margin-right: 10px; font-size: var(--ds-font-size-sm); }
   /* 设置表单：字段行统一走令牌（标签在上、说明在下，窄屏自动堆叠） */
-  .setrow > label { color: var(--ds-color-text-secondary); font-size: var(--ds-text-sm); }
+  .setrow > label { color: var(--ds-color-text-secondary); font-size: var(--ds-font-size-sm); }
   .setnote, .tokmeta { color: var(--ds-color-text-secondary); }
   .tokwarn { color: var(--ds-color-danger); }
   .srctag.s-notify { background: var(--ds-color-info); }
@@ -2606,35 +2959,55 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .star.on { color: var(--ds-color-warning); }
   /* ===== V2 仪表盘布局：消息中心（与静态原型对齐） ===== */
   body { background: var(--bg); }
-  .wrap { max-width: 1180px; padding: 18px 20px 40px; }
+  .wrap { max-width: var(--ds-content-max); padding: 22px 24px 44px; --list-pad: 20px; }
   .gh { display: none; }
-  .topbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 16px; }
+  .topbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
   .brand { display: flex; align-items: center; gap: 11px; min-width: 0; flex: 1; }
-  .logo { width: 38px; height: 38px; border-radius: 11px; background: var(--accent); color: #fff;
-          display: grid; place-items: center; font-weight: 800; font-size: 15px; box-shadow: var(--ds-shadow-1); flex: none; }
+  /* 品牌标：实心主色块 + 内描边，不用渐变（避免「AI 生成感」） */
+  .logo { width: 36px; height: 36px; border-radius: 10px; background: var(--ds-color-primary-fill); color: var(--ds-color-on-primary);
+          display: grid; place-items: center; font-weight: 800; font-size: 13px; letter-spacing: .02em;
+          box-shadow: inset 0 0 0 1px rgba(255,255,255,.14), var(--ds-shadow-1); flex: none; }
   .brandtext { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
-  .brandtext h1 { font-size: 19px; letter-spacing: -.3px; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .brandtext .subtitle { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .brandtext h1 { font-size: 17px; font-weight: 700; letter-spacing: -.2px; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .brandtext .subtitle { color: var(--ds-color-text-tertiary); font-size: 12px; white-space: nowrap;
+          overflow: hidden; text-overflow: ellipsis; min-width: 0; padding-left: 8px; border-left: 1px solid var(--ds-color-border); }
   .top-actions { display: flex; gap: 8px; align-items: center; flex: none; }
-  .top-actions .tbtn { padding: 7px 12px; min-height: 34px; font-size: 13px; border-radius: 8px; }
-  .layout { display: grid; grid-template-columns: minmax(0, 1fr) 268px; gap: 14px; align-items: start; }
-  .panel { background: var(--card); border: 1px solid var(--border); border-radius: 14px; box-shadow: var(--ds-shadow-1); }
-  .toolbar { display: block; padding: 12px 16px; margin: 0; border-bottom: 1px solid var(--row-border); }
-  .toolbar-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
-  .toolbar-title { font-size: 15px; font-weight: 700; }
-  .toolbar-title #stat { font-size: 12px; color: var(--muted); font-weight: 400; margin-left: 6px; }
-  .filters { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .filter-tabs { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-  .filter-row { display: flex; align-items: center; gap: 6px; flex: 1 1 auto; min-width: 0; flex-wrap: wrap; }
-  .chip { border: 1px solid var(--border); background: var(--card); border-radius: 999px; padding: 5px 11px;
-          color: var(--muted); font-size: 12px; min-height: 30px; cursor: pointer; }
-  .chip:hover { border-color: var(--accent); color: var(--accent); }
-  .chip.active { background: var(--accent-bg); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .top-actions .tbtn { padding: 7px 11px; min-height: 34px; font-size: 13px; border-radius: 8px;
+          border-color: transparent; background: transparent; color: var(--ds-color-text-secondary);
+          transition: background var(--ds-duration-fast) var(--ds-ease), color var(--ds-duration-fast) var(--ds-ease); }
+  .top-actions .tbtn:hover { background: var(--ds-color-bg-subtle); color: var(--ds-color-text); border-color: transparent; }
+  @media (hover: none) { .top-actions .tbtn:hover { background: transparent; color: var(--ds-color-text-secondary); } }
+  .top-actions #logoutbtn { color: var(--ds-color-text-tertiary); }
+  .top-actions #logoutbtn:hover { color: var(--ds-color-danger); background: rgba(220,38,38,.08); }
+  /* UX-02A：单栏消息工作台（原 268px 侧栏已移除，功能入口迁到顶栏与筛选区） */
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; align-items: start; }
+  .panel { background: var(--ds-color-bg-surface); border: 1px solid var(--ds-color-border-subtle);
+           border-radius: var(--ds-radius-2xl); box-shadow: var(--ds-shadow-1); }
+  /* UX-07B：工具栏由「标题行 + 筛选行」两行合并为一行（视图标签 · 搜索筛选 · 刷新），
+     首屏因此让出约 44px 给消息正文；"短信列表" 文案降为读屏专用，计数就近贴在视图标签右侧 */
+  .toolbar { display: flex; align-items: center; gap: 10px; padding: 11px 20px; margin: 0;
+             border-bottom: 1px solid var(--row-border); }
+  .filters { display: flex; align-items: center; gap: 10px; flex: 1 1 auto; min-width: 0; flex-wrap: wrap; }
+  .filter-tabs { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; flex: none; }
+  .toolbar-title { margin-left: 2px; font-size: 12px; font-weight: 400; color: var(--ds-color-text-tertiary);
+                   letter-spacing: 0; white-space: nowrap; }
+  .toolbar-refresh { flex: none; padding: 5px 10px; min-height: 32px; font-size: 12.5px; border-radius: 8px;
+                     color: var(--ds-color-text-secondary); border-color: var(--ds-color-border-subtle);
+                     background: transparent; white-space: nowrap; }
+  .toolbar-refresh:hover { background: var(--ds-color-surface-hover); color: var(--ds-color-text); }
+  .filter-row { display: flex; align-items: center; gap: 6px; flex: 1 1 320px; min-width: 0; flex-wrap: wrap; }
+  .chip { border: 1px solid var(--ds-color-border); background: var(--ds-color-bg-surface); border-radius: 7px;
+          padding: 5px 11px; color: var(--ds-color-text-secondary); font-size: 12px; min-height: 30px; cursor: pointer;
+          transition: background var(--ds-duration-fast) var(--ds-ease), border-color var(--ds-duration-fast) var(--ds-ease),
+                      color var(--ds-duration-fast) var(--ds-ease); }
+  @media (hover: hover) { .chip:hover { border-color: var(--ds-color-primary); color: var(--ds-color-primary); } }
+  .chip.active { background: var(--ds-color-primary-subtle); border-color: var(--ds-color-primary);
+          color: var(--ds-color-primary); font-weight: 600; box-shadow: inset 0 0 0 1px var(--ds-color-primary); }
   .filters .searchwrap { flex: 1; min-width: 170px; margin-left: auto; }
   .filter-row .searchwrap { flex: 1 1 auto; min-width: 140px; margin-left: 0; }
   .filters .searchwrap input { min-height: 32px; padding: 6px 28px 6px 10px; border-radius: 8px; font-size: 13px; }
   .filters select { min-height: 32px; padding: 5px 8px; border-radius: 8px; font-size: 12px;
-                    background: var(--card); color: var(--text); border: 1px solid var(--border); }
+                    background: var(--ds-field-bg); color: var(--text); border: 1px solid var(--ds-field-border); }
   .bulk { display: none; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 16px;
           background: var(--ds-color-bg-subtle); border-bottom: 1px solid var(--row-border); font-size: 12px; color: var(--muted); }
   body.selecting .bulk { display: flex; }
@@ -2644,93 +3017,92 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .bulk .tbtn { padding: 4px 9px; font-size: 12px; min-height: 28px; }
   .bulk-check { display: flex; align-items: center; gap: 6px; color: var(--muted); }
   .select-hint { font-size: 11px; color: var(--faint); margin-left: 6px; font-weight: 400; }
-  .list { display: block; padding: 0 16px; }
-  .daysep { font-size: 11px; color: var(--faint); font-weight: 600; margin: 12px 0 2px; }
-  .card { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; background: transparent;
-          border: 0; border-bottom: 1px solid var(--row-border); border-radius: 6px; padding: 14px 0;
-          animation: slidein .25s ease-out; position: relative; -webkit-touch-callout: none;
-          -webkit-user-select: none; user-select: none; }
+  .list { display: block; padding: 0 var(--list-pad, 16px); }
+  .daysep { font-size: 11.5px; color: var(--ds-color-text-secondary); font-weight: 600; letter-spacing: .04em;
+            margin: 12px 0 2px; }
+  /* 消息行：内容列 + 操作列。行间只用 1px 分割线，不加卡片描边（避免「每条一张卡」的模板感） */
+  .card { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 0 12px;
+          background: transparent; border: 0; border-bottom: 1px solid var(--row-border);
+          border-radius: 10px; padding: 13px 8px; margin: 0 -8px;
+          position: relative;
+          -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+  .card:hover { background: var(--ds-color-surface-hover); }
+  /* UX-08：卡片可聚焦（键盘操作），焦点必须可见；鼠标点击不触发该环 */
+  .card:focus-visible { outline: 2px solid var(--ds-color-focus); outline-offset: -2px; }
+  .card:last-child { border-bottom: 0; }
+  /* 未读：左侧 2px 主色标线贴齐面板左边缘（原先固定 -20px，窄屏 --list-pad 变 14px 时会戳出面板外） */
+  .card.unread::before { content: ""; position: absolute; left: calc(8px - var(--list-pad, 16px)); top: 12px; bottom: 12px; width: 2px;
+                         border-radius: 0 2px 2px 0; background: var(--ds-color-unread); }
+  .msg-rail { display: flex; align-items: center; justify-content: flex-end; flex: none; margin-top: -1px; }
+  .msg-rail .msg-actions { margin-left: 0; }
   .card:last-child { border-bottom: 0; }
   .card.selected { background: var(--ds-color-primary-subtle); }
-  .card.pressing { background: var(--ds-color-bg-subtle); }
+  .card.pressing { background: var(--ds-color-surface-active); }
   .device-icon { width: 30px; height: 30px; border-radius: 8px; background: var(--accent-bg); display: grid;
                  place-items: center; color: var(--accent); font-size: 13px; flex: none; }
   .tab .tmain { min-width: 0; flex: 1; display: flex; flex-direction: column; }
   .tab .tsub, .tab .tname { display: block; }
-  body.selecting .card { grid-template-columns: 20px minmax(0, 1fr); }
-  .card.flash { animation: slidein .25s ease-out, flash 1.6s ease-out; }
+  body.selecting .card { grid-template-columns: 20px minmax(0, 1fr) auto; }
+  /* 无首发字的消息（纯号码）保留同尺寸占位以对齐左边缘；用极淡填充而非虚线框，
+     虚线框会被读成「头像加载失败」，实心淡块只是安静地占位 */
+  .avatar-sm.avatar-blank { background: var(--ds-color-divider); border: 0; color: transparent; }
+  .card.flash { animation: slidein var(--ds-duration-slow) var(--ds-ease), flash 1.6s ease-out; }
   .selwrap { display: none; padding-top: 3px; }
   body.selecting .selwrap { display: block; position: static; }
   .selwrap input { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
   .msg-main { min-width: 0; }
   .msg-top { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-bottom: 4px; }
-  .avatar-sm { width: 26px; height: 26px; border-radius: 50%; flex: none; display: grid; place-items: center;
-               background: var(--accent-bg); color: var(--accent); font-size: 12px; font-weight: 700; }
-  .sender { font-size: 14px; font-weight: 700; color: var(--text); }
-  .phone { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .avatar-sm { width: 24px; height: 24px; border-radius: 7px; flex: none; display: grid; place-items: center;
+               background: var(--ds-color-primary-subtle); color: var(--ds-color-primary);
+               font-size: 11px; font-weight: 700; line-height: 1; }
+  .sender { font-size: 13.5px; font-weight: 600; color: var(--ds-color-text); letter-spacing: -.01em; }
+  .phone { font-size: 11.5px; color: var(--ds-color-text-secondary); font-variant-numeric: tabular-nums; }
   .tag { font-size: 11px; border-radius: 5px; padding: 1px 7px; background: var(--bg); color: var(--muted); white-space: nowrap; }
   .tag.type { background: rgba(37,99,235,.10); color: var(--ds-color-info); }
   .tag.unread-tag { background: var(--ds-color-primary-subtle); color: var(--ds-color-primary); }
   .tag.star-tag { color: var(--ds-color-warning); background: transparent; }
-  .msg-time { margin-left: auto; color: var(--faint); font-size: 11px; white-space: nowrap; font-variant-numeric: tabular-nums; }
-  .content.summary { margin: 0 0 7px; font-size: 13px; line-height: 1.6; color: var(--muted); white-space: pre-wrap; }
+  /* 时间戳：12px + 次级文本色（原 11px/faint 实测对比度仅 2.56:1，不达 WCAG AA） */
+  .msg-time { margin-left: auto; color: var(--muted); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .content.summary { margin: 0; font-size: 14px; line-height: 1.65; color: var(--ds-color-text-secondary);
+                     white-space: pre-wrap; }
   /* 未读正文加粗加深，已读保持当前浅色，便于一眼区分 */
-  .card.unread .content.summary { font-weight: 600; color: var(--text); }
-  .msg-bottom { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-  .msg-meta { font-size: 11px; color: var(--faint); }
+  .card.unread .content.summary { font-weight: 600; color: var(--ds-color-text); }
+  .card.unread .sender { font-weight: 700; }
   .msg-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; flex-wrap: wrap; }
-  .msg-actions .star, .msg-actions .del { border: 0; background: none; color: var(--faint); cursor: pointer;
-                                          font-size: 12px; padding: 4px 5px; border-radius: 6px; margin: 0; }
+  /* UX-02B：收藏 / 查看全文 / 删除常驻可见（不再只靠长按·右键），删除保留既有「撤销」保护 */
+  .msg-actions .star, .msg-actions .del, .msg-actions .more { border: 0; background: none;
+                                          color: var(--ds-color-text-tertiary); cursor: pointer;
+                                          font-size: 12px; padding: 2px 8px; border-radius: 6px; margin: 0;
+                                          min-height: 30px; display: inline-flex; align-items: center;
+                                          transition: background var(--ds-duration-fast) var(--ds-ease), color var(--ds-duration-fast) var(--ds-ease); }
   .msg-actions .star.on { color: var(--ds-color-warning); }
-  .msg-actions .star:hover, .msg-actions .del:hover { background: var(--bg); }
-  .msg-actions .del { color: var(--faint); display: none; }
-  .msg-actions .del:hover { color: var(--danger); }
-  body.selecting .msg-actions .del { display: inline-flex; }
-  .msg-actions .more { border: 0; background: none; color: var(--link); font-size: 12px; padding: 4px 5px; }
-  .msg-actions .more:hover { background: var(--bg); }
+  .msg-actions .star:hover, .msg-actions .del:hover, .msg-actions .more:hover { background: var(--ds-color-surface-hover); }
+  .msg-actions .del { color: var(--muted); }
+  .msg-actions .del:hover { color: var(--ds-color-danger); }
+  .msg-actions .more[hidden] { display: none; }
   /* 验证码胶囊：顶部右侧；主色绿（与全局强调色一致），右段为实心复制按钮 */
   .code-chip { display: inline-flex; align-items: stretch; overflow: hidden; font-family: var(--ds-font-mono);
                font-size: 12px; font-weight: 700; color: var(--accent); background: var(--accent-bg);
                border: 1px solid var(--accent); border-radius: 7px; line-height: 1; }
   .code-chip .code-val { display: inline-flex; align-items: center; padding: 2px 7px 2px 8px; letter-spacing: 1px; color: var(--accent); }
   .code-chip .copy { display: inline-flex; align-items: center; justify-content: center; border: 0;
-                     border-left: 1px solid var(--accent); background: var(--accent); color: #fff;
+                     border-left: var(--ds-border-w) solid var(--ds-color-primary-fill);
+                     background: var(--ds-color-primary-fill); color: var(--ds-color-on-primary);
                      font-family: var(--ds-font-family); font-size: 11px; font-weight: 600; padding: 2px 9px;
                      min-height: 22px; min-width: 40px; cursor: pointer; transition: background .15s; }
-  .code-chip .copy:hover { background: var(--accent-deep); }
+  .code-chip .copy:hover { background: var(--ds-color-primary-fill-hover); }
   .code-chip .copy:active { background: var(--accent-deep); filter: brightness(.94); }
   .code-chip .copy:disabled { opacity: .75; cursor: default; }
-  .code-chip .copy:focus-visible { outline: 2px solid var(--ds-color-link); outline-offset: -2px; }
+  .code-chip .copy:focus-visible { outline: 2px solid var(--ds-color-focus); outline-offset: -2px; }
   /* 关闭复制按钮后，验证码本身可点按/双击直接复制 */
   .code-chip.tapcopy { cursor: pointer; user-select: none; -webkit-user-select: none; touch-action: manipulation; }
   .code-chip.tapcopy:active { filter: brightness(.94); }
   .code-chip .code-copied { display: inline-flex; align-items: center; justify-content: center; padding: 2px 8px; color: var(--accent); font-family: inherit; letter-spacing: 0; }
   .msg-top .code-chip { margin-left: 0; }
   .plan-hint { color: var(--faint); font-size: 11px; }
-  /* 右侧栏 */
-  .sidebar { display: flex; flex-direction: column; gap: 12px; }
-  .side-card { padding: 14px 16px; }
-  .side-title { font-weight: 700; font-size: 13px; margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-  .side-title .mini-link { font-size: 12px; font-weight: 500; color: var(--accent); background: none; border: 0; padding: 0; cursor: pointer; }
-  .tabs { display: flex; flex-direction: column; gap: 0; overflow: visible; padding: 0; margin: 0; }
-  .tabs > .tab { display: flex; align-items: center; gap: 8px; flex: none; padding: 8px 0; border: 0; border-bottom: 1px solid var(--row-border);
-         border-radius: 0; background: none; cursor: pointer; font-size: 12px; color: var(--text); white-space: normal; text-align: left; }
-  .tabs > .tab:last-child { border-bottom: 0; }
-  .tabs > .tab.active { background: none; color: var(--accent); font-weight: 600; }
-  .tabs > .tab .tname { font-weight: 600; }
-  .tabs > .tab .tsub { font-size: 11px; color: var(--faint); font-weight: 400; }
-  .tabs > .tab .tcount { margin-left: auto; font-size: 11px; color: var(--faint); white-space: nowrap; }
-  .tabs > .tab .tabop { margin-left: 0; font-size: 12px; padding: 2px 3px; }
-  .settings-rows, .side-rows { display: flex; flex-direction: column; gap: 2px; }
-  .settings-mini, .side-row { display: flex; justify-content: space-between; align-items: center; gap: 8px;
-                              padding: 7px 0; border-bottom: 1px solid var(--row-border); font-size: 12px; color: var(--muted); }
-  .settings-mini:last-child, .side-row:last-child { border-bottom: 0; }
-  .settings-mini strong, .side-row strong { color: var(--text); font-size: 12px; font-weight: 600; }
-  .scope { font-size: 10px; border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; color: var(--muted); white-space: nowrap; }
-  .scope.browser { color: var(--ds-color-warning); border-color: var(--ds-color-warning); }
-  .scope.global { color: var(--ds-color-info); border-color: var(--ds-color-info); }
-  .pagination { padding: 11px 16px; border-top: 1px solid var(--row-border); display: flex; align-items: center;
-                justify-content: space-between; color: var(--faint); font-size: 11px; gap: 8px; flex-wrap: wrap; }
+  /* UX-02A：原右侧栏（设备 / 设置概览 / 快捷概览）已移除，相关样式同步删除 */
+  .pagination { padding: 11px 20px; border-top: 1px solid var(--row-border); display: flex; align-items: center;
+                justify-content: space-between; color: var(--ds-color-text-secondary); font-size: 12px; gap: 8px; flex-wrap: wrap; }
   .pages { display: flex; gap: 4px; align-items: center; }
   .pages button { border: 1px solid var(--border); background: var(--card); border-radius: 6px; padding: 3px 9px; color: var(--muted); font-size: 12px; min-height: 28px; }
   .pages button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
@@ -2742,41 +3114,64 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
                      padding: 3px 9px; font-size: 12px; min-height: 28px; cursor: pointer; }
   /* 批量操作条：悬浮在视口底部，不随内容滚动，始终可直接操作；窄屏单行左右滑 */
   .selbar { position: fixed; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+            /* UX-09 U9-04：fixed + left:50% 时，可用宽度只算到右边界（=半屏），
+               操作条会被压成半个视口宽再靠 overflow-x 硬撑，1440 下「取消」直接被推到条外。
+               用 max-content + max-width 兜底，桌面按内容宽度完整显示，窄屏仍由媒体查询接管。 */
+            width: max-content; max-width: calc(100% - 24px);
             transform: translateX(-50%); display: flex; align-items: center; gap: 8px; flex-wrap: nowrap;
-            max-width: calc(100% - 24px); overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
+            overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
             background: var(--ds-color-bg-subtle); border: 1px solid var(--row-border); border-radius: 999px;
-            padding: 8px 14px; z-index: 97; box-shadow: 0 8px 24px rgba(15,25,43,.16);
+            padding: 8px 14px; z-index: var(--ds-z-dropdown); box-shadow: var(--ds-shadow-2);
             -webkit-overflow-scrolling: touch; }
   .selbar::-webkit-scrollbar { display: none; }
   .selbar > * { flex: 0 0 auto; }
+  /* UX-09 U9-04：操作按钮单独成组，桌面端与旧布局视觉一致；窄屏时由媒体查询改成整行换行 */
+  .selbar .selacts { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; min-width: 0; }
+  /* UX-09 U9-03：窄屏工具栏里搜索框会抢宽度，多选按钮曾被压成竖排两字，这里锁住不换行 */
+  .toolbar-sel { flex: 0 0 auto; white-space: nowrap; }
   body.selecting .wrap { padding-bottom: 96px; }
   .selbar span { font-size: 12px; color: var(--muted); }
   .selbar .tbtn { min-height: 30px; font-size: 12px; padding: 4px 10px; }
   .newpill { bottom: 26px; background: var(--accent); }
-  .foot { margin-top: 24px; }
+  .foot { margin-top: 26px; }
   /* 详情/设置弹层：与原型一致的宽版卡片 */
-  .modal { background: rgba(15,25,43,.45); align-items: center; }
-  .sheet { max-width: 760px; max-height: 90vh; padding: 0; border-radius: 14px; overflow: auto; }
-  .sheet h3 { font-size: 15px; margin: 0 30px 2px 0; }
-  .mx { top: 12px; right: 12px; width: 30px; height: 30px; border-radius: 8px; background: var(--bg); font-size: 18px; }
-  #modalbody { padding: 16px 18px 12px; }
+  /* UX-07B：遮罩统一走令牌（此前这一行用硬编码 rgba(12,18,26,.52) 覆盖了 --ds-color-overlay，
+     导致深色主题的 .58 永远不生效，浮层与背景的分离度只能靠模糊勉强维持） */
+  .modal { background: var(--ds-color-overlay); align-items: center; backdrop-filter: blur(2px); }
+  .sheet { max-width: 720px; max-height: 88vh; padding: 0; border-radius: var(--ds-radius-2xl); overflow: auto;
+           border-color: var(--ds-color-border-subtle); box-shadow: var(--ds-shadow-sheet); }
+  .sheet h3 { font-size: var(--ds-font-size-lg); font-weight: var(--ds-font-weight-bold); letter-spacing: -.2px; margin: 0 34px 4px 0; }
+  .mx { top: 14px; right: 14px; width: 30px; height: 30px; border-radius: 8px; background: var(--ds-color-bg-subtle);
+        color: var(--ds-color-text-tertiary); font-size: 17px; display: grid; place-items: center; }
+  .mx:hover { background: var(--ds-color-bg-subtle); color: var(--ds-color-text); }
+  #modalbody { padding: 20px 22px 16px; }
   .drow { font-size: 12px; }
-  .detail-content { font-size: 15px; background: var(--ds-color-bg-subtle); border: 1px solid var(--border);
-                    border-radius: 10px; padding: 14px 15px; max-height: 38vh; overflow: auto; }
-  .detail-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--row-border); }
-  .detail-actions .tbtn { font-size: 12px; min-height: 30px; }
+  .detail-content { font-size: 14.5px; line-height: 1.78; color: var(--ds-color-text);
+                    background: var(--ds-color-bg-subtle); border: 1px solid var(--ds-color-border-subtle);
+                    border-radius: var(--ds-radius-lg); padding: 16px 16px; max-height: 40vh; overflow: auto; }
+  .detail-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 14px; padding-top: 14px;
+                    border-top: 1px solid var(--row-border); }
+  /* 次要操作静默（无边框、hover 才出现底色），主操作用实心主色 —— 一个弹层只有一个主按钮 */
+  /* 弹层底部动作：次要操作为静默文字按钮，主操作为实心主色，危险操作为红色文字 */
+  .modal-foot { background: var(--ds-color-bg-surface); }
+  .modal-foot .tbtn { font-size: 12.5px; min-height: 32px; border-color: transparent; background: transparent;
+                      color: var(--ds-color-text-secondary); padding: 5px 10px; border-radius: 8px; }
+  .modal-foot .tbtn:hover { background: var(--ds-color-bg-subtle); color: var(--ds-color-text); border-color: transparent; }
+  .modal-foot .tbtn--danger { color: var(--ds-color-danger); }
+  .modal-foot .tbtn--danger:hover { background: rgba(220,38,38,.09); color: var(--ds-color-danger); }
+  .modal-foot .tbtn--accent { color: var(--ds-color-primary); }
+  .modal-foot .tbtn--accent:hover { background: var(--ds-color-primary-subtle); color: var(--ds-color-primary); }
+  .modal-foot .tbtn--primary { background: var(--ds-color-primary-fill); border-color: var(--ds-color-primary-fill);
+                               color: var(--ds-color-on-primary); font-weight: var(--ds-font-weight-semibold); }
+  .modal-foot .tbtn--primary:hover { background: var(--ds-color-primary-fill-hover); border-color: var(--ds-color-primary-fill-hover); color: var(--ds-color-on-primary); }
   .setform { max-height: 64vh; }
-  .setgrp { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px;
-            margin: 0 0 10px; border-top: 1px solid var(--border); }
-  .setgrp h4 { font-size: 13px; margin: 0 0 2px; }
-  .setgrp .ds-help { margin: 3px 0 3px; display: block; }
   .setrow { padding: 6px 0; margin: 0; }
   .setrow > label { font-size: 12px; }
   .settest { font-size: 12px; }
   /* 详情单行元信息 + 底部一行按钮 */
-  .detail-metarow { display: flex; flex-wrap: wrap; align-items: center; gap: 0 6px; font-size: 11.5px;
-                    color: var(--muted); line-height: 1.6; margin-bottom: 8px; }
-  .detail-metarow .sep { color: var(--faint); }
+  .detail-metarow { display: flex; flex-wrap: wrap; align-items: center; gap: 0 6px; font-size: 12px;
+                    color: var(--ds-color-text-secondary); line-height: 1.6; margin-bottom: 2px; }
+  .detail-metarow .sep { color: var(--ds-color-border); }
   .detail-metarow .m-strong { color: var(--text); font-weight: 600; }
   .detail-metarow .m-num { font-variant-numeric: tabular-nums; }
   .detail-metarow .m-star { color: var(--ds-color-warning); font-weight: 700; }
@@ -2787,77 +3182,270 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .modal-foot::-webkit-scrollbar { display: none; }
   .modal-foot .foot-left, .modal-foot .foot-right { display: flex; gap: 6px; align-items: center; flex-wrap: nowrap; flex: 0 0 auto; }
   .modal-foot .foot-right { margin-left: auto; }
-  @media (max-width: 960px) { .layout { grid-template-columns: 1fr; } .sidebar { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); } }
   @media (max-width: 660px) {
     .wrap { padding: 14px 12px 30px; }
-    .topbar { gap: 8px; margin-bottom: 12px; }
+    .topbar { gap: 8px; margin-bottom: 8px; }
     .logo { width: 34px; height: 34px; font-size: 13px; border-radius: 9px; }
     .brandtext h1 { font-size: 16px; }
     .brandtext .subtitle { display: none; }
-    .sidebar { grid-template-columns: 1fr; }
-    .list { padding: 0 12px; }
-    .card { padding: 12px 0; }
-    .msg-bottom { flex-direction: column; align-items: flex-start; gap: 6px; }
-    .msg-actions { align-self: flex-end; }
-    .code-chip .copy { min-height: 32px; padding: 4px 10px; }
+    .list { --list-pad: 14px; padding: 0 14px; }
+    .code-chip .copy { min-height: 44px; min-width: 56px; padding: 4px 10px; }
+    /* 分页：页码/跳转在触屏上同样给足 44 命中区（桌面保持紧凑） */
+    .pagination { padding: 10px 14px; gap: 6px; }
+    .pages button { min-height: 44px; min-width: 40px; padding: 0 10px; }
+    .jumpwrap input, .jumpwrap button { min-height: 44px; }
+    .jumpwrap input { width: 72px; }
     /* 筛选区：视图标签一行，搜索与来源/时间并排一行，整体更紧凑 */
-    .toolbar { padding: 10px 12px; }
-    .toolbar-top { margin-bottom: 8px; }
-    .filters { flex-direction: column; align-items: stretch; flex-wrap: nowrap; gap: 8px; }
-    .filter-tabs { flex-wrap: nowrap; gap: 6px; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+    .toolbar { padding: 8px 12px; gap: 8px; flex-wrap: nowrap; }
+    /* 窄屏纵向堆叠时，桌面端用于横向占位的 flex-basis 会变成「高度」，必须复位 */
+    .toolbar-refresh { display: none; }   /* 窄屏刷新走 ⋯ 菜单，避免再占一行 */
+    .filters { flex: 1 1 auto; flex-direction: column; align-items: stretch; flex-wrap: nowrap; gap: 8px; }
+    .filter-tabs { flex: 0 0 auto; flex-wrap: nowrap; gap: 6px; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
     .filter-tabs::-webkit-scrollbar { display: none; }
-    .filter-tabs .chip { flex: 0 0 auto; min-height: 34px; padding: 4px 10px; }
-    .filter-row { flex-wrap: nowrap; width: 100%; }
+    /* UX-07B：主要触控入口统一 44×44 命中区（视觉仍紧凑，靠内边距撑开热区） */
+    .filter-tabs .chip { flex: 0 0 auto; min-height: 44px; padding: 0 12px; }
+    .toolbar-title { align-self: center; margin-left: auto; padding-left: 6px; }
+    .filter-row { flex: 0 0 auto; flex-wrap: nowrap; width: 100%; }
     .filter-row .searchwrap { flex: 1 1 auto; width: auto; min-width: 0; margin-left: 0; }
     /* iOS Safari 对 <16px 的文本框聚焦会自动放大页面；搜索框保持 16px 防止误缩放 */
-    .filter-row .searchwrap input { font-size: 16px; }
-    .filter-row select { flex: 0 0 auto; max-width: 96px; min-height: 32px; padding: 4px 6px; font-size: 14px; }
-    /* 触屏最小可点区域：验证码复制/星标/操作按钮实测 22-28px，提升到 32-36px */
-    .msg-actions .star, .msg-actions .del, .msg-actions .more { min-width: 36px; min-height: 36px; display: inline-flex; align-items: center; justify-content: center; }
-    /* 批量操作条：底部悬浮，单行左右滑，按钮不压缩 */
-    .selbar { width: calc(100% - 16px); padding: 8px 10px; gap: 6px; justify-content: flex-start;
-              bottom: calc(10px + env(safe-area-inset-bottom, 0px)); border-radius: 14px; }
-    .selbar .select-hint, .selbar .spacer { display: none; }
-    .selbar .count { margin-left: 0; }
-    .selbar .tbtn { flex: 0 0 auto; min-width: 68px; min-height: 34px; padding: 0 9px;
-                    display: inline-flex; align-items: center; justify-content: center; text-align: center; }
-    /* 设置分组标签：单行横向滑动，避免两行网格占用过多空间 */
-    .ds-tabs { display: flex; flex-wrap: nowrap; gap: 8px; overflow-x: auto;
-               padding: 0 0 12px; scroll-snap-type: x proximity;
-               -webkit-overflow-scrolling: touch; scrollbar-width: none; }
-    .ds-tabs::-webkit-scrollbar { display: none; }
-    .ds-tabs > .tab { width: auto; flex: 0 0 auto; justify-content: center; text-align: center;
-                      min-height: 38px; padding: 7px 14px; white-space: nowrap; scroll-snap-align: start; }
+    .filter-row .searchwrap input { font-size: 16px; min-height: 44px; }
+    .filter-row select { flex: 0 0 auto; max-width: 104px; min-height: 44px; padding: 4px 6px; font-size: 14px; }
+    .filter-row .filterbtn { min-height: 44px; }
+    /* 触屏最小可点区域：星标/删除/更多提到 44 命中区（图标视觉尺寸不变） */
+    .msg-actions .star, .msg-actions .del, .msg-actions .more { min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; }
+    /* 批量操作条：底部悬浮；两行网格由下方 @media (max-width: 900px) 统一定义，此处不再重复
+       （旧实现用 nowrap + overflow-x，390 下「取消」被推到视口外，UX-09 U9-04 已修） */
+    .selbar { width: calc(100% - 16px); border-radius: 14px; }
+    /* 设置分区导航：窄屏三列网格，六个分区两行排满 —— 不横滑、不截断、不溢出 */
+    .ds-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px;
+               padding: 0 0 12px; overflow: visible; }
+    .sc-tab { min-height: 44px; padding: 8px 6px; font-size: 12.5px; white-space: normal;
+              text-align: center; line-height: 1.25; border-radius: var(--ds-radius-md); }
     .modal { align-items: flex-end; padding: 0; }
     .sheet { border-radius: 18px 18px 0 0; max-height: 88dvh; }
-    /* 详情弹窗按钮：单行横向滑动，触屏可左右滑，鼠标滚轮可横向滚动 */
-    .modal-foot { flex-direction: row; flex-wrap: nowrap; align-items: center; gap: 8px;
-                  overflow-x: auto; scroll-snap-type: x proximity; -webkit-overflow-scrolling: touch;
-                  scrollbar-width: none; padding: 12px 14px calc(14px + env(safe-area-inset-bottom, 0px)); }
-    .modal-foot::-webkit-scrollbar { display: none; }
-    .modal-foot .foot-left, .modal-foot .foot-right { width: auto; flex: 0 0 auto;
-                  display: flex; flex-wrap: nowrap; gap: 8px; justify-content: flex-start; }
-    .modal-foot .tbtn { width: auto; flex: 0 0 auto; min-width: 78px; min-height: 38px;
+    /* 详情弹窗按钮（UX-08 重评）：次要操作由「单行横滑」改为「自动换行的均分按钮」——
+       横滑在真机上可发现性差、易与页面纵向滚动冲突，且会把操作藏在视口外；
+       现在 390px 下 4 个次要操作一行放得下（每个 ≥44px 高），放不下时换行而不是隐藏。
+       主操作（删除/标为未读/关闭）仍在最下一行靠右常驻。 */
+    .modal-foot { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 8px;
+                  overflow: visible; scroll-snap-type: none;
+                  padding: 10px 14px calc(12px + env(safe-area-inset-bottom, 0px)); }
+    .modal-foot .foot-left { width: 100%; flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 8px; }
+    .modal-foot .foot-right { width: 100%; margin-left: 0; flex: 0 0 auto; display: flex; flex-wrap: nowrap;
+                  gap: 8px; justify-content: flex-end; }
+    .modal-foot .foot-left .tbtn { flex: 1 1 auto; min-width: 72px; }
+    .modal-foot .tbtn { width: auto; min-width: 72px; min-height: 44px;
                         padding: 0 12px; display: inline-flex;
-                        align-items: center; justify-content: center; text-align: center;
-                        scroll-snap-align: start; }
-    /* 设置底部操作：保存整行主按钮，恢复默认/取消并排（取消隐藏时不留空位） */
-    .ds-dialog-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-start; margin-top: 14px; }
-    .ds-dialog-actions .ds-btn { flex: 0 0 auto; min-height: 38px; }
-    .ds-dialog-actions #scrcancel { flex: 1 1 auto; }
-    .ds-dialog-actions #scrsave { flex: 1 1 100%; }
-    /* 推送卡片操作：一行四等宽，紧凑不换行 */
-    .pushcard-acts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
-    .pushcard-acts .tbtn { width: 100%; min-height: 34px; padding: 0 4px; font-size: 12px;
-                           display: inline-flex; align-items: center; justify-content: center; text-align: center; }
-    .pushcard { padding: 10px 12px; }
-    .setgrp { padding: 12px; }
+                        align-items: center; justify-content: center; text-align: center; }
+    /* 设置底部操作：状态条独占一行，保存主按钮整行，恢复默认/取消并排 */
+    .sc-foot { gap: 8px; margin-top: 14px; }
+    .sc-foot .sc-status { flex: 1 1 100%; order: -1; min-height: 16px; }
+    .sc-foot .sc-btns { width: 100%; margin-left: 0; gap: 8px; display: flex; }
+    .sc-foot .sc-btns .ds-btn { flex: 1 1 0; min-height: 46px; }
+    .sc-foot .sc-btns #scrsave { flex: 1.6 1 0; }
+    .ds-dialog-actions .ds-btn { min-height: 44px; }
+    /* 行式设置项：窄屏纵向堆叠，控件独占一行，长语言文案不被压缩 */
+    .sc-item { flex-wrap: wrap; gap: 6px; padding: 12px 0; }
+    .sc-item-main { flex: 1 1 100%; }
+    .sc-ictl { flex: 1 1 100%; justify-content: flex-start; flex-wrap: wrap; }
+    .sc-ictl .ds-input, .sc-ictl .ds-select { min-width: 0; flex: 1 1 auto; }
+    .sc-ictl .sc-switch { margin-left: auto; }
+    .sc-target { flex-wrap: wrap; }
+    .sc-target-acts { flex: 1 1 100%; justify-content: flex-start; }
+    .sc-target-acts .tbtn { flex: 1 1 auto; min-width: 64px; min-height: 44px; }
+    .devrow .dacts button { min-width: 44px; min-height: 44px; }
+    .sc-ch { min-height: 44px; }
+    .sc-ch-add { width: 44px; height: 44px; }
+    .sc-target-acts .tbtn { min-height: 44px; }
+    .sc-chgrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .setrow { gap: 6px; margin: 5px 0; }
     .setrow > label { min-width: 0; flex: 0 0 82px; font-size: 12px; }
-    .prefitem { flex-direction: column; align-items: flex-start; justify-content: center; gap: 3px; padding: 6px; }
-    .prefitem span { font-size: 11px; line-height: 1.3; }
     .pushpicks { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .pushsheet { max-width: none; max-height: 88dvh; }
+  }
+  /* ================= UX-02A/02B：单栏消息工作台 ================= */
+  /* 消息卡：三行结构（发件人/时间 · 正文 · 验证码与操作），去除重复设备行 */
+  /* 行内三段（发件人行 / 正文 / 验证码行）保持紧凑，垂直间距由 .msg-main 控制 */
+  .card { padding-top: 12px; padding-bottom: 12px; }
+  .msg-main { display: grid; gap: 4px; min-width: 0; }
+  .msg-top { margin-bottom: 0; gap: 8px; flex-wrap: nowrap; }
+  .msg-top .sender { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .msg-top .phone { flex: none; }
+  .msg-foot { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .msg-foot .code-chip { flex: none; }
+  .msg-foot .devchip { font-size: 11px; color: var(--ds-color-text-secondary); white-space: nowrap;
+                       overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .msg-foot .devchip::before { content: "·"; margin-right: 5px; opacity: .7; }
+  .msg-rail .star, .msg-rail .del { font-size: 12px; }
+  .undot { width: 7px; height: 7px; border-radius: 50%; background: var(--ds-color-unread); flex: none; }
+  .tag.srctag { background: var(--ds-color-bg-subtle); color: var(--muted); }
+  /* 未读数字并入「未读」筛选 chip：让首页在不显示统计摘要时仍有待处理量提示 */
+  .chipcount { margin-left: 6px; padding: 0 6px; border-radius: 999px; background: var(--accent-bg);
+               color: var(--accent); font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .chipcount[hidden] { display: none; }
+  /* 移动端专用「筛选」开关（桌面端筛选控件直接可见，不需要折叠） */
+  .filterbtn { display: none; }
+  /* 顶部统计摘要（默认隐藏，由设置中心开关控制；关闭时不占位） */
+  .statbar { display: flex; align-items: center; gap: 18px; padding: 9px 16px; font-size: 12px;
+             color: var(--muted); border-bottom: 1px solid var(--row-border); background: transparent; }
+  .statbar[hidden] { display: none; }
+  .statbar > span { display: inline-flex; align-items: baseline; gap: 5px; }
+  .statbar b { color: var(--text); font-size: 15px; font-variant-numeric: tabular-nums; }
+  .statbar .mini-link { margin-left: auto; font-size: 12px; color: var(--accent); background: none;
+                        border: 0; padding: 4px 2px; cursor: pointer; }
+  /* 顶栏「更多」菜单（移动端收纳低频入口，桌面端不显示） */
+  .navmenu { position: absolute; top: 54px; right: 12px; z-index: var(--ds-z-dropdown); min-width: 158px;
+             background: var(--ds-color-bg-raised); border: var(--ds-border-w) solid var(--ds-color-border); border-radius: 12px;
+             box-shadow: var(--ds-shadow-3); padding: 6px; display: flex; flex-direction: column; gap: 2px; }
+  .navmenu[hidden] { display: none; }
+  .navmenu button { text-align: left; border: 0; background: none; color: var(--text); font-size: 14px;
+                    padding: 10px 12px; border-radius: 8px; min-height: 44px; cursor: pointer; }
+  .navmenu button:hover { background: var(--ds-color-bg-subtle); }
+  .navmenu button.danger { color: var(--ds-color-danger); }
+  .nav-mobile { display: none !important; }
+  /* 设备管理弹层（原侧栏设备卡：筛选已移到筛选区，管理动作保留在此） */
+  .devlist { display: flex; flex-direction: column; }
+  .devrow { display: flex; align-items: center; gap: 10px; padding: 13px 0; border-bottom: 1px solid var(--row-border); }
+  .devrow:last-child { border-bottom: 0; }
+  .devrow .dinfo { min-width: 0; flex: 1; }
+  .devrow .dn { font-size: 13.5px; font-weight: 600; color: var(--ds-color-text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .devrow .ds { font-size: 11.5px; color: var(--ds-color-text-tertiary); overflow: hidden; text-overflow: ellipsis;
+                white-space: nowrap; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .devrow .dacts { display: flex; gap: 4px; flex: none; }
+  .devrow .dacts button { min-width: 32px; min-height: 32px; border: 1px solid var(--ds-color-border-subtle);
+                          background: var(--ds-color-bg-surface); border-radius: 7px; color: var(--ds-color-text-secondary);
+                          cursor: pointer; font-size: 13px; display: inline-grid; place-items: center;
+                          transition: background var(--ds-duration-fast) var(--ds-ease), border-color var(--ds-duration-fast) var(--ds-ease); }
+  .devrow .dacts button:hover { border-color: var(--ds-color-primary); color: var(--ds-color-primary);
+                          background: var(--ds-color-primary-subtle); }
+  .devrow .dacts button.danger:hover { border-color: var(--ds-color-danger); color: var(--ds-color-danger); }
+  @media (max-width: 660px) {
+    /* 移动端：品牌 + 主题 + 更多；低频入口收进 ⋯ 菜单，换来首屏空间 */
+    .nav-desktop { display: none !important; }
+    .nav-mobile { display: inline-flex !important; }
+    .topbar { align-items: center; }
+    /* 搜索独占一行 + 「筛选」按钮；设备/来源/时间默认折叠，点开即展开一行三等分下拉 */
+    /* UX-09-RV：390 下「多选」若留在工具栏主轴，会把 .filters 压窄 60px，
+       导致「筛选」被挤到第三行、首条消息下移 50px（首屏密度 25%→31%，跌破 30% 门槛）。
+       改为绝对定位到标签行右端空白处，既保住常驻可见入口，也不改变内容起点。 */
+    .toolbar { position: relative; }
+    #selmodebtn { position: absolute; top: 8px; right: 12px; min-height: 44px; min-width: 44px; padding: 0 8px; }
+    .filters { flex: 1 1 100%; }
+    .filter-tabs { padding-right: 58px; }
+    .filter-row { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; }
+    .filter-row .searchwrap { flex: 1 1 auto; min-width: 0; }
+    .filter-row .filterbtn { display: inline-flex; align-items: center; min-height: 44px; flex: 0 0 auto; }
+    .filter-row select { display: none; flex: 1 1 30%; min-width: 0; max-width: none; min-height: 44px; font-size: 14px; }
+    .filters.adv .filter-row select { display: block; }
+    .statbar { padding: 8px 12px; gap: 12px; }
+    .statbar b { font-size: 14px; }
+    .card { grid-template-columns: minmax(0, 1fr); padding: 12px 8px; }
+    /* 未读标线的位置统一由 calc(8px - var(--list-pad)) 决定，窄屏不再单独覆盖 */
+    .msg-foot { gap: 6px; }
+    /* 操作列绝对定位到卡片右下角；有验证码时与它同行，没有时为操作留出 34px 高度，正文不被压住 */
+    .msg-rail { position: absolute; right: 4px; bottom: 4px; }
+    /* 没有验证码胶囊时，脚注行仍为右下角操作列预留命中高度（44 命中区 + 4px 边距），正文不被按钮压住 */
+    .msg-foot:not(:has(.code-chip)) { min-height: 48px; }
+    .msg-actions .star, .msg-actions .del, .msg-actions .more { min-width: 44px; min-height: 44px; padding: 4px 6px; }
+  }
+  /* 平板区间（661–900）：一行放不下「视图标签 + 搜索 + 三个下拉 + 刷新」，
+     用网格固定为「标签 | 刷新」/「搜索与筛选」两行，避免刷新被挤到单独第三行 */
+  @media (min-width: 661px) and (max-width: 900px) {
+    .toolbar { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 8px 10px; }
+    .filters { display: contents; }
+    .filter-tabs { grid-column: 1; grid-row: 1; }
+    /* UX-09 U9-03：工具栏新增「多选」入口，与刷新并排占右侧两列 */
+    .toolbar-sel { grid-column: 2; grid-row: 1; justify-self: end; }
+    .toolbar-refresh { grid-column: 3; grid-row: 1; justify-self: end; }
+    .filter-row { grid-column: 1 / -1; grid-row: 2; }
+    .filter-row .searchwrap { flex: 1 1 auto; }
+  }
+  /* ===== UX-09 U9-04：平板 / 手机的多选操作条 =====
+     旧实现把 8 个控件塞进一条 nowrap + overflow-x 的胶囊里：390、768 下「取消」被推到视口之外，
+     只能横向滑动才找得到，等于取消入口在这些宽度上不可见。现改为两行网格：
+     第一行常驻「全选 / 计数 / 取消」，第二行操作按钮按行换行 —— 不横向滚动、不溢出视口。 */
+  @media (max-width: 900px) {
+    .selbar { display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+              grid-template-areas: "all count cancel" "acts acts acts";
+              align-items: center; gap: 6px 8px; width: calc(100% - 16px); max-width: none;
+              overflow: visible; border-radius: 14px; padding: 8px 10px; }
+    .selbar .bulk-check { grid-area: all; display: inline-flex; align-items: center; }
+    .selbar .bulk-check span { display: none; }
+    .selbar .count { grid-area: count; margin: 0; }
+    .selbar .spacer, .selbar .select-hint { display: none; }
+    #selcancel { grid-area: cancel; min-height: 44px; }
+    .selbar .selacts { grid-area: acts; display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+    .selbar .selacts .tbtn { flex: 1 1 calc(33.333% - 6px); min-width: 0; min-height: 44px;
+                             display: inline-flex; align-items: center; justify-content: center; text-align: center; }
+    body.selecting .wrap { padding-bottom: 190px; }
+  }
+  /* ===== UX-07B：触屏命中区（pointer: coarse）=====
+     视觉尺寸保持紧凑，只把可点热区撑到 44×44。放在样式表末尾是为了压过前面的基础规则
+     （例如 .devrow .dacts button 的 32px 写在媒体查询之后，只有靠源码顺序才能覆盖）。
+     桌面端（鼠标）不受影响，仍是小图标 + 紧凑间距。 */
+  @media (pointer: coarse) {
+    .top-actions .tbtn, .toolbar .tbtn, .headacts .tbtn { min-width: 44px; min-height: 44px; }
+    .filter-tabs .chip, .filter-row .filterbtn { min-height: 44px; }
+    .filters .searchwrap input, .filter-row select { min-height: 44px; }
+    .msg-actions .star, .msg-actions .del, .msg-actions .more { min-width: 44px; min-height: 44px; }
+    .code-chip .copy { min-height: 44px; min-width: 52px; }
+    .pages button, .jumpwrap input, .jumpwrap button { min-height: 44px; }
+    .mx { width: 44px; height: 44px; top: 8px; right: 8px; }
+    .modal-foot .tbtn, .sc-foot .ds-btn, .ds-dialog-actions .ds-btn, .pwdacts .ds-btn, .selbar .tbtn { min-height: 44px; }
+    .sc-ictl .ds-select, .sc-ictl .ds-input { min-height: 44px; }
+    .sc-tab, .sc-ch { min-height: 44px; }
+    .sc-ch-add { width: 44px; height: 44px; }
+    .devrow .dacts button { min-width: 44px; min-height: 44px; }
+  }
+
+  /* ===== UX-07C：宽屏双栏（≥1600）=====
+     实验结论：<1600 双栏会让列表摘要从 120/120 字降到 84–93/120（列表被压到 556–633px），
+     得不偿失；≥1760 视图宽度下双栏使列表摘要保持完整、详情正文 690–739px（宽于单栏弹层 674px），
+     连续查看 5 条消息耗时从约 1300ms 降到约 84ms，因此只在 ≥1600 启用，且工作区放宽到 min(1760, 96vw)。 */
+  .detailpane { display: none; }
+  @media (min-width: 1600px) {
+    .wrap { max-width: min(1760px, 96vw); }
+    /* 列表列从 1070 缩到 809（1600 视口）后工具栏放不下原来的 9 个控件：
+       收紧间距 + 下拉限宽 + 刷新改为纯图标，保证仍是一行（不牺牲任何筛选入口） */
+    .toolbar { gap: 8px; padding: 11px 16px; }
+    .filters { gap: 8px; }
+    .filter-row { gap: 6px; }
+    .filter-row .searchwrap { flex: 1 1 110px; min-width: 96px; }
+    .filter-row select { max-width: 92px; }
+    .filter-tabs .chip { padding: 0 9px; }
+    /* 双栏下列表列变窄：条数已由分页行 pageinfo 表达（"第 1/6 页 · 共 58 条"），此处不再重复占位 */
+    .toolbar-title { display: none; }
+    .toolbar-refresh { width: 34px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+    .toolbar-refresh .rf-txt { display: none; }
+    .layout { grid-template-columns: minmax(0, 55fr) minmax(0, 45fr); gap: 16px; }
+    .detailpane { display: flex; flex-direction: column; position: sticky; top: 16px;
+                  min-height: calc(100vh - 32px);
+                  max-height: calc(100vh - 32px); overflow: hidden;
+                  background: var(--ds-color-bg-surface); border: 1px solid var(--ds-color-border-subtle);
+                  border-radius: var(--ds-radius-2xl); box-shadow: var(--ds-shadow-1); }
+    .detailpane[hidden] { display: none; }
+    .dp-scroll { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 18px 20px 20px; }
+    .dp-empty { flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; justify-content: center;
+                gap: 8px; padding: 48px 24px; text-align: center;
+                color: var(--ds-color-text-tertiary); font-size: 13px; }
+    .dp-empty b { font-size: 14px; font-weight: var(--ds-font-weight-semibold); color: var(--ds-color-text-secondary); }
+    .dp-head { display: flex; align-items: flex-start; gap: 10px; }
+    .dp-head h3 { flex: 1 1 auto; min-width: 0; }
+    .dp-close { flex: none; width: 30px; height: 30px; border-radius: var(--ds-radius-md);
+                border: 1px solid transparent; background: none; color: var(--ds-color-text-tertiary);
+                font-size: 18px; line-height: 1; cursor: pointer; }
+    .dp-close:hover { background: var(--ds-color-surface-hover); color: var(--ds-color-text); }
+    .dp-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+               padding-top: 14px; margin-top: 4px; border-top: 1px solid var(--ds-color-border-subtle); }
+    .dp-foot .grow { flex: 1 1 auto; }
+    /* 选中态与「未读」左标线共存：选中改用底色 + 内描边，不再抢占左侧竖线位置 */
+    .card.dsel { background: var(--ds-color-primary-subtle); }
+    .card.dsel::after { content: ""; position: absolute; inset: 0; border-radius: inherit;
+                        box-shadow: inset 0 0 0 1px var(--ds-color-primary); pointer-events: none; }
+    .card.dsel .sender { color: var(--ds-color-primary); }
+  }
+  @media (min-width: 1920px) {
+    .layout { grid-template-columns: minmax(0, 54fr) minmax(0, 46fr); }
   }
 </style>
 </head>
@@ -2875,25 +3463,33 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       </div>
     </div>
     <div class="top-actions">
+      <button class="tbtn nav-desktop" id="statsbtn" type="button" data-i18n="viewStats">统计</button>
+      <button class="tbtn nav-desktop" id="devbtn" type="button" data-i18n="navDevices">设备</button>
       <button class="tbtn" id="themebtn" data-i18n-title="themeTip">自动</button>
-      <button class="tbtn" id="setbtn" data-i18n-title="settings" data-i18n="settings">⚙ 设置</button>
-      <button class="tbtn" id="logoutbtn" type="button" data-i18n-title="scLogoutTip" data-i18n="scLogout">退出</button>
+      <button class="tbtn nav-desktop" id="setbtn" data-i18n-title="settings" data-i18n="settings">⚙ 设置</button>
+      <button class="tbtn nav-desktop" id="logoutbtn" type="button" data-i18n-title="scLogoutTip" data-i18n="scLogout">退出</button>
+      <button class="tbtn nav-mobile" id="morebtn" type="button" aria-haspopup="menu" aria-expanded="false"
+              data-i18n-title="navMore" data-i18n-aria="navMore" title="更多" aria-label="更多">⋯</button>
     </div>
   </header>
+  <div class="navmenu" id="navmenu" role="menu" hidden>
+    <button type="button" role="menuitem" id="mnurefresh" data-i18n="refresh">刷新</button>
+    <button type="button" role="menuitem" id="mnustats" data-i18n="viewStats">查看统计</button>
+    <button type="button" role="menuitem" id="mnudev" data-i18n="navDevices">设备</button>
+    <button type="button" role="menuitem" id="mnuset" data-i18n="settings">设置</button>
+    <button type="button" role="menuitem" id="mnulogout" class="danger" data-i18n="scLogout">退出登录</button>
+  </div>
 
   <div class="layout">
     <main class="panel">
       <div class="toolbar">
-        <div class="toolbar-top">
-          <div class="toolbar-title"><span data-i18n="listTitle">短信列表</span><span id="stat"></span></div>
-          <button class="tbtn" id="refreshbtn" type="button" data-i18n-title="refresh" data-i18n="refresh" title="刷新">↻ 刷新</button>
-        </div>
         <div class="filters">
           <div class="filter-tabs">
             <button class="chip active" id="fall" type="button" data-i18n="tabAll">全部</button>
-            <button class="chip" id="funread" type="button" data-i18n="unread">未读</button>
+            <button class="chip" id="funread" type="button"><span data-i18n="unread">未读</span><span class="chipcount" id="unreadcount" hidden>0</span></button>
             <button class="chip" id="fread" type="button" data-i18n="read">已读</button>
             <button class="chip" id="fstar" type="button"><span data-i18n="starOnly">★ 收藏</span></button>
+            <span class="toolbar-title"><span class="sr-only" data-i18n="listTitle">短信列表</span><span id="stat"></span></span>
           </div>
           <div class="filter-row">
             <div class="searchwrap">
@@ -2901,6 +3497,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
               <button class="clr" id="clearq" hidden data-i18n-title="clearSearch" data-i18n-aria="clearSearch" title="清除搜索" aria-label="清除搜索">×</button>
             </div>
             <datalist id="qhist"></datalist>
+            <button class="chip filterbtn" id="filterbtn" type="button" aria-expanded="false" data-i18n="filterBtn">筛选</button>
+            <select id="dev" data-i18n-title="navDevices" title="按设备筛选"></select>
             <select id="src" data-i18n-title="srcTip" title="按来源筛选">
               <option value="" data-i18n="allSources">来源</option>
               <option value="sms" data-i18n="srcSms">短信</option>
@@ -2914,19 +3512,30 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
             </select>
           </div>
         </div>
+        <button class="tbtn toolbar-sel" id="selmodebtn" type="button" aria-pressed="false" data-i18n="selModeBtn" data-i18n-title="selModeTip" data-i18n-aria="selModeTip" title="多选消息（也可右键或长按消息）" aria-label="多选消息（也可右键或长按消息）">多选</button>
+        <button class="tbtn toolbar-refresh" id="refreshbtn" type="button" data-i18n-title="refresh" title="刷新"><span class="rf-ico" aria-hidden="true">↻</span><span class="rf-txt" data-i18n="refresh">刷新</span></button>
       </div>
 
-      <div class="selbar" id="selbar" hidden>
-        <label class="bulk-check"><input type="checkbox" id="selall"> <span data-i18n="selAllList">选择当前列表</span></label>
+      <div class="statbar" id="statbar" hidden>
+        <span><b id="sttotal">0</b><span data-i18n="statTotal">总数</span></span>
+        <span><b id="stunread">0</b><span data-i18n="statUnread">未读</span></span>
+        <span><b id="sttoday">0</b><span data-i18n="today">今天</span></span>
+        <button class="mini-link" id="stdetail" type="button" data-i18n="viewStats">查看统计</button>
+      </div>
+
+      <div class="selbar" id="selbar" role="toolbar" data-i18n-aria="selBarAria" aria-label="批量操作" hidden>
+        <label class="bulk-check"><input type="checkbox" id="selall" data-i18n-aria="selAllList" aria-label="选择当前列表"> <span data-i18n="selAllList">选择当前列表</span></label>
         <span class="count" id="selcount">已选 0 条</span>
         <span class="select-hint" data-i18n="selectHint">右键或长按消息可多选</span>
         <span class="spacer"></span>
-        <span class="select-hint" data-i18n="exportHint">导出当前筛选结果</span>
-        <button class="tbtn" id="exportcsv" data-i18n-title="exportCsvTip" data-i18n="exportCsv" title="按当前筛选导出 CSV">导出 CSV</button>
-        <button class="tbtn" id="exportjson" data-i18n-title="exportJsonTip" data-i18n="exportJson" title="按当前筛选导出 JSON">导出 JSON</button>
-        <button class="tbtn" id="selread" data-i18n="markReadSelected">批量已读</button>
-        <button class="tbtn" id="seldel" disabled data-i18n="del">删除</button>
-        <button class="tbtn" id="clearbtn" data-i18n-title="clearTip" data-i18n="clear" title="清空当前筛选结果（软删除）">清空</button>
+        <div class="selacts">
+          <span class="select-hint" data-i18n="exportHint">导出当前筛选结果</span>
+          <button class="tbtn" id="exportcsv" data-i18n-title="exportCsvTip" data-i18n="exportCsv" title="按当前筛选导出 CSV">导出 CSV</button>
+          <button class="tbtn" id="exportjson" data-i18n-title="exportJsonTip" data-i18n="exportJson" title="按当前筛选导出 JSON">导出 JSON</button>
+          <button class="tbtn" id="selread" data-i18n="markReadSelected">批量已读</button>
+          <button class="tbtn" id="seldel" disabled data-i18n="del">删除</button>
+          <button class="tbtn" id="clearbtn" data-i18n-title="clearTip" data-i18n="clear" title="清空当前筛选结果（软删除）">清空</button>
+        </div>
         <button class="tbtn" id="selcancel" data-i18n="cancel">取消</button>
       </div>
 
@@ -2944,20 +3553,9 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         </div>
       </div>
     </main>
-
-    <aside class="sidebar">
-      <section class="panel side-card">
-        <div class="side-title"><span data-i18n="devices">设备</span></div>
-        <div class="tabs" id="tabs" role="tablist" data-i18n-aria="devices" aria-label="设备标签"></div>
-      </section>
-      <section class="panel side-card">
-        <div class="side-title"><span data-i18n="settingsOverview">设置概览</span><button class="mini-link" id="sideSetBtn" type="button" data-i18n="openSettings">打开设置中心</button><button class="mini-link" id="sideNotifyBtn" type="button" data-i18n="scNotifyConfig">配置通知渠道</button></div>
-        <div class="settings-rows" id="sideSettings"></div>
-      </section>
-      <section class="panel side-card">
-        <div class="side-title"><span data-i18n="quickOverview">快捷概览</span><button class="mini-link" id="sideStatsBtn" type="button" data-i18n="viewStats">查看统计</button></div>
-        <div class="side-row"><span data-i18n="unread">未读</span><strong><span id="unreadcount">0</span></strong></div>
-      </section>
+    <aside class="detailpane" id="detailpane" hidden data-i18n-aria="paneAria" aria-label="消息详情">
+      <div class="dp-empty" id="dpempty"><b data-i18n="paneEmpty">选择左侧消息查看详情</b><span data-i18n="paneEmptySub">点选任意消息，右侧立即显示完整内容</span></div>
+      <div class="dp-scroll" id="dpscroll" hidden></div>
     </aside>
   </div>
 
@@ -2965,7 +3563,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
 </div>
 <button class="newpill" id="newpill" hidden></button>
 <div class="modal" id="modal" hidden>
-  <div class="sheet">
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="modaltitle" tabindex="-1">
     <button class="mx" id="modalx" type="button" data-i18n-aria="modalClose" aria-label="关闭">×</button>
     <div id="modalbody"></div>
   </div>
@@ -2979,6 +3577,28 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     <div class="pwdacts">
       <button class="ds-btn" id="pwdcancel" type="button"></button>
       <button class="ds-btn ds-btn--primary" id="pwdok" type="button"></button>
+    </div>
+  </div>
+</div>
+<div class="pwdmodal" id="dsconfirm" hidden>
+  <div class="pwdsheet dscf" role="alertdialog" aria-modal="true" aria-labelledby="dscfmsg">
+    <p class="pwdhelp" id="dscfmsg"></p>
+    <div class="pwdacts">
+      <button class="ds-btn" id="dscfcancel" type="button"></button>
+      <button class="ds-btn ds-btn--primary" id="dscfok" type="button"></button>
+    </div>
+  </div>
+</div>
+<!-- UX-08：统一输入弹窗，替代原生 prompt；复用 .pwdmodal 的焦点/遮罩/Esc 体系 -->
+<div class="pwdmodal" id="dsprompt" hidden>
+  <div class="pwdsheet" role="dialog" aria-modal="true" aria-labelledby="dspTitle">
+    <h3 id="dspTitle"></h3>
+    <p class="pwdhelp" id="dspHelp"></p>
+    <input class="ds-input" id="dspInput" type="text" autocomplete="off" style="width:100%">
+    <div class="pwderr" id="dspErr" hidden></div>
+    <div class="pwdacts">
+      <button class="ds-btn" id="dspCancel" type="button"></button>
+      <button class="ds-btn ds-btn--primary" id="dspOk" type="button"></button>
     </div>
   </div>
 </div>
@@ -3007,11 +3627,18 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     cursor: "", seen: {}, loadMoreDepth: 0,
     selectMode: false, selected: {}, lastQ: "", starOnly: false, unreadOnly: false, readOnly: false, filterMode: "all", lastList: [],
     pwdOn: true,
+    /* UX-07C：宽屏双栏当前选中消息（仅内存态，不持久化、不写服务端） */
+    detailId: 0,
+    /* UX-08：空态语义（empty/missing/fail），文案由 i18n 按状态实时生成 */
+    paneState: "empty",
     labels: (function () { try { return JSON.parse(localStorage.getItem("sms_labels") || "{}") || {}; } catch (e) { return {}; } })(),
     autoCopy: (function () { try { return localStorage.getItem("sms_autocopy") !== "0"; } catch (e) { return true; } })(),
     codeCopy: (function () { try { return localStorage.getItem("sms_codecopy") !== "0"; } catch (e) { return true; } })(),
     notify: (function () { try { return localStorage.getItem("sms_notify") !== "0"; } catch (e) { return true; } })(),
-    sound: (function () { try { return localStorage.getItem("sms_sound") === "1"; } catch (e) { return false; } })()
+    sound: (function () { try { return localStorage.getItem("sms_sound") === "1"; } catch (e) { return false; } })(),
+    /* UX-02B：首页统计摘要默认隐藏，用户可在设置中心「首页显示」里开启（本地偏好，不写服务端） */
+    homeStats: (function () { try { return localStorage.getItem("sms_homestats") === "1"; } catch (e) { return false; } })(),
+    devices: []
   };
   var $ = function (id) { return document.getElementById(id); };
 
@@ -3074,17 +3701,17 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       exportCsvTip: "按当前筛选导出 CSV", exportJsonTip: "按当前筛选导出 JSON",
       total: "共 {n} 条", pageOf: "第 {a} / {b} 页",
       prev: "上一页", next: "下一页", perPage: "{n} 条/页", jumpPh: "页码", go: "跳转",
-      loading: "加载中…", emptyFilter: "没有符合条件的消息",
+      loading: "加载中…", emptyFilter: "没有符合条件的消息", emptyFilterClear: "清除筛选",
       emptyAll: "还没有收到消息", emptyHint: "在手机端配置 SmsForwarder，或调用 /api/push 推送一条试试",
-      loadFail: "加载失败：{m}", retry: "重试",
+      loadFail: "加载失败：{m}", retry: "重试", errOffline: "网络不可用，请检查连接后重试", errUnauth: "登录已过期，请重新登录", relogin: "重新登录", paneLoading: "正在加载…", detailFailSub: "可能是网络中断，或这条消息已被删除", starFail: "收藏失败，请重试", labelSaved: "标签已更新", labelFail: "标签未能保存到本机", markedUnread: "已标记为未读", scTestFailTarget: "{name} 测试失败：{m}", sDndFrom: "免打扰开始时间", sDndTo: "免打扰结束时间",
       del: "删除", unknownNum: "未知号码", codeLabel: "验证码：", copy: "复制", copied: "已复制",
       more: "展开全文", less: "收起", unread: "未读",
       starItemTip: "收藏/置顶", recvTip: "双击复制收件号", selTip: "选择",
       numLibTip: "常见号码库（仅供参考）",
-      deletedOne: "已删除", deletedN: "已删除 {n} 条", undo: "撤销",
+      confirmDelOne: "删除这条消息？删除后 5 秒内可撤销。", undoAria: "撤销删除，5 秒内有效", deletedOne: "已删除", deletedN: "已删除 {n} 条", undo: "撤销",
       newPill: "↑ {n} 条新消息", gotNew: "收到 {n} 条新消息", codeCopied: "验证码 {c} 已复制",
       recvCopied: "收件号已复制", newSms: "新短信",
-      selCount: "已选 {n} 条", selAll: "全选本页", cancel: "取消",
+      selCount: "已选 {n} 条", selAll: "全选本页", cancel: "取消", ok: "确定",
       dSource: "来源", dDevice: "设备标签", dRecv: "收件号", dTime: "时间", dLabel: "号码标签", dStatus: "状态",
       notSet: "（未设置）", read: "已读", starredPrefix: "★ 收藏 · ",
       star: "收藏置顶", unstar: "取消收藏", markUnread: "标为未读", copyAll: "复制全文",
@@ -3109,7 +3736,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scopeDevice: "当前设备的消息", scopeFilter: "当前筛选结果", scopeAll: "全部消息",
       confirmClear: "确认清空{scope}？将软删除匹配的所有消息（此操作不可撤销）。",
       confirmClear2: "再次确认：真的要清空{scope}吗？",
-      renamePrompt: "重命名设备标签「{name}」\n留空则恢复默认名", renameFail: "重命名失败",
+      renamePrompt: "重命名设备标签「{name}」\n留空则恢复默认名", renameFail: "重命名失败", devRenamed: "设备已重命名", devMerged: "设备已合并", devDeleted: "设备已删除", devDelBlocked: "该设备下还有 {n} 条消息，清空后才能删除",
       noOthers: "没有可合并的其他设备",
       mergePrompt: "把「{a}」的全部消息合并到哪台设备？\n{list}\n输入序号：",
       invalidIdx: "序号无效",
@@ -3142,17 +3769,17 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       exportCsvTip: "Export current filter as CSV", exportJsonTip: "Export current filter as JSON",
       total: "{n} messages", pageOf: "Page {a} of {b}",
       prev: "Prev", next: "Next", perPage: "{n} per page", jumpPh: "Page", go: "Go",
-      loading: "Loading…", emptyFilter: "No matching messages",
+      loading: "Loading…", emptyFilter: "No matching messages", emptyFilterClear: "Clear filters",
       emptyAll: "No messages yet", emptyHint: "Set up SmsForwarder on your phone, or POST to /api/push to try it out",
-      loadFail: "Failed to load: {m}", retry: "Retry",
+      loadFail: "Failed to load: {m}", retry: "Retry", errOffline: "Network unavailable. Check your connection and try again.", errUnauth: "Your session has expired. Please sign in again.", relogin: "Sign in again", paneLoading: "Loading…", detailFailSub: "The network may be down, or this message was deleted.", starFail: "Could not update the star. Try again.", labelSaved: "Label updated", labelFail: "The label could not be saved on this device", markedUnread: "Marked as unread", scTestFailTarget: "{name} test failed: {m}", sDndFrom: "Do-not-disturb start time", sDndTo: "Do-not-disturb end time",
       del: "Delete", unknownNum: "Unknown", codeLabel: "Code:", copy: "Copy", copied: "Copied",
       more: "Show more", less: "Show less", unread: "Unread",
       starItemTip: "Star / pin", recvTip: "Double-tap to copy", selTip: "Select",
       numLibTip: "Built-in number directory (reference only)",
-      deletedOne: "Deleted", deletedN: "{n} deleted", undo: "Undo",
+      confirmDelOne: "Delete this message? You can undo within 5 seconds.", undoAria: "Undo delete, valid for 5 seconds", deletedOne: "Deleted", deletedN: "{n} deleted", undo: "Undo",
       newPill: "↑ {n} new", gotNew: "{n} new message(s)", codeCopied: "Code {c} copied",
       recvCopied: "Recipient number copied", newSms: "New message",
-      selCount: "{n} selected", selAll: "Select page", cancel: "Cancel",
+      selCount: "{n} selected", selAll: "Select page", cancel: "Cancel", ok: "OK",
       dSource: "Source", dDevice: "Device", dRecv: "Recipient", dTime: "Time", dLabel: "Number label", dStatus: "Status",
       notSet: "(not set)", read: "Read", starredPrefix: "★ Starred · ",
       star: "Star & pin", unstar: "Unstar", markUnread: "Mark unread", copyAll: "Copy text",
@@ -3177,7 +3804,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scopeDevice: "this device's messages", scopeFilter: "the current filter", scopeAll: "all messages",
       confirmClear: "Clear {scope}? All matching messages will be soft-deleted (cannot be undone).",
       confirmClear2: "Really clear {scope}?",
-      renamePrompt: "Rename device tag \"{name}\"\nLeave empty to restore the default name", renameFail: "Rename failed",
+      renamePrompt: "Rename device tag \"{name}\"\nLeave empty to restore the default name", renameFail: "Rename failed", devRenamed: "Device renamed", devMerged: "Devices merged", devDeleted: "Device deleted", devDelBlocked: "This device still holds {n} messages. Clear them before deleting.",
       noOthers: "No other devices to merge into",
       mergePrompt: "Merge all messages of \"{a}\" into which device?\n{list}\nEnter number:",
       invalidIdx: "Invalid number",
@@ -3210,17 +3837,17 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       exportCsvTip: "依目前篩選匯出 CSV", exportJsonTip: "依目前篩選匯出 JSON",
       total: "共 {n} 則", pageOf: "第 {a} / {b} 頁",
       prev: "上一頁", next: "下一頁", perPage: "{n} 筆/頁", jumpPh: "頁碼", go: "跳轉",
-      loading: "載入中…", emptyFilter: "沒有符合條件的訊息",
+      loading: "載入中…", emptyFilter: "沒有符合條件的訊息", emptyFilterClear: "清除篩選",
       emptyAll: "還沒有收到訊息", emptyHint: "在手機端設定 SmsForwarder，或呼叫 /api/push 推送一則試試",
-      loadFail: "載入失敗：{m}", retry: "重試",
+      loadFail: "載入失敗：{m}", retry: "重試", errOffline: "網路無法使用，請檢查連線後重試", errUnauth: "登入已過期，請重新登入", relogin: "重新登入", paneLoading: "正在載入…", detailFailSub: "可能是網路中斷，或這則訊息已被刪除", starFail: "收藏失敗，請重試", labelSaved: "標籤已更新", labelFail: "標籤無法儲存到本機", markedUnread: "已標記為未讀", scTestFailTarget: "{name} 測試失敗：{m}", sDndFrom: "免打擾開始時間", sDndTo: "免打擾結束時間",
       del: "刪除", unknownNum: "未知號碼", codeLabel: "驗證碼：", copy: "複製", copied: "已複製",
       more: "展開全文", less: "收合", unread: "未讀",
       starItemTip: "收藏/置頂", recvTip: "雙擊複製收件號", selTip: "選擇",
       numLibTip: "常見號碼庫（僅供參考）",
-      deletedOne: "已刪除", deletedN: "已刪除 {n} 則", undo: "復原",
+      confirmDelOne: "刪除這則訊息？刪除後 5 秒內可復原。", undoAria: "復原刪除，5 秒內有效", deletedOne: "已刪除", deletedN: "已刪除 {n} 則", undo: "復原",
       newPill: "↑ {n} 則新訊息", gotNew: "收到 {n} 則新訊息", codeCopied: "驗證碼 {c} 已複製",
       recvCopied: "收件號已複製", newSms: "新簡訊",
-      selCount: "已選 {n} 則", selAll: "全選本頁", cancel: "取消",
+      selCount: "已選 {n} 則", selAll: "全選本頁", cancel: "取消", ok: "確定",
       dSource: "來源", dDevice: "裝置標籤", dRecv: "收件號", dTime: "時間", dLabel: "號碼標籤", dStatus: "狀態",
       notSet: "（未設定）", read: "已讀", starredPrefix: "★ 收藏 · ",
       star: "收藏置頂", unstar: "取消收藏", markUnread: "標為未讀", copyAll: "複製全文",
@@ -3245,7 +3872,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scopeDevice: "此裝置的訊息", scopeFilter: "目前篩選結果", scopeAll: "全部訊息",
       confirmClear: "確認清空{scope}？將軟刪除符合的所有訊息（此操作無法復原）。",
       confirmClear2: "再次確認：真的要清空{scope}嗎？",
-      renamePrompt: "重新命名裝置標籤「{name}」\n留空則恢復預設名", renameFail: "重新命名失敗",
+      renamePrompt: "重新命名裝置標籤「{name}」\n留空則恢復預設名", renameFail: "重新命名失敗", devRenamed: "裝置已重新命名", devMerged: "裝置已合併", devDeleted: "裝置已刪除", devDelBlocked: "此裝置下還有 {n} 則訊息，清空後才能刪除",
       noOthers: "沒有可合併的其他裝置",
       mergePrompt: "把「{a}」的全部訊息合併到哪部裝置？\n{list}\n輸入序號：",
       invalidIdx: "序號無效",
@@ -3278,17 +3905,17 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       exportCsvTip: "現在の絞り込みを CSV で出力", exportJsonTip: "現在の絞り込みを JSON で出力",
       total: "全 {n} 件", pageOf: "{a} / {b} ページ",
       prev: "前へ", next: "次へ", perPage: "{n} 件/ページ", jumpPh: "ページ", go: "移動",
-      loading: "読み込み中…", emptyFilter: "条件に一致するメッセージはありません",
+      loading: "読み込み中…", emptyFilter: "条件に一致するメッセージはありません", emptyFilterClear: "絞り込みを解除",
       emptyAll: "まだメッセージはありません", emptyHint: "スマホで SmsForwarder を設定するか、/api/push に POST して試してください",
-      loadFail: "読み込み失敗：{m}", retry: "再試行",
+      loadFail: "読み込み失敗：{m}", retry: "再試行", errOffline: "ネットワークに接続できません。接続を確認して再試行してください", errUnauth: "ログインの有効期限が切れました。再度ログインしてください", relogin: "再度ログイン", paneLoading: "読み込み中…", detailFailSub: "ネットワーク障害か、このメッセージは削除された可能性があります", starFail: "お気に入りを更新できませんでした。再試行してください", labelSaved: "ラベルを更新しました", labelFail: "ラベルをこの端末に保存できませんでした", markedUnread: "未読にしました", scTestFailTarget: "{name} のテストに失敗しました：{m}", sDndFrom: "おやすみモード開始時刻", sDndTo: "おやすみモード終了時刻",
       del: "削除", unknownNum: "不明な番号", codeLabel: "認証コード：", copy: "コピー", copied: "コピーしました",
       more: "全文を表示", less: "折りたたむ", unread: "未読",
       starItemTip: "スター/固定表示", recvTip: "ダブルクリックで宛先番号をコピー", selTip: "選択",
       numLibTip: "よくある番号リスト（参考）",
-      deletedOne: "削除しました", deletedN: "{n} 件削除しました", undo: "元に戻す",
+      confirmDelOne: "このメッセージを削除しますか？削除後 5 秒以内なら元に戻せます。", undoAria: "削除を元に戻す（5 秒間有効）", deletedOne: "削除しました", deletedN: "{n} 件削除しました", undo: "元に戻す",
       newPill: "↑ 新着 {n} 件", gotNew: "新着 {n} 件を受信", codeCopied: "認証コード {c} をコピーしました",
       recvCopied: "宛先番号をコピーしました", newSms: "新着 SMS",
-      selCount: "{n} 件選択中", selAll: "このページを全選択", cancel: "キャンセル",
+      selCount: "{n} 件選択中", selAll: "このページを全選択", cancel: "キャンセル", ok: "OK",
       dSource: "送信元", dDevice: "デバイスラベル", dRecv: "宛先番号", dTime: "日時", dLabel: "番号ラベル", dStatus: "状態",
       notSet: "（未設定）", read: "既読", starredPrefix: "★ スター · ",
       star: "スターと固定", unstar: "スター解除", markUnread: "未読にする", copyAll: "全文をコピー",
@@ -3313,7 +3940,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scopeDevice: "このデバイスのメッセージ", scopeFilter: "現在の絞り込み結果", scopeAll: "すべてのメッセージ",
       confirmClear: "{scope}を消去しますか？一致するすべてのメッセージがソフト削除されます（取り消せません）。",
       confirmClear2: "再確認：本当に{scope}を消去しますか？",
-      renamePrompt: "デバイスラベル「{name}」を変更\n空欄でデフォルト名に戻ります", renameFail: "名前の変更に失敗しました",
+      renamePrompt: "デバイスラベル「{name}」を変更\n空欄でデフォルト名に戻ります", renameFail: "名前の変更に失敗しました", devRenamed: "デバイス名を変更しました", devMerged: "デバイスを統合しました", devDeleted: "デバイスを削除しました", devDelBlocked: "このデバイスにはまだ {n} 件のメッセージがあります。削除する前に消去してください",
       noOthers: "統合先の他のデバイスがありません",
       mergePrompt: "「{a}」の全メッセージをどのデバイスに統合しますか？\n{list}\n番号を入力：",
       invalidIdx: "番号が無効です",
@@ -3346,17 +3973,17 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       exportCsvTip: "현재 필터를 CSV로 내보내기", exportJsonTip: "현재 필터를 JSON으로 내보내기",
       total: "총 {n}건", pageOf: "{a} / {b} 페이지",
       prev: "이전", next: "다음", perPage: "페이지당 {n}건", jumpPh: "페이지", go: "이동",
-      loading: "불러오는 중…", emptyFilter: "조건에 맞는 메시지가 없습니다",
+      loading: "불러오는 중…", emptyFilter: "조건에 맞는 메시지가 없습니다", emptyFilterClear: "필터 해제",
       emptyAll: "아직 메시지가 없습니다", emptyHint: "휴대폰에서 SmsForwarder를 설정하거나 /api/push 로 POST 해 보세요",
-      loadFail: "불러오기 실패: {m}", retry: "다시 시도",
+      loadFail: "불러오기 실패: {m}", retry: "다시 시도", errOffline: "네트워크를 사용할 수 없습니다. 연결을 확인한 뒤 다시 시도하세요", errUnauth: "로그인이 만료되었습니다. 다시 로그인하세요", relogin: "다시 로그인", paneLoading: "불러오는 중…", detailFailSub: "네트워크가 끊겼거나 이 메시지가 삭제되었을 수 있습니다", starFail: "즐겨찾기를 변경하지 못했습니다. 다시 시도하세요", labelSaved: "라벨이 업데이트되었습니다", labelFail: "라벨을 이 기기에 저장하지 못했습니다", markedUnread: "읽지 않음으로 표시했습니다", scTestFailTarget: "{name} 테스트 실패: {m}", sDndFrom: "방해 금지 시작 시간", sDndTo: "방해 금지 종료 시간",
       del: "삭제", unknownNum: "알 수 없는 번호", codeLabel: "인증번호:", copy: "복사", copied: "복사됨",
       more: "전문 펼치기", less: "접기", unread: "읽지 않음",
       starItemTip: "즐겨찾기/고정", recvTip: "더블클릭으로 수신번호 복사", selTip: "선택",
       numLibTip: "자주 오는 번호 목록(참고용)",
-      deletedOne: "삭제됨", deletedN: "{n}건 삭제됨", undo: "실행 취소",
+      confirmDelOne: "이 메시지를 삭제할까요? 삭제 후 5초 이내에 실행 취소할 수 있습니다.", undoAria: "삭제 실행 취소, 5초간 유효", deletedOne: "삭제됨", deletedN: "{n}건 삭제됨", undo: "실행 취소",
       newPill: "↑ 새 메시지 {n}건", gotNew: "새 메시지 {n}건 수신", codeCopied: "인증번호 {c} 복사됨",
       recvCopied: "수신번호 복사됨", newSms: "새 SMS",
-      selCount: "{n}건 선택됨", selAll: "이 페이지 전체 선택", cancel: "취소",
+      selCount: "{n}건 선택됨", selAll: "이 페이지 전체 선택", cancel: "취소", ok: "확인",
       dSource: "발신원", dDevice: "기기 라벨", dRecv: "수신번호", dTime: "시간", dLabel: "번호 라벨", dStatus: "상태",
       notSet: "(설정 안 됨)", read: "읽음", starredPrefix: "★ 즐겨찾기 · ",
       star: "즐겨찾기 및 고정", unstar: "즐겨찾기 해제", markUnread: "읽지 않음으로 표시", copyAll: "전문 복사",
@@ -3381,7 +4008,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scopeDevice: "이 기기의 메시지", scopeFilter: "현재 필터 결과", scopeAll: "전체 메시지",
       confirmClear: "{scope}을(를) 비울까요? 일치하는 모든 메시지가 소프트 삭제됩니다(되돌릴 수 없습니다).",
       confirmClear2: "다시 확인: 정말 {scope}을(를) 비울까요?",
-      renamePrompt: "기기 라벨 \"{name}\" 이름 변경\n비우면 기본 이름으로 복원됩니다", renameFail: "이름 변경 실패",
+      renamePrompt: "기기 라벨 \"{name}\" 이름 변경\n비우면 기본 이름으로 복원됩니다", renameFail: "이름 변경 실패", devRenamed: "기기 이름을 변경했습니다", devMerged: "기기를 병합했습니다", devDeleted: "기기를 삭제했습니다", devDelBlocked: "이 기기에 메시지 {n}건이 남아 있습니다. 삭제하려면 먼저 비우세요",
       noOthers: "병합할 다른 기기가 없습니다",
       mergePrompt: "\"{a}\"의 모든 메시지를 어느 기기로 병합할까요?\n{list}\n번호 입력:",
       invalidIdx: "잘못된 번호입니다",
@@ -3414,17 +4041,17 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       exportCsvTip: "Exportar el filtro actual como CSV", exportJsonTip: "Exportar el filtro actual como JSON",
       total: "{n} mensajes", pageOf: "Página {a} de {b}",
       prev: "Anterior", next: "Siguiente", perPage: "{n} por página", jumpPh: "Página", go: "Ir",
-      loading: "Cargando…", emptyFilter: "No hay mensajes que coincidan",
+      loading: "Cargando…", emptyFilter: "No hay mensajes que coincidan", emptyFilterClear: "Borrar filtros",
       emptyAll: "Aún no hay mensajes", emptyHint: "Configura SmsForwarder en tu teléfono o envía un POST a /api/push para probar",
-      loadFail: "Error al cargar: {m}", retry: "Reintentar",
+      loadFail: "Error al cargar: {m}", retry: "Reintentar", errOffline: "Red no disponible. Comprueba la conexión e inténtalo de nuevo.", errUnauth: "La sesión ha caducado. Vuelve a iniciar sesión.", relogin: "Iniciar sesión de nuevo", paneLoading: "Cargando…", detailFailSub: "Puede que la red falle o que este mensaje se haya eliminado.", starFail: "No se pudo actualizar el destacado. Inténtalo de nuevo.", labelSaved: "Etiqueta actualizada", labelFail: "No se pudo guardar la etiqueta en este dispositivo", markedUnread: "Marcado como no leído", scTestFailTarget: "Fallo en la prueba de {name}: {m}", sDndFrom: "Hora de inicio de No molestar", sDndTo: "Hora de fin de No molestar",
       del: "Eliminar", unknownNum: "Desconocido", codeLabel: "Código:", copy: "Copiar", copied: "Copiado",
       more: "Mostrar más", less: "Mostrar menos", unread: "No leído",
       starItemTip: "Marcar / fijar", recvTip: "Doble toque para copiar", selTip: "Seleccionar",
       numLibTip: "Directorio de números integrado (solo referencia)",
-      deletedOne: "Eliminado", deletedN: "{n} eliminados", undo: "Deshacer",
+      confirmDelOne: "¿Eliminar este mensaje? Puedes deshacerlo en 5 segundos.", undoAria: "Deshacer eliminación, válido 5 segundos", deletedOne: "Eliminado", deletedN: "{n} eliminados", undo: "Deshacer",
       newPill: "↑ {n} nuevos", gotNew: "{n} mensaje(s) nuevo(s)", codeCopied: "Código {c} copiado",
       recvCopied: "Número de destino copiado", newSms: "Mensaje nuevo",
-      selCount: "{n} seleccionados", selAll: "Seleccionar página", cancel: "Cancelar",
+      selCount: "{n} seleccionados", selAll: "Seleccionar página", cancel: "Cancelar", ok: "Aceptar",
       dSource: "Origen", dDevice: "Dispositivo", dRecv: "Destinatario", dTime: "Hora", dLabel: "Etiqueta del número", dStatus: "Estado",
       notSet: "(sin configurar)", read: "Leído", starredPrefix: "★ Favorito · ",
       star: "Marcar y fijar", unstar: "Quitar marca", markUnread: "Marcar como no leído", copyAll: "Copiar texto",
@@ -3449,7 +4076,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scopeDevice: "los mensajes de este dispositivo", scopeFilter: "el filtro actual", scopeAll: "todos los mensajes",
       confirmClear: "¿Vaciar {scope}? Todos los mensajes que coincidan se borrarán de forma suave (no se puede deshacer).",
       confirmClear2: "Confirmar de nuevo: ¿seguro que quieres vaciar {scope}?",
-      renamePrompt: "Renombrar la etiqueta \"{name}\"\nDejar vacío para restaurar el nombre predeterminado", renameFail: "Error al renombrar",
+      renamePrompt: "Renombrar la etiqueta \"{name}\"\nDejar vacío para restaurar el nombre predeterminado", renameFail: "Error al renombrar", devRenamed: "Dispositivo renombrado", devMerged: "Dispositivos combinados", devDeleted: "Dispositivo eliminado", devDelBlocked: "Este dispositivo aún tiene {n} mensajes. Vacíalos antes de eliminarlo.",
       noOthers: "No hay otros dispositivos para fusionar",
       mergePrompt: "¿Fusionar todos los mensajes de \"{a}\" en qué dispositivo?\n{list}\nEscribe el número:",
       invalidIdx: "Número no válido",
@@ -3482,17 +4109,17 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       exportCsvTip: "Exporter le filtre actuel en CSV", exportJsonTip: "Exporter le filtre actuel en JSON",
       total: "{n} messages", pageOf: "Page {a} sur {b}",
       prev: "Précédent", next: "Suivant", perPage: "{n} par page", jumpPh: "Page", go: "Aller",
-      loading: "Chargement…", emptyFilter: "Aucun message correspondant",
+      loading: "Chargement…", emptyFilter: "Aucun message correspondant", emptyFilterClear: "Effacer les filtres",
       emptyAll: "Aucun message pour l'instant", emptyHint: "Configurez SmsForwarder sur votre téléphone, ou envoyez un POST vers /api/push pour essayer",
-      loadFail: "Échec du chargement : {m}", retry: "Réessayer",
+      loadFail: "Échec du chargement : {m}", retry: "Réessayer", errOffline: "Réseau indisponible. Vérifiez la connexion et réessayez.", errUnauth: "Votre session a expiré. Reconnectez-vous.", relogin: "Se reconnecter", paneLoading: "Chargement…", detailFailSub: "Le réseau est peut-être coupé, ou ce message a été supprimé.", starFail: "Impossible de mettre à jour le favori. Réessayez.", labelSaved: "Étiquette mise à jour", labelFail: "L’étiquette n’a pas pu être enregistrée sur cet appareil", markedUnread: "Marqué comme non lu", scTestFailTarget: "Échec du test de {name} : {m}", sDndFrom: "Heure de début Ne pas déranger", sDndTo: "Heure de fin Ne pas déranger",
       del: "Supprimer", unknownNum: "Inconnu", codeLabel: "Code :", copy: "Copier", copied: "Copié",
       more: "Tout afficher", less: "Réduire", unread: "Non lu",
       starItemTip: "Favori / épingler", recvTip: "Double-clic pour copier", selTip: "Sélectionner",
       numLibTip: "Annuaire intégré (à titre indicatif)",
-      deletedOne: "Supprimé", deletedN: "{n} supprimés", undo: "Annuler",
+      confirmDelOne: "Supprimer ce message ? Vous pouvez annuler dans les 5 secondes.", undoAria: "Annuler la suppression, valable 5 secondes", deletedOne: "Supprimé", deletedN: "{n} supprimés", undo: "Annuler",
       newPill: "↑ {n} nouveaux", gotNew: "{n} nouveau(x) message(s)", codeCopied: "Code {c} copié",
       recvCopied: "Numéro destinataire copié", newSms: "Nouveau message",
-      selCount: "{n} sélectionnés", selAll: "Tout sélectionner (page)", cancel: "Annuler",
+      selCount: "{n} sélectionnés", selAll: "Tout sélectionner (page)", cancel: "Annuler", ok: "OK",
       dSource: "Source", dDevice: "Appareil", dRecv: "Destinataire", dTime: "Heure", dLabel: "Étiquette du numéro", dStatus: "Statut",
       notSet: "(non défini)", read: "Lu", starredPrefix: "★ Favori · ",
       star: "Favori et épingler", unstar: "Retirer le favori", markUnread: "Marquer non lu", copyAll: "Copier le texte",
@@ -3517,7 +4144,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scopeDevice: "les messages de cet appareil", scopeFilter: "le filtre actuel", scopeAll: "tous les messages",
       confirmClear: "Vider {scope} ? Tous les messages correspondants seront supprimés logiquement (irréversible).",
       confirmClear2: "Confirmer à nouveau : vider vraiment {scope} ?",
-      renamePrompt: "Renommer l'étiquette \"{name}\"\nLaisser vide pour restaurer le nom par défaut", renameFail: "Échec du renommage",
+      renamePrompt: "Renommer l'étiquette \"{name}\"\nLaisser vide pour restaurer le nom par défaut", renameFail: "Échec du renommage", devRenamed: "Appareil renommé", devMerged: "Appareils fusionnés", devDeleted: "Appareil supprimé", devDelBlocked: "Cet appareil contient encore {n} messages. Videz-les avant de le supprimer.",
       noOthers: "Aucun autre appareil pour la fusion",
       mergePrompt: "Fusionner tous les messages de \"{a}\" vers quel appareil ?\n{list}\nSaisissez le numéro :",
       invalidIdx: "Numéro invalide",
@@ -3550,17 +4177,17 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       exportCsvTip: "Aktuellen Filter als CSV exportieren", exportJsonTip: "Aktuellen Filter als JSON exportieren",
       total: "{n} Nachrichten", pageOf: "Seite {a} von {b}",
       prev: "Zurück", next: "Weiter", perPage: "{n} pro Seite", jumpPh: "Seite", go: "Los",
-      loading: "Wird geladen…", emptyFilter: "Keine passenden Nachrichten",
+      loading: "Wird geladen…", emptyFilter: "Keine passenden Nachrichten", emptyFilterClear: "Filter zurücksetzen",
       emptyAll: "Noch keine Nachrichten", emptyHint: "Richte SmsForwarder auf dem Handy ein oder sende ein POST an /api/push",
-      loadFail: "Laden fehlgeschlagen: {m}", retry: "Erneut versuchen",
+      loadFail: "Laden fehlgeschlagen: {m}", retry: "Erneut versuchen", errOffline: "Netzwerk nicht verfügbar. Verbindung prüfen und erneut versuchen.", errUnauth: "Sitzung abgelaufen. Bitte erneut anmelden.", relogin: "Erneut anmelden", paneLoading: "Wird geladen…", detailFailSub: "Möglicherweise ist das Netzwerk gestört oder die Nachricht wurde gelöscht.", starFail: "Markierung konnte nicht aktualisiert werden. Erneut versuchen.", labelSaved: "Label aktualisiert", labelFail: "Label konnte auf diesem Gerät nicht gespeichert werden", markedUnread: "Als ungelesen markiert", scTestFailTarget: "Test für {name} fehlgeschlagen: {m}", sDndFrom: "Beginn der Nicht-stören-Zeit", sDndTo: "Ende der Nicht-stören-Zeit",
       del: "Löschen", unknownNum: "Unbekannt", codeLabel: "Code:", copy: "Kopieren", copied: "Kopiert",
       more: "Mehr anzeigen", less: "Weniger anzeigen", unread: "Ungelesen",
       starItemTip: "Favorit / anheften", recvTip: "Doppeltipp zum Kopieren", selTip: "Auswählen",
       numLibTip: "Integriertes Nummernverzeichnis (nur zur Referenz)",
-      deletedOne: "Gelöscht", deletedN: "{n} gelöscht", undo: "Rückgängig",
+      confirmDelOne: "Diese Nachricht löschen? Innerhalb von 5 Sekunden rückgängig machbar.", undoAria: "Löschen rückgängig machen, 5 Sekunden gültig", deletedOne: "Gelöscht", deletedN: "{n} gelöscht", undo: "Rückgängig",
       newPill: "↑ {n} neue", gotNew: "{n} neue Nachricht(en)", codeCopied: "Code {c} kopiert",
       recvCopied: "Empfängernummer kopiert", newSms: "Neue Nachricht",
-      selCount: "{n} ausgewählt", selAll: "Seite auswählen", cancel: "Abbrechen",
+      selCount: "{n} ausgewählt", selAll: "Seite auswählen", cancel: "Abbrechen", ok: "OK",
       dSource: "Quelle", dDevice: "Gerät", dRecv: "Empfänger", dTime: "Zeit", dLabel: "Nummern-Label", dStatus: "Status",
       notSet: "(nicht gesetzt)", read: "Gelesen", starredPrefix: "★ Favorit · ",
       star: "Favorit & anheften", unstar: "Favorit entfernen", markUnread: "Als ungelesen markieren", copyAll: "Text kopieren",
@@ -3585,7 +4212,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scopeDevice: "die Nachrichten dieses Geräts", scopeFilter: "den aktuellen Filter", scopeAll: "alle Nachrichten",
       confirmClear: "{scope} leeren? Alle passenden Nachrichten werden soft-gelöscht (kann nicht rückgängig gemacht werden).",
       confirmClear2: "Erneut bestätigen: {scope} wirklich leeren?",
-      renamePrompt: "Geräte-Label \"{name}\" umbenennen\nLeer lassen für den Standardnamen", renameFail: "Umbenennen fehlgeschlagen",
+      renamePrompt: "Geräte-Label \"{name}\" umbenennen\nLeer lassen für den Standardnamen", renameFail: "Umbenennen fehlgeschlagen", devRenamed: "Gerät umbenannt", devMerged: "Geräte zusammengeführt", devDeleted: "Gerät gelöscht", devDelBlocked: "Auf diesem Gerät liegen noch {n} Nachrichten. Vor dem Löschen leeren.",
       noOthers: "Keine anderen Geräte zum Zusammenführen",
       mergePrompt: "Alle Nachrichten von \"{a}\" in welches Gerät zusammenführen?\n{list}\nNummer eingeben:",
       invalidIdx: "Ungültige Nummer",
@@ -3618,17 +4245,17 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       exportCsvTip: "Exportar o filtro atual como CSV", exportJsonTip: "Exportar o filtro atual como JSON",
       total: "{n} mensagens", pageOf: "Página {a} de {b}",
       prev: "Anterior", next: "Próxima", perPage: "{n} por página", jumpPh: "Página", go: "Ir",
-      loading: "Carregando…", emptyFilter: "Nenhuma mensagem correspondente",
+      loading: "Carregando…", emptyFilter: "Nenhuma mensagem correspondente", emptyFilterClear: "Limpar filtros",
       emptyAll: "Nenhuma mensagem ainda", emptyHint: "Configure o SmsForwarder no celular ou envie um POST para /api/push para testar",
-      loadFail: "Falha ao carregar: {m}", retry: "Tentar novamente",
+      loadFail: "Falha ao carregar: {m}", retry: "Tentar novamente", errOffline: "Rede indisponível. Verifique a conexão e tente novamente.", errUnauth: "Sua sessão expirou. Entre novamente.", relogin: "Entrar novamente", paneLoading: "Carregando…", detailFailSub: "A rede pode estar indisponível ou a mensagem foi excluída.", starFail: "Não foi possível atualizar o destaque. Tente novamente.", labelSaved: "Etiqueta atualizada", labelFail: "Não foi possível salvar a etiqueta neste dispositivo", markedUnread: "Marcada como não lida", scTestFailTarget: "Falha no teste de {name}: {m}", sDndFrom: "Hora de início do Não perturbe", sDndTo: "Hora de fim do Não perturbe",
       del: "Excluir", unknownNum: "Desconhecido", codeLabel: "Código:", copy: "Copiar", copied: "Copiado",
       more: "Mostrar mais", less: "Mostrar menos", unread: "Não lida",
       starItemTip: "Favoritar / fixar", recvTip: "Toque duplo para copiar", selTip: "Selecionar",
       numLibTip: "Diretório de números integrado (somente referência)",
-      deletedOne: "Excluída", deletedN: "{n} excluídas", undo: "Desfazer",
+      confirmDelOne: "Excluir esta mensagem? Você pode desfazer em 5 segundos.", undoAria: "Desfazer exclusão, válido por 5 segundos", deletedOne: "Excluída", deletedN: "{n} excluídas", undo: "Desfazer",
       newPill: "↑ {n} novas", gotNew: "{n} nova(s) mensagem(ns)", codeCopied: "Código {c} copiado",
       recvCopied: "Número do destinatário copiado", newSms: "Nova mensagem",
-      selCount: "{n} selecionadas", selAll: "Selecionar página", cancel: "Cancelar",
+      selCount: "{n} selecionadas", selAll: "Selecionar página", cancel: "Cancelar", ok: "OK",
       dSource: "Origem", dDevice: "Dispositivo", dRecv: "Destinatário", dTime: "Hora", dLabel: "Etiqueta do número", dStatus: "Status",
       notSet: "(não definido)", read: "Lida", starredPrefix: "★ Favorita · ",
       star: "Favoritar e fixar", unstar: "Remover favorito", markUnread: "Marcar como não lida", copyAll: "Copiar texto",
@@ -3653,7 +4280,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scopeDevice: "as mensagens deste dispositivo", scopeFilter: "o filtro atual", scopeAll: "todas as mensagens",
       confirmClear: "Limpar {scope}? Todas as mensagens correspondentes serão excluídas de forma suave (não pode ser desfeito).",
       confirmClear2: "Confirmar novamente: realmente limpar {scope}?",
-      renamePrompt: "Renomear a etiqueta \"{name}\"\nDeixe vazio para restaurar o nome padrão", renameFail: "Falha ao renomear",
+      renamePrompt: "Renomear a etiqueta \"{name}\"\nDeixe vazio para restaurar o nome padrão", renameFail: "Falha ao renomear", devRenamed: "Dispositivo renomeado", devMerged: "Dispositivos mesclados", devDeleted: "Dispositivo excluído", devDelBlocked: "Este dispositivo ainda tem {n} mensagens. Esvazie antes de excluir.",
       noOthers: "Nenhum outro dispositivo para mesclar",
       mergePrompt: "Mesclar todas as mensagens de \"{a}\" para qual dispositivo?\n{list}\nDigite o número:",
       invalidIdx: "Número inválido",
@@ -3675,8 +4302,14 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scMenuTokens: "接入令牌",
     scTitle: "设置中心",
     scDirty: "未保存",
+    navDevices: "设备",
+    navMore: "更多",
+    filterBtn: "筛选",
+    scHomeDisplay: "首页显示",
+    scHomeStats: "统计摘要",
+    scHomeStatsHelp: "开启后在首页列表上方显示总数 / 未读 / 今天三个数字；默认关闭，数字实时读取 /api/stats。",
     scTabSession: "登录与会话",
-    scTabNotify: "通知",
+    scTabNotify: "通知渠道",
     scTabBiz: "数据与业务",
     scTabSec: "安全",
     scReset: "恢复默认",
@@ -3789,8 +4422,14 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scMenuTokens: "接入權杖",
     scTitle: "設定中心",
     scDirty: "未儲存",
+    navDevices: "裝置",
+    navMore: "更多",
+    filterBtn: "篩選",
+    scHomeDisplay: "首頁顯示",
+    scHomeStats: "統計摘要",
+    scHomeStatsHelp: "開啟後在首頁列表上方顯示總數 / 未讀 / 今天三個數字；預設關閉，數字即時讀取 /api/stats。",
     scTabSession: "登入與工作階段",
-    scTabNotify: "通知",
+    scTabNotify: "通知管道",
     scTabBiz: "資料與業務",
     scTabSec: "安全",
     scReset: "恢復預設",
@@ -3903,6 +4542,12 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scMenuTokens: "Access tokens",
     scTitle: "Settings Center",
     scDirty: "Unsaved",
+    navDevices: "Devices",
+    navMore: "More",
+    filterBtn: "Filter",
+    scHomeDisplay: "Home display",
+    scHomeStats: "Stats summary",
+    scHomeStatsHelp: "Show total / unread / today above the message list. Off by default; numbers come from /api/stats.",
     scTabSession: "Sign-in & session",
     scTabNotify: "Notifications",
     scTabBiz: "Data & operations",
@@ -4017,6 +4662,12 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scMenuTokens: "接続トークン",
     scTitle: "設定センター",
     scDirty: "未保存",
+    navDevices: "端末",
+    navMore: "その他",
+    filterBtn: "絞り込み",
+    scHomeDisplay: "ホーム表示",
+    scHomeStats: "統計サマリー",
+    scHomeStatsHelp: "有効にするとメッセージ一覧の上に合計・未読・今日の件数を表示します。既定は非表示で、/api/stats から取得します。",
     scTabSession: "ログインとセッション",
     scTabNotify: "通知",
     scTabBiz: "データと運用",
@@ -4131,6 +4782,12 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scMenuTokens: "접속 토큰",
     scTitle: "설정 센터",
     scDirty: "저장 안 됨",
+    navDevices: "기기",
+    navMore: "더보기",
+    filterBtn: "필터",
+    scHomeDisplay: "홈 표시",
+    scHomeStats: "통계 요약",
+    scHomeStatsHelp: "사용 설정하면 메시지 목록 위에 전체·읽지 않음·오늘 건수를 표시합니다. 기본값은 숨김이며 /api/stats에서 가져옵니다.",
     scTabSession: "로그인 및 세션",
     scTabNotify: "알림",
     scTabBiz: "데이터 및 운영",
@@ -4245,6 +4902,12 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scMenuTokens: "Tokens de acceso",
     scTitle: "Centro de ajustes",
     scDirty: "Sin guardar",
+    navDevices: "Dispositivos",
+    navMore: "Más",
+    filterBtn: "Filtrar",
+    scHomeDisplay: "Vista de inicio",
+    scHomeStats: "Resumen de estadísticas",
+    scHomeStatsHelp: "Muestra total / no leídos / hoy sobre la lista de mensajes. Desactivado por defecto; los datos vienen de /api/stats.",
     scTabSession: "Acceso y sesión",
     scTabNotify: "Notificaciones",
     scTabBiz: "Datos y operación",
@@ -4359,6 +5022,12 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scMenuTokens: "Jetons d'accès",
     scTitle: "Centre de réglages",
     scDirty: "Non enregistré",
+    navDevices: "Appareils",
+    navMore: "Plus",
+    filterBtn: "Filtrer",
+    scHomeDisplay: "Affichage d'accueil",
+    scHomeStats: "Résumé des statistiques",
+    scHomeStatsHelp: "Affiche total / non lus / aujourd'hui au-dessus de la liste. Désactivé par défaut ; les données viennent de /api/stats.",
     scTabSession: "Connexion et session",
     scTabNotify: "Notifications",
     scTabBiz: "Données et exploitation",
@@ -4473,6 +5142,12 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scMenuTokens: "Zugriffstoken",
     scTitle: "Einstellungszentrum",
     scDirty: "Ungespeichert",
+    navDevices: "Geräte",
+    navMore: "Mehr",
+    filterBtn: "Filter",
+    scHomeDisplay: "Startseite",
+    scHomeStats: "Statistikübersicht",
+    scHomeStatsHelp: "Zeigt Gesamt / ungelesen / heute über der Nachrichtenliste. Standardmäßig aus; Zahlen kommen von /api/stats.",
     scTabSession: "Anmeldung & Sitzung",
     scTabNotify: "Benachrichtigungen",
     scTabBiz: "Daten & Betrieb",
@@ -4587,6 +5262,12 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scMenuTokens: "Tokens de acesso",
     scTitle: "Central de configurações",
     scDirty: "Não salvo",
+    navDevices: "Dispositivos",
+    navMore: "Mais",
+    filterBtn: "Filtrar",
+    scHomeDisplay: "Exibição inicial",
+    scHomeStats: "Resumo de estatísticas",
+    scHomeStatsHelp: "Mostra total / não lidos / hoje acima da lista. Desativado por padrão; os números vêm de /api/stats.",
     scTabSession: "Login e sessão",
     scTabNotify: "Notificações",
     scTabBiz: "Dados e operação",
@@ -4908,12 +5589,174 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       for (var _u2k in UI2_I18N[_u2l]) I18N[_u2l][_u2k] = UI2_I18N[_u2l][_u2k];
     }
   })();
+  /* 宽屏双栏详情文案（九语种）：只在 ≥1600 出现，不影响窄屏既有文案 */
+  var PANE_I18N = {
+    "zh-CN": {
+      paneEmpty: "选择左侧消息查看详情",
+      paneEmptySub: "点选任意消息，右侧立即显示完整内容",
+      paneMissing: "该消息不在当前筛选结果中",
+      paneAria: "消息详情",
+      paneClose: "清除选中"
+    },
+    "zh-TW": {
+      paneEmpty: "選擇左側訊息查看詳情",
+      paneEmptySub: "點選任一訊息，右側立即顯示完整內容",
+      paneMissing: "此訊息不在目前篩選結果中",
+      paneAria: "訊息詳情",
+      paneClose: "清除選取"
+    },
+    en: {
+      paneEmpty: "Select a message to see details",
+      paneEmptySub: "Pick any message on the left; the full content appears here",
+      paneMissing: "This message is not in the current filter results",
+      paneAria: "Message details",
+      paneClose: "Clear selection"
+    },
+    ja: {
+      paneEmpty: "左のメッセージを選ぶと詳細を表示します",
+      paneEmptySub: "メッセージを選ぶと、右側に全文が表示されます",
+      paneMissing: "このメッセージは現在の絞り込み結果に含まれていません",
+      paneAria: "メッセージの詳細",
+      paneClose: "選択を解除"
+    },
+    ko: {
+      paneEmpty: "왼쪽에서 메시지를 선택하면 상세 정보가 표시됩니다",
+      paneEmptySub: "메시지를 선택하면 오른쪽에 전체 내용이 나타납니다",
+      paneMissing: "이 메시지는 현재 필터 결과에 없습니다",
+      paneAria: "메시지 상세",
+      paneClose: "선택 해제"
+    },
+    es: {
+      paneEmpty: "Selecciona un mensaje para ver los detalles",
+      paneEmptySub: "Elige cualquier mensaje de la izquierda; el contenido completo aparece aquí",
+      paneMissing: "Este mensaje no está en los resultados del filtro actual",
+      paneAria: "Detalles del mensaje",
+      paneClose: "Quitar selección"
+    },
+    fr: {
+      paneEmpty: "Sélectionnez un message pour voir les détails",
+      paneEmptySub: "Choisissez un message à gauche ; le contenu complet s'affiche ici",
+      paneMissing: "Ce message ne figure pas dans le filtre actuel",
+      paneAria: "Détails du message",
+      paneClose: "Effacer la sélection"
+    },
+    de: {
+      paneEmpty: "Nachricht auswählen, um Details zu sehen",
+      paneEmptySub: "Beliebige Nachricht links wählen – der volle Text erscheint hier",
+      paneMissing: "Diese Nachricht ist nicht im aktuellen Filterergebnis",
+      paneAria: "Nachrichtendetails",
+      paneClose: "Auswahl aufheben"
+    },
+    "pt-BR": {
+      paneEmpty: "Selecione uma mensagem para ver os detalhes",
+      paneEmptySub: "Escolha qualquer mensagem à esquerda; o conteúdo completo aparece aqui",
+      paneMissing: "Esta mensagem não está nos resultados do filtro atual",
+      paneAria: "Detalhes da mensagem",
+      paneClose: "Limpar seleção"
+    }
+  };
+  (function () {
+    for (var _pl in PANE_I18N) {
+      if (!I18N[_pl]) I18N[_pl] = {};
+      for (var _pk in PANE_I18N[_pl]) I18N[_pl][_pk] = PANE_I18N[_pl][_pk];
+    }
+  })();
+  /* UX-08 统一弹窗文案（九语种）：输入校验、提交中、失败重试、设备/标签/令牌标题 */
+  var DSP_I18N = {
+    "zh-CN": {
+      dspRequired: "请填写内容", dspFail: "保存失败，请重试", dspSaving: "保存中…",
+      dspTooLong: "最多 {n} 个字符", dspPickRange: "请输入列表中的序号",
+      dspRenameTitle: "重命名设备", dspMergeTitle: "合并到其他设备",
+      dspLabelTitle: "设置号码标签", dspTokTitle: "重命名接入令牌",
+      dspLabelEmpty: "留空表示清除该号码的标签"
+    },
+    "zh-TW": {
+      dspRequired: "請填寫內容", dspFail: "儲存失敗，請重試", dspSaving: "儲存中…",
+      dspTooLong: "最多 {n} 個字元", dspPickRange: "請輸入清單中的序號",
+      dspRenameTitle: "重新命名裝置", dspMergeTitle: "合併到其他裝置",
+      dspLabelTitle: "設定號碼標籤", dspTokTitle: "重新命名存取權杖",
+      dspLabelEmpty: "留空表示清除該號碼的標籤"
+    },
+    en: {
+      dspRequired: "Please enter a value", dspFail: "Could not save. Try again.", dspSaving: "Saving…",
+      dspTooLong: "At most {n} characters", dspPickRange: "Enter a number from the list",
+      dspRenameTitle: "Rename device", dspMergeTitle: "Merge into another device",
+      dspLabelTitle: "Set number label", dspTokTitle: "Rename access token",
+      dspLabelEmpty: "Leave empty to clear the label for this number"
+    },
+    ja: {
+      dspRequired: "入力してください", dspFail: "保存に失敗しました。再試行してください", dspSaving: "保存中…",
+      dspTooLong: "{n} 文字以内で入力してください", dspPickRange: "一覧の番号を入力してください",
+      dspRenameTitle: "デバイス名を変更", dspMergeTitle: "他のデバイスに統合",
+      dspLabelTitle: "番号ラベルを設定", dspTokTitle: "アクセストークン名を変更",
+      dspLabelEmpty: "空欄にするとこの番号のラベルを削除します"
+    },
+    ko: {
+      dspRequired: "내용을 입력하세요", dspFail: "저장하지 못했습니다. 다시 시도하세요.", dspSaving: "저장 중…",
+      dspTooLong: "최대 {n}자까지 입력할 수 있습니다", dspPickRange: "목록의 번호를 입력하세요",
+      dspRenameTitle: "기기 이름 변경", dspMergeTitle: "다른 기기로 병합",
+      dspLabelTitle: "번호 라벨 설정", dspTokTitle: "액세스 토큰 이름 변경",
+      dspLabelEmpty: "비워 두면 이 번호의 라벨이 삭제됩니다"
+    },
+    es: {
+      dspRequired: "Introduce un valor", dspFail: "No se pudo guardar. Inténtalo de nuevo.", dspSaving: "Guardando…",
+      dspTooLong: "Máximo {n} caracteres", dspPickRange: "Introduce un número de la lista",
+      dspRenameTitle: "Renombrar dispositivo", dspMergeTitle: "Fusionar con otro dispositivo",
+      dspLabelTitle: "Etiqueta del número", dspTokTitle: "Renombrar token de acceso",
+      dspLabelEmpty: "Déjalo vacío para borrar la etiqueta de este número"
+    },
+    fr: {
+      dspRequired: "Saisissez une valeur", dspFail: "Échec de l'enregistrement. Réessayez.", dspSaving: "Enregistrement…",
+      dspTooLong: "{n} caractères maximum", dspPickRange: "Saisissez un numéro de la liste",
+      dspRenameTitle: "Renommer l'appareil", dspMergeTitle: "Fusionner avec un autre appareil",
+      dspLabelTitle: "Libellé du numéro", dspTokTitle: "Renommer le jeton d'accès",
+      dspLabelEmpty: "Laisser vide pour effacer le libellé de ce numéro"
+    },
+    de: {
+      dspRequired: "Bitte einen Wert eingeben", dspFail: "Speichern fehlgeschlagen. Bitte erneut versuchen.", dspSaving: "Speichern…",
+      dspTooLong: "Maximal {n} Zeichen", dspPickRange: "Nummer aus der Liste eingeben",
+      dspRenameTitle: "Gerät umbenennen", dspMergeTitle: "In anderes Gerät zusammenführen",
+      dspLabelTitle: "Nummernlabel setzen", dspTokTitle: "Zugriffstoken umbenennen",
+      dspLabelEmpty: "Leer lassen, um das Label dieser Nummer zu entfernen"
+    },
+    "pt-BR": {
+      dspRequired: "Informe um valor", dspFail: "Não foi possível salvar. Tente novamente.", dspSaving: "Salvando…",
+      dspTooLong: "Máximo de {n} caracteres", dspPickRange: "Informe um número da lista",
+      dspRenameTitle: "Renomear dispositivo", dspMergeTitle: "Mesclar com outro dispositivo",
+      dspLabelTitle: "Rótulo do número", dspTokTitle: "Renomear token de acesso",
+      dspLabelEmpty: "Deixe vazio para remover o rótulo deste número"
+    }
+  };
+  (function () {
+    for (var _dl in DSP_I18N) {
+      if (!I18N[_dl]) I18N[_dl] = {};
+      for (var _dk in DSP_I18N[_dl]) I18N[_dl][_dk] = DSP_I18N[_dl][_dk];
+    }
+  })();
+  /* Toast 反馈文案（九语种）：仅关闭按钮需要可读标签，正文由各调用点自带的 i18n 键提供 */
+  var TOAST_I18N = {
+    "zh-CN": { toastClose: "关闭" },
+    "zh-TW": { toastClose: "關閉" },
+    en: { toastClose: "Close" },
+    ja: { toastClose: "閉じる" },
+    ko: { toastClose: "닫기" },
+    es: { toastClose: "Cerrar" },
+    fr: { toastClose: "Fermer" },
+    de: { toastClose: "Schließen" },
+    "pt-BR": { toastClose: "Fechar" }
+  };
+  (function () {
+    for (var _tl in TOAST_I18N) {
+      if (!I18N[_tl]) I18N[_tl] = {};
+      for (var _tk in TOAST_I18N[_tl]) I18N[_tl][_tk] = TOAST_I18N[_tl][_tk];
+    }
+  })();
   /* 仪表盘新版界面文案（九语种） */
   var V2_I18N = {
     "zh-CN": {
       pageSub: "一驿过一驿，驿骑如星流",
       listTitle: "短信列表", refresh: "刷新", settingsOverview: "设置概览", openSettings: "打开设置中心",
-      quickOverview: "快捷概览", viewStats: "查看统计", selectHint: "右键或长按消息可多选",
+      quickOverview: "快捷概览", viewStats: "查看统计", selectHint: "点工具栏「多选」、右键或长按消息可多选", selModeBtn: "多选", selModeTip: "进入或退出多选模式", selBarAria: "批量操作",
       selAllList: "选择当前列表", tagVerify: "验证码", allDevices: "全部设备",
       scLanguage: "界面语言", scLang: "语言", scLangHelp: "语言偏好保存在当前浏览器，保存后整页重新加载并应用；不影响其他浏览器。",
       scPageSize: "分页设置", scPerPage: "每页条数", scPageSizeHelp: "每页条数保存在当前浏览器，保存后立即生效。",
@@ -4939,7 +5782,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     "zh-TW": {
       pageSub: "一驛過一驛，驛騎如星流",
       listTitle: "簡訊列表", refresh: "重新整理", settingsOverview: "設定概覽", openSettings: "開啟設定中心",
-      quickOverview: "快捷概覽", viewStats: "查看統計", selectHint: "右鍵或長按訊息可多選",
+      quickOverview: "快捷概覽", viewStats: "查看統計", selectHint: "點工具列「多選」、右鍵或長按訊息可多選", selModeBtn: "多選", selModeTip: "進入或退出多選模式", selBarAria: "批次操作",
       selAllList: "選擇目前清單", tagVerify: "驗證碼", allDevices: "全部裝置",
       scLanguage: "介面語言", scLang: "語言", scLangHelp: "語言偏好儲存在目前瀏覽器，儲存後整頁重新載入並套用；不影響其他瀏覽器。",
       scPageSize: "分頁設定", scPerPage: "每頁筆數", scPageSizeHelp: "每頁筆數儲存在目前瀏覽器，儲存後立即生效。",
@@ -4965,7 +5808,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     en: {
       pageSub: "From post to post, like shooting stars.",
       listTitle: "Messages", refresh: "Refresh", settingsOverview: "Settings overview", openSettings: "Open settings",
-      quickOverview: "Quick overview", viewStats: "View stats", selectHint: "Right-click or long-press a message to multi-select",
+      quickOverview: "Quick overview", viewStats: "View stats", selectHint: "Use Multi-select in the toolbar, or right-click / long-press a message", selModeBtn: "Multi-select", selModeTip: "Enter or exit multi-select", selBarAria: "Batch actions",
       selAllList: "Select current list", tagVerify: "Verification code", allDevices: "All devices",
       scLanguage: "Language", scLang: "Language", scLangHelp: "The language preference is stored in this browser and applied after saving with a full reload. Other browsers are unaffected.",
       scPageSize: "Pagination", scPerPage: "Items per page", scPageSizeHelp: "Page size is stored in this browser and takes effect immediately after saving.",
@@ -4991,7 +5834,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     ja: {
       pageSub: "駅から駅へ、星のように駆け流れる",
       listTitle: "メッセージ一覧", refresh: "更新", settingsOverview: "設定の概要", openSettings: "設定センターを開く",
-      quickOverview: "クイック概要", viewStats: "統計を見る", selectHint: "右クリックまたは長押しで複数選択",
+      quickOverview: "クイック概要", viewStats: "統計を見る", selectHint: "ツールバーの「複数選択」、右クリックまたは長押しで複数選択", selModeBtn: "複数選択", selModeTip: "複数選択モードの開始／終了", selBarAria: "一括操作",
       selAllList: "現在の一覧を選択", tagVerify: "認証コード", allDevices: "すべての端末",
       scLanguage: "表示言語", scLang: "言語", scLangHelp: "言語設定はこのブラウザに保存され、保存後にページを再読み込みして適用されます。他のブラウザには影響しません。",
       scPageSize: "ページ設定", scPerPage: "1ページの件数", scPageSizeHelp: "1ページの件数はこのブラウザに保存され、保存後すぐに反映されます。",
@@ -5017,7 +5860,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     ko: {
       pageSub: "역에서 역으로, 별처럼 흐르는 발걸음",
       listTitle: "메시지 목록", refresh: "새로고침", settingsOverview: "설정 개요", openSettings: "설정 센터 열기",
-      quickOverview: "빠른 개요", viewStats: "통계 보기", selectHint: "마우스 오른쪽 버튼 또는 길게 눌러 여러 개 선택",
+      quickOverview: "빠른 개요", viewStats: "통계 보기", selectHint: "도구 모음의 '다중 선택'을 누르거나 마우스 오른쪽 버튼·길게 눌러 여러 개 선택", selModeBtn: "다중 선택", selModeTip: "다중 선택 모드 시작/종료", selBarAria: "일괄 작업",
       selAllList: "현재 목록 선택", tagVerify: "인증 코드", allDevices: "모든 기기",
       scLanguage: "표시 언어", scLang: "언어", scLangHelp: "언어 설정은 이 브라우저에 저장되며 저장 후 페이지가 새로고침되어 적용됩니다. 다른 브라우저에는 영향이 없습니다.",
       scPageSize: "페이지 설정", scPerPage: "페이지당 항목 수", scPageSizeHelp: "페이지당 항목 수는 이 브라우저에 저장되며 저장 후 즉시 적용됩니다.",
@@ -5043,7 +5886,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     es: {
       pageSub: "De posta en posta, como estrellas fugaces.",
       listTitle: "Mensajes", refresh: "Actualizar", settingsOverview: "Resumen de ajustes", openSettings: "Abrir ajustes",
-      quickOverview: "Resumen rápido", viewStats: "Ver estadísticas", selectHint: "Clic derecho o pulsación larga para seleccionar varios",
+      quickOverview: "Resumen rápido", viewStats: "Ver estadísticas", selectHint: "Usa «Multiselección» en la barra, o clic derecho / pulsación larga", selModeBtn: "Multiselección", selModeTip: "Entrar o salir del modo multiselección", selBarAria: "Acciones en lote",
       selAllList: "Seleccionar lista actual", tagVerify: "Código de verificación", allDevices: "Todos los dispositivos",
       scLanguage: "Idioma", scLang: "Idioma", scLangHelp: "La preferencia de idioma se guarda en este navegador y se aplica tras guardar con una recarga completa. Otros navegadores no se ven afectados.",
       scPageSize: "Paginación", scPerPage: "Elementos por página", scPageSizeHelp: "El tamaño de página se guarda en este navegador y se aplica de inmediato al guardar.",
@@ -5069,7 +5912,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     fr: {
       pageSub: "De relais en relais, comme un torrent d'étoiles.",
       listTitle: "Messages", refresh: "Actualiser", settingsOverview: "Aperçu des réglages", openSettings: "Ouvrir les réglages",
-      quickOverview: "Aperçu rapide", viewStats: "Voir les statistiques", selectHint: "Clic droit ou appui long pour sélectionner plusieurs messages",
+      quickOverview: "Aperçu rapide", viewStats: "Voir les statistiques", selectHint: "Utilisez « Sélection multiple » dans la barre, ou clic droit / appui long", selModeBtn: "Sélection multiple", selModeTip: "Entrer ou quitter la sélection multiple", selBarAria: "Actions groupées",
       selAllList: "Sélectionner la liste actuelle", tagVerify: "Code de vérification", allDevices: "Tous les appareils",
       scLanguage: "Langue", scLang: "Langue", scLangHelp: "La langue est enregistrée dans ce navigateur et appliquée après un rechargement complet. Les autres navigateurs ne sont pas affectés.",
       scPageSize: "Pagination", scPerPage: "Éléments par page", scPageSizeHelp: "La taille de page est enregistrée dans ce navigateur et s'applique immédiatement après l'enregistrement.",
@@ -5095,7 +5938,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     de: {
       pageSub: "Von Station zu Station, wie ein Sternenstrom.",
       listTitle: "Nachrichten", refresh: "Aktualisieren", settingsOverview: "Einstellungsübersicht", openSettings: "Einstellungen öffnen",
-      quickOverview: "Kurzübersicht", viewStats: "Statistik ansehen", selectHint: "Rechtsklick oder langes Drücken für Mehrfachauswahl",
+      quickOverview: "Kurzübersicht", viewStats: "Statistik ansehen", selectHint: "„Mehrfachauswahl“ in der Werkzeugleiste oder Rechtsklick / langes Drücken", selModeBtn: "Mehrfachauswahl", selModeTip: "Mehrfachauswahl starten oder beenden", selBarAria: "Sammelaktionen",
       selAllList: "Aktuelle Liste auswählen", tagVerify: "Bestätigungscode", allDevices: "Alle Geräte",
       scLanguage: "Sprache", scLang: "Sprache", scLangHelp: "Die Sprache wird in diesem Browser gespeichert und nach dem Speichern mit vollständigem Neuladen angewendet. Andere Browser sind nicht betroffen.",
       scPageSize: "Seitengröße", scPerPage: "Einträge pro Seite", scPageSizeHelp: "Die Seitengröße wird in diesem Browser gespeichert und nach dem Speichern sofort angewendet.",
@@ -5121,7 +5964,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     "pt-BR": {
       pageSub: "De estação em estação, como estrelas cadentes.",
       listTitle: "Mensagens", refresh: "Atualizar", settingsOverview: "Visão dos ajustes", openSettings: "Abrir ajustes",
-      quickOverview: "Visão rápida", viewStats: "Ver estatísticas", selectHint: "Clique com o botão direito ou toque e segure para selecionar vários",
+      quickOverview: "Visão rápida", viewStats: "Ver estatísticas", selectHint: "Use «Seleção múltipla» na barra, ou clique direito / toque e segure", selModeBtn: "Seleção múltipla", selModeTip: "Entrar ou sair da seleção múltipla", selBarAria: "Ações em lote",
       selAllList: "Selecionar lista atual", tagVerify: "Código de verificação", allDevices: "Todos os dispositivos",
       scLanguage: "Idioma", scLang: "Idioma", scLangHelp: "A preferência de idioma é salva neste navegador e aplicada após salvar com recarregamento completo. Outros navegadores não são afetados.",
       scPageSize: "Paginação", scPerPage: "Itens por página", scPageSizeHelp: "O tamanho da página é salvo neste navegador e aplicado imediatamente após salvar.",
@@ -5149,6 +5992,196 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     for (var _v2l in V2_I18N) {
       if (!I18N[_v2l]) I18N[_v2l] = {};
       for (var _v2k in V2_I18N[_v2l]) I18N[_v2l][_v2k] = V2_I18N[_v2l][_v2k];
+    }
+  })();
+  /* 设置中心 v2 文案（九语种）：分区导航短标签、分区标题与作用域说明。
+     独立成表合并，避免改动既有三张字典的结构。 */
+  var SC2_I18N = {
+    "zh-CN": {
+      scUiGroup: "界面", scDndGroup: "免打扰", scDndFrom: "开始", scDndTo: "结束",
+      scNavDisplay: "界面", scNavMessages: "消息", scNavSession: "登录",
+      scNavNotify: "通知", scNavBiz: "数据", scNavSecurity: "安全",
+      scTabDisplay: "界面与显示", scTabMessages: "消息与提醒",
+      scSecDisplayHelp: "语言、分页与首页显示都只保存在当前浏览器，不会同步到账号或其他设备。",
+      scSecMessagesHelp: "这些开关只影响当前浏览器的新消息提醒，与服务器的通知渠道互不影响。",
+      scSecSessionHelp: "本浏览器可单独设置登录时长；未单独设置时使用全局默认。",
+      scSecNotifyHelp: "通知规则与推送目标保存在服务器，对本部署的所有浏览器生效。",
+      scSecBizHelp: "保留与归属地属服务端配置，修改后对全部设备生效。",
+      scSecSecurityHelp: "接入令牌与登录防护属服务端安全配置。",
+      scHomeStatsScope: "仅保存在当前浏览器，不会同步到其他浏览器或设备。",
+      scCredOn: "已配置", scCredOff: "未配置",
+      scClearCred: "清除已保存的凭据",
+      scClearWarn: "清除后该渠道需重新填写凭据才能发送。",
+      scRetryLoad: "重试", scSaving: "正在保存…", scSavedOk: "已保存",
+      scChGridTitle: "支持的渠道",
+      scChGridHelp: "点「+」可直接为该渠道添加推送目标；灰色表示尚未配置。",
+      scConfiguredN: "已配置 {n} 个"
+    },
+    "zh-TW": {
+      scUiGroup: "介面", scDndGroup: "免打擾", scDndFrom: "開始", scDndTo: "結束",
+      scNavDisplay: "介面", scNavMessages: "訊息", scNavSession: "登入",
+      scNavNotify: "通知", scNavBiz: "資料", scNavSecurity: "安全",
+      scTabDisplay: "介面與顯示", scTabMessages: "訊息與提醒",
+      scSecDisplayHelp: "語言、每頁筆數與首頁顯示只儲存在目前瀏覽器，不會同步到其他瀏覽器或裝置。",
+      scSecMessagesHelp: "這些開關只影響目前瀏覽器的新訊息提醒，與伺服器通知管道互不影響。",
+      scSecSessionHelp: "本瀏覽器可單獨設定登入時長；未設定時使用全域預設。",
+      scSecNotifyHelp: "通知規則與推送目標儲存在伺服器，對此部署的所有瀏覽器生效。",
+      scSecBizHelp: "保留與號碼歸屬地屬伺服器設定，修改後對所有裝置生效。",
+      scSecSecurityHelp: "存取權杖與登入防護屬伺服器安全設定。",
+      scHomeStatsScope: "僅儲存在目前瀏覽器，不會同步到其他瀏覽器或裝置。",
+      scCredOn: "已設定", scCredOff: "未設定",
+      scClearCred: "清除已儲存的憑據",
+      scClearWarn: "清除後此渠道需重新填寫憑據才能傳送。",
+      scRetryLoad: "重試", scSaving: "儲存中…", scSavedOk: "已儲存",
+      scChGridTitle: "支援的管道",
+      scChGridHelp: "點「+」即可為該管道新增推送目標；灰色表示尚未設定。",
+      scConfiguredN: "已設定 {n} 個"
+    },
+    "en": {
+      scUiGroup: "Interface", scDndGroup: "Quiet hours", scDndFrom: "Start", scDndTo: "End",
+      scNavDisplay: "Display", scNavMessages: "Messages", scNavSession: "Sign-in",
+      scNavNotify: "Alerts", scNavBiz: "Data", scNavSecurity: "Security",
+      scTabDisplay: "Display & layout", scTabMessages: "Messages & alerts",
+      scSecDisplayHelp: "Language, page size and home display are stored in this browser only — they never sync to other browsers or devices.",
+      scSecMessagesHelp: "These toggles only affect new-message alerts in this browser; server notification channels are unaffected.",
+      scSecSessionHelp: "This browser can override the session length; otherwise the global default applies.",
+      scSecNotifyHelp: "Notification rules and push targets are stored on the server and apply to every browser using this deployment.",
+      scSecBizHelp: "Retention and caller area are server-side settings that apply to all devices.",
+      scSecSecurityHelp: "Access tokens and sign-in protection are server-side security settings.",
+      scHomeStatsScope: "Stored in this browser only. It does not sync to other browsers or devices.",
+      scCredOn: "Configured", scCredOff: "Not configured",
+      scClearCred: "Clear saved credential",
+      scClearWarn: "After clearing, this channel needs a new credential before it can send.",
+      scRetryLoad: "Retry", scSaving: "Saving…", scSavedOk: "Saved",
+      scChGridTitle: "Supported channels",
+      scChGridHelp: "Tap “+” to add a push target for that channel; grey means not configured yet.",
+      scConfiguredN: "{n} configured"
+    },
+    "ja": {
+      scUiGroup: "表示", scDndGroup: "通知休止", scDndFrom: "開始", scDndTo: "終了",
+      scNavDisplay: "表示", scNavMessages: "メッセージ", scNavSession: "ログイン",
+      scNavNotify: "通知", scNavBiz: "データ", scNavSecurity: "セキュリティ",
+      scTabDisplay: "表示とレイアウト", scTabMessages: "メッセージと通知",
+      scSecDisplayHelp: "言語・ページ件数・ホーム表示はこのブラウザにのみ保存され、他のブラウザや端末とは同期されません。",
+      scSecMessagesHelp: "これらのスイッチはこのブラウザの新着通知にのみ影響し、サーバー側の通知チャネルには影響しません。",
+      scSecSessionHelp: "このブラウザだけログイン有効期間を変更できます。未設定の場合は全体の既定値を使用します。",
+      scSecNotifyHelp: "通知ルールとプッシュ先はサーバーに保存され、このデプロイのすべてのブラウザに適用されます。",
+      scSecBizHelp: "保存期間と発信地域はサーバー側の設定で、すべての端末に適用されます。",
+      scSecSecurityHelp: "アクセストークンとログイン保護はサーバー側のセキュリティ設定です。",
+      scHomeStatsScope: "このブラウザにのみ保存され、他のブラウザや端末とは同期されません。",
+      scCredOn: "設定済み", scCredOff: "未設定",
+      scClearCred: "保存済みの認証情報を削除",
+      scClearWarn: "削除後は再入力するまで、このチャネルから送信できません。",
+      scRetryLoad: "再試行", scSaving: "保存中…", scSavedOk: "保存しました",
+      scChGridTitle: "対応チャネル",
+      scChGridHelp: "「+」でそのチャネルのプッシュ先を追加します。グレーは未設定です。",
+      scConfiguredN: "設定済み {n} 件"
+    },
+    "ko": {
+      scUiGroup: "화면", scDndGroup: "방해 금지", scDndFrom: "시작", scDndTo: "종료",
+      scNavDisplay: "화면", scNavMessages: "메시지", scNavSession: "로그인",
+      scNavNotify: "알림", scNavBiz: "데이터", scNavSecurity: "보안",
+      scTabDisplay: "화면 및 표시", scTabMessages: "메시지 및 알림",
+      scSecDisplayHelp: "언어, 페이지 수, 홈 표시는 이 브라우저에만 저장되며 다른 브라우저나 기기와 동기화되지 않습니다.",
+      scSecMessagesHelp: "이 스위치는 이 브라우저의 새 메시지 알림에만 적용되며 서버 알림 채널에는 영향을 주지 않습니다.",
+      scSecSessionHelp: "이 브라우저에서만 로그인 유지 시간을 설정할 수 있으며, 설정하지 않으면 전체 기본값을 사용합니다.",
+      scSecNotifyHelp: "알림 규칙과 푸시 대상은 서버에 저장되며 이 배포의 모든 브라우저에 적용됩니다.",
+      scSecBizHelp: "보관 기간과 발신 지역은 서버 설정으로 모든 기기에 적용됩니다.",
+      scSecSecurityHelp: "액세스 토큰과 로그인 보호는 서버 보안 설정입니다.",
+      scHomeStatsScope: "이 브라우저에만 저장되며 다른 브라우저나 기기와 동기화되지 않습니다.",
+      scCredOn: "설정됨", scCredOff: "설정 안 됨",
+      scClearCred: "저장된 자격 증명 삭제",
+      scClearWarn: "삭제 후에는 자격 증명을 다시 입력해야 전송할 수 있습니다.",
+      scRetryLoad: "다시 시도", scSaving: "저장 중…", scSavedOk: "저장됨",
+      scChGridTitle: "지원 채널",
+      scChGridHelp: "「+」를 눌러 해당 채널의 푸시 대상을 추가하세요. 회색은 미설정입니다.",
+      scConfiguredN: "{n}개 설정됨"
+    },
+    "es": {
+      scUiGroup: "Interfaz", scDndGroup: "Horario silencioso", scDndFrom: "Inicio", scDndTo: "Fin",
+      scNavDisplay: "Pantalla", scNavMessages: "Mensajes", scNavSession: "Acceso",
+      scNavNotify: "Avisos", scNavBiz: "Datos", scNavSecurity: "Seguridad",
+      scTabDisplay: "Pantalla y diseño", scTabMessages: "Mensajes y avisos",
+      scSecDisplayHelp: "El idioma, las filas por página y la vista de inicio se guardan solo en este navegador; no se sincronizan con otros navegadores ni dispositivos.",
+      scSecMessagesHelp: "Estos interruptores solo afectan a los avisos de mensajes nuevos en este navegador; los canales del servidor no cambian.",
+      scSecSessionHelp: "Este navegador puede definir su propia duración de sesión; si no, se usa el valor global.",
+      scSecNotifyHelp: "Las reglas y los destinos de envío se guardan en el servidor y afectan a todos los navegadores de esta instalación.",
+      scSecBizHelp: "La retención y el origen del número son ajustes del servidor y afectan a todos los dispositivos.",
+      scSecSecurityHelp: "Los tokens de acceso y la protección de acceso son ajustes de seguridad del servidor.",
+      scHomeStatsScope: "Se guarda solo en este navegador; no se sincroniza con otros navegadores ni dispositivos.",
+      scCredOn: "Configurado", scCredOff: "Sin configurar",
+      scClearCred: "Borrar credencial guardada",
+      scClearWarn: "Tras borrarla, este canal necesitará una nueva credencial para enviar.",
+      scRetryLoad: "Reintentar", scSaving: "Guardando…", scSavedOk: "Guardado",
+      scChGridTitle: "Canales compatibles",
+      scChGridHelp: "Pulsa «+» para añadir un destino a ese canal; en gris significa sin configurar.",
+      scConfiguredN: "{n} configurados"
+    },
+    "fr": {
+      scUiGroup: "Interface", scDndGroup: "Heures silencieuses", scDndFrom: "Début", scDndTo: "Fin",
+      scNavDisplay: "Affichage", scNavMessages: "Messages", scNavSession: "Connexion",
+      scNavNotify: "Alertes", scNavBiz: "Données", scNavSecurity: "Sécurité",
+      scTabDisplay: "Affichage et mise en page", scTabMessages: "Messages et alertes",
+      scSecDisplayHelp: "La langue, le nombre de lignes et l'affichage de l'accueil sont stockés dans ce navigateur uniquement ; aucune synchronisation avec d'autres navigateurs ou appareils.",
+      scSecMessagesHelp: "Ces interrupteurs n'affectent que les alertes de nouveaux messages dans ce navigateur ; les canaux du serveur ne changent pas.",
+      scSecSessionHelp: "Ce navigateur peut définir sa propre durée de session ; sinon la valeur globale s'applique.",
+      scSecNotifyHelp: "Les règles et les cibles d'envoi sont stockées sur le serveur et s'appliquent à tous les navigateurs de ce déploiement.",
+      scSecBizHelp: "La conservation et l'origine du numéro sont des réglages serveur appliqués à tous les appareils.",
+      scSecSecurityHelp: "Les jetons d'accès et la protection de connexion sont des réglages de sécurité serveur.",
+      scHomeStatsScope: "Stocké dans ce navigateur uniquement ; aucune synchronisation avec d'autres navigateurs ou appareils.",
+      scCredOn: "Configuré", scCredOff: "Non configuré",
+      scClearCred: "Effacer l'identifiant enregistré",
+      scClearWarn: "Après effacement, ce canal devra recevoir un nouvel identifiant pour envoyer.",
+      scRetryLoad: "Réessayer", scSaving: "Enregistrement…", scSavedOk: "Enregistré",
+      scChGridTitle: "Canaux pris en charge",
+      scChGridHelp: "Touchez « + » pour ajouter une cible à ce canal ; en gris : non configuré.",
+      scConfiguredN: "{n} configurés"
+    },
+    "de": {
+      scUiGroup: "Oberfläche", scDndGroup: "Ruhezeit", scDndFrom: "Von", scDndTo: "Bis",
+      scNavDisplay: "Anzeige", scNavMessages: "Meldungen", scNavSession: "Anmeldung",
+      scNavNotify: "Hinweise", scNavBiz: "Daten", scNavSecurity: "Sicherheit",
+      scTabDisplay: "Anzeige & Layout", scTabMessages: "Meldungen & Hinweise",
+      scSecDisplayHelp: "Sprache, Zeilen pro Seite und Startansicht werden nur in diesem Browser gespeichert – keine Synchronisierung mit anderen Browsern oder Geräten.",
+      scSecMessagesHelp: "Diese Schalter betreffen nur Hinweise auf neue Nachrichten in diesem Browser; die Serverkanäle bleiben unverändert.",
+      scSecSessionHelp: "Dieser Browser kann eine eigene Sitzungsdauer festlegen; sonst gilt der globale Standard.",
+      scSecNotifyHelp: "Regeln und Push-Ziele liegen auf dem Server und gelten für alle Browser dieser Installation.",
+      scSecBizHelp: "Aufbewahrung und Nummernherkunft sind Servereinstellungen und gelten für alle Geräte.",
+      scSecSecurityHelp: "Zugriffstoken und Anmeldeschutz sind serverseitige Sicherheitseinstellungen.",
+      scHomeStatsScope: "Nur in diesem Browser gespeichert – keine Synchronisierung mit anderen Browsern oder Geräten.",
+      scCredOn: "Konfiguriert", scCredOff: "Nicht konfiguriert",
+      scClearCred: "Gespeicherte Zugangsdaten löschen",
+      scClearWarn: "Nach dem Löschen kann dieser Kanal erst nach erneuter Eingabe senden.",
+      scRetryLoad: "Erneut versuchen", scSaving: "Wird gespeichert…", scSavedOk: "Gespeichert",
+      scChGridTitle: "Unterstützte Kanäle",
+      scChGridHelp: "Mit „+“ ein Push-Ziel für diesen Kanal hinzufügen; grau = nicht konfiguriert.",
+      scConfiguredN: "{n} konfiguriert"
+    },
+    "pt-BR": {
+      scUiGroup: "Interface", scDndGroup: "Horário silencioso", scDndFrom: "Início", scDndTo: "Fim",
+      scNavDisplay: "Tela", scNavMessages: "Mensagens", scNavSession: "Acesso",
+      scNavNotify: "Avisos", scNavBiz: "Dados", scNavSecurity: "Segurança",
+      scTabDisplay: "Tela e layout", scTabMessages: "Mensagens e avisos",
+      scSecDisplayHelp: "Idioma, itens por página e exibição da página inicial ficam apenas neste navegador; não são sincronizados com outros navegadores ou dispositivos.",
+      scSecMessagesHelp: "Estes interruptores afetam apenas os avisos de novas mensagens neste navegador; os canais do servidor não mudam.",
+      scSecSessionHelp: "Este navegador pode definir a própria duração de sessão; caso contrário, vale o padrão global.",
+      scSecNotifyHelp: "As regras e os destinos de envio ficam no servidor e valem para todos os navegadores desta instalação.",
+      scSecBizHelp: "A retenção e a origem do número são ajustes do servidor e valem para todos os dispositivos.",
+      scSecSecurityHelp: "Tokens de acesso e proteção de login são ajustes de segurança do servidor.",
+      scHomeStatsScope: "Salvo apenas neste navegador; não sincroniza com outros navegadores ou dispositivos.",
+      scCredOn: "Configurado", scCredOff: "Não configurado",
+      scClearCred: "Apagar credencial salva",
+      scClearWarn: "Após apagar, este canal precisará de nova credencial para enviar.",
+      scRetryLoad: "Tentar novamente", scSaving: "Salvando…", scSavedOk: "Salvo",
+      scChGridTitle: "Canais compatíveis",
+      scChGridHelp: "Toque em «+» para adicionar um destino a esse canal; cinza significa não configurado.",
+      scConfiguredN: "{n} configurados"
+    }
+  };
+  (function () {
+    for (var _s2l in SC2_I18N) {
+      if (!I18N[_s2l]) I18N[_s2l] = {};
+      for (var _s2k in SC2_I18N[_s2l]) I18N[_s2l][_s2k] = SC2_I18N[_s2l][_s2k];
     }
   })();
   /* 时长单位（九语种）：把分钟数转成易读文案，避免页面出现 3600 之类的技术数字 */
@@ -5734,6 +6767,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     each("data-i18n-aria", "data-i18n-aria", function (el, v) { el.setAttribute("aria-label", v); });
     var tb = $("themebtn");
     if (tb) tb.setAttribute("title", T("themeTip"));
+    /* UX-08：空态文案按当前状态重算，避免切换语言后 missing/fail 被冲成默认提示 */
+    if (typeof panEmptyRender === "function") panEmptyRender();
   }
   /* 每页条数选项（本地化文案）；设置中心与分页器共用 */
   function perPageOptions() {
@@ -5953,8 +6988,9 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   }
   /* 归属地：仅对 11 位手机号按需查后端 /api/phone；前端按号码缓存，最多 3 并发 */
   var areaCache = {};
+  /* 号码归属地（可选外部接口）：卡片已不展示，改为在详情弹层内补齐，避免每条消息都触发查询 */
   function fillAreas() {
-    var els = $("list").querySelectorAll(".area[data-num]");
+    var els = document.querySelectorAll("#list .area[data-num], #modalbody .area[data-num]");
     var todo = {}, i;
     for (i = 0; i < els.length; i++) {
       var n = els[i].getAttribute("data-num");
@@ -5963,7 +6999,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     }
     var nums = Object.keys(todo), running = 0, idx = 0;
     function paint(num) {
-      var es = $("list").querySelectorAll('.area[data-num="' + num + '"]');
+      var es = document.querySelectorAll('#list .area[data-num="' + num + '"], #modalbody .area[data-num="' + num + '"]');
       for (var j = 0; j < es.length; j++) es[j].textContent = areaCache[num] ? " · " + areaCache[num] : "";
     }
     function pump() {
@@ -5995,8 +7031,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   /* 复制：Clipboard API 优先，失败回退 execCommand；两者都失败必须明确报错，绝不假报成功 */
   function doCopy(text, btn) {
     var rely = function (ok) {
-      if (!ok) { toast(T("copyFail")); return; }
-      toast(T("copied"));
+      if (!ok) { toast(T("copyFail"), { type: "error" }); return; }
+      toast(T("copied"), { type: "success" });
       if (!btn) return;
       var old = btn.textContent;
       btn.textContent = T("copied");
@@ -6019,7 +7055,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     chip.setAttribute("data-busy", "1");
     chip.innerHTML = '<span class="code-copied">' + esc(T("copied")) + '</span>';
     var done = function (ok) {
-      if (!ok) { toast(T("copyFail")); }
+      if (!ok) { toast(T("copyFail"), { type: "error" }); }
       setTimeout(function () {
         chip.innerHTML = orig;
         chip.style.minWidth = "";
@@ -6036,27 +7072,87 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (!r) { r = document.createElement("div"); r.id = "toastroot"; r.className = "toastroot"; document.body.appendChild(r); }
     return r;
   }
-  function toast(msg) {
+  /* 反馈规范（UX-08）：
+     - 类型：success / info / warning / error / loading。颜色只落前置标记与内描边，正文始终用反色前景
+     - 时长：success·info 2600ms；warning 3600ms；error 4200ms（留足阅读）；loading 不自动消失
+     - 关闭：error / warning / loading 常驻带手动关闭；success / info 也可用 opt.closable 开启
+     - 堆叠：最多 3 条，超出撤最旧一条，避免小屏被提示条盖住半页
+     - 无障碍：error / warning 用 role="alert"（打断式），其余 role="status"（礼貌播报）
+     - 同一容器复用 #toastroot，层级恒定在弹层之上（--ds-z-toast） */
+  var TOAST_MS = { success: 2600, info: 2600, warning: 3600, error: 4200, loading: 0 };
+  var TOAST_MAX = 3;
+  function toast(msg, opt) {
+    opt = opt || {};
+    var type = TOAST_MS[opt.type] === undefined ? "info" : opt.type;
+    var root = toastRoot();
+    /* 超限先撤最旧的：DOM 顺序即入队顺序，首条永远是最早那条 */
+    var alive = root.querySelectorAll(".toast");
+    for (var i = 0; i <= alive.length - TOAST_MAX; i++) {
+      if (alive[i] && alive[i].parentNode === root) root.removeChild(alive[i]);
+    }
     var t = document.createElement("div");
-    t.className = "toast";
-    t.textContent = msg;
-    toastRoot().appendChild(t);
-    setTimeout(function () { t.classList.add("show"); }, 10);
-    setTimeout(function () {
+    t.className = "toast toast--" + type;
+    t.setAttribute("role", (type === "error" || type === "warning") ? "alert" : "status");
+    t.setAttribute("aria-atomic", "true");
+    var dot = document.createElement("span");
+    dot.className = "toast-dot"; dot.setAttribute("aria-hidden", "true");
+    var txt = document.createElement("span");
+    txt.className = "toast-txt"; txt.textContent = msg == null ? "" : String(msg);
+    t.appendChild(dot); t.appendChild(txt);
+
+    var timer = 0, gone = false;
+    function remove() { if (t.parentNode) t.parentNode.removeChild(t); }
+    function dismiss() {
+      if (gone) return;
+      gone = true;
+      if (timer) clearTimeout(timer);
       t.classList.remove("show");
-      setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, 300);
-    }, 2600);
+      setTimeout(remove, 300);
+    }
+    if (opt.closable === true || type === "error" || type === "warning" || type === "loading") {
+      var x = document.createElement("button");
+      x.type = "button"; x.className = "toast-close";
+      x.setAttribute("aria-label", T("toastClose"));
+      x.title = T("toastClose");
+      x.textContent = "\u00d7";
+      x.onclick = dismiss;
+      t.appendChild(x);
+    }
+    root.appendChild(t);
+    setTimeout(function () { t.classList.add("show"); }, 10);
+    var ms = opt.duration === undefined ? TOAST_MS[type] : opt.duration;
+    if (ms > 0) timer = setTimeout(dismiss, ms);
+    return { el: t, type: type, close: dismiss };
   }
   /* 删除后 5 秒内可撤销（软删除 → restore） */
+  /* UX-09 U9-02：撤销提示并入统一 Toast 语义体系。
+     旧实现是自建 div：没有 role / aria-live、没有结构化正文，屏幕阅读器完全不会播报
+     "已删除，5 秒内可撤销"，于是"可撤销"对读屏用户等于不存在。
+     现在仍复用 #toastroot（参与堆叠上限与层级），但补齐：
+     role=alert（打断式播报）、aria-atomic、.toast-dot/.toast-txt 结构、
+     撤销按钮的可访问名称（含 5 秒时限）、以及一个 sr-only 的时限说明。 */
   function undoToast(ids) {
+    var root = toastRoot();
+    var alive = root.querySelectorAll(".toast");
+    for (var i = 0; i <= alive.length - TOAST_MAX; i++) {
+      if (alive[i] && alive[i].parentNode === root) root.removeChild(alive[i]);
+    }
     var t = document.createElement("div");
-    t.className = "toast undo";
+    t.className = "toast toast--warning undo";
+    t.setAttribute("role", "alert");
+    t.setAttribute("aria-atomic", "true");
+    var dot = document.createElement("span");
+    dot.className = "toast-dot"; dot.setAttribute("aria-hidden", "true");
     var span = document.createElement("span");
+    span.className = "toast-txt";
     span.textContent = ids.length > 1 ? T("deletedN", { n: ids.length }) : T("deletedOne");
+    var sr = document.createElement("span");
+    sr.className = "sr-only"; sr.textContent = T("undoAria");
     var btn = document.createElement("button");
     btn.className = "undo-btn"; btn.type = "button"; btn.textContent = T("undo");
-    t.appendChild(span); t.appendChild(btn);
-    toastRoot().appendChild(t);
+    btn.setAttribute("aria-label", T("undoAria"));
+    t.appendChild(dot); t.appendChild(span); t.appendChild(sr); t.appendChild(btn);
+    root.appendChild(t);
     setTimeout(function () { t.classList.add("show"); }, 10);
     var done = function () { t.classList.remove("show"); setTimeout(function () { if (t.parentNode) t.parentNode.removeChild(t); }, 300); };
     var timer = setTimeout(done, 5000);
@@ -6066,6 +7162,11 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         .then(function (r) { return r.json(); })
         .then(function () { load(); });
     };
+  }
+  /* UX-09 U9-02：单条消息删除前的确认（列表行内 / 详情底栏共用）。
+     说明删除对象与可撤销时限；批量删除与清空沿用各自已有的二次确认。 */
+  function confirmDelOne() {
+    return dsConfirm({ message: T("confirmDelOne"), okText: T("del"), danger: true });
   }
   /* 提示音：短促正弦波；首次调用在用户手势（开关切换）内，规避浏览器自动播放限制 */
   var audioCtx = null;
@@ -6100,7 +7201,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var latest = fresh[0];
     var code = extractCode(latest.content);
     if (code && state.autoCopy) {
-      var fin = function () { toast(T("codeCopied", { c: code })); };
+      var fin = function () { toast(T("codeCopied", { c: code }), { type: "success" }); };
       if (navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(code).then(fin, function () { fallbackCopy(code); fin(); });
       } else { fallbackCopy(code); fin(); }
@@ -6135,109 +7236,144 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     p.set("slim", "1");
     return p.toString();
   }
+  /* UX-02A：设备筛选迁到筛选区（#dev 下拉），设备管理迁到独立弹层。
+     业务口径不变：state.device 仍是 /api/messages 的 device_id 过滤键。 */
   function loadDevices() {
     return fetch("/api/devices").then(function (r) { return r.json(); }).then(function (res) {
-      var tabs = $("tabs");
-      tabs.innerHTML = "";
-      var total = (res.list || []).reduce(function (s, d) { return s + d.msg_count; }, 0);
-      var mk = function (name, sub, count, id) {
-        var el = document.createElement("div");
-        el.setAttribute("data-dev", String(id));
-        el.className = "tab" + (state.device === id ? " active" : "");
-        el.setAttribute("role", "tab");
-        el.setAttribute("aria-selected", state.device === id ? "true" : "false");
-        el.tabIndex = 0;
-        el.innerHTML = '<span class="device-icon">▣</span><span class="tmain"><span class="tname">' + esc(name) +
-          '</span><span class="tsub">' + esc(sub) + '</span></span><span class="tcount">' + esc(count) + '</span>';
-        el.onclick = function () { state.device = id; state.page = 1; markActiveTabs(); load(); };
-        return el;
-      };
-      tabs.appendChild(mk(T("tabAll"), T("allDevices"), total ? String(total) : "", 0));
-      (res.list || []).forEach(function (d) {
-        var el = mk(d.display_name === "未命名设备" ? T("unnamed") : d.display_name,
-          (d.sim ? d.sim + " · " : "") + T("devCount", { n: d.msg_count }),
-          d.last_at ? relTime(d.last_at) : "", d.id);
-        /* 设备标签操作：✎ 重命名（设别名）、⇄ 合并到其他设备（后端 /api/devices/alias、/api/devices/merge） */
-        if (d.id) {
-          var ed = document.createElement("span");
-          ed.className = "tabop"; ed.textContent = "✎"; ed.title = T("tabRename");
-          ed.onclick = function (ev) {
-            ev.stopPropagation();
-            var nm = prompt(T("renamePrompt", { name: d.display_name }), d.alias || d.display_name);
-            if (nm === null) return;
-            fetch("/api/devices/alias", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: d.id, alias: String(nm).trim() }) })
-              .then(function (r) { return r.json(); })
-              .then(function (res2) { if (!res2.success) { alert(res2.error || T("renameFail")); return; } refreshAll(); });
-          };
-          el.appendChild(ed);
-          var mg = document.createElement("span");
-          mg.className = "tabop"; mg.textContent = "⇄"; mg.title = T("tabMerge");
-          mg.onclick = function (ev) {
-            ev.stopPropagation();
-            var others = (res.list || []).filter(function (x) { return x.id && x.id !== d.id; });
-            if (!others.length) { alert(T("noOthers")); return; }
-            var lines = others.map(function (x, i) { return (i + 1) + ". " + x.display_name + " " + T("devCount", { n: x.msg_count }); });
-            var pick = prompt(T("mergePrompt", { a: d.display_name, list: lines.join("\n") }));
-            if (pick === null) return;
-            var idx = parseInt(pick, 10);
-            if (!(idx >= 1 && idx <= others.length)) { alert(T("invalidIdx")); return; }
-            var target = others[idx - 1];
-            if (!confirm(T("mergeConfirm", { a: d.display_name, b: target.display_name }))) return;
+      var list = (res && res.list) || [];
+      state.devices = list;
+      var total = list.reduce(function (s, d) { return s + (d.msg_count || 0); }, 0);
+      var sel = $("dev");
+      if (!sel) return;
+      var html = '<option value="0">' + esc(T("tabAll") + (total ? " (" + total + ")" : "")) + '</option>';
+      list.forEach(function (d) {
+        var nm = d.display_name === "未命名设备" ? T("unnamed") : d.display_name;
+        html += '<option value="' + esc(String(d.id)) + '">' + esc(nm + " (" + d.msg_count + ")") + '</option>';
+      });
+      sel.innerHTML = html;
+      sel.value = String(state.device || 0);
+    }).catch(function () {});
+  }
+  function syncDevSelect() { var sel = $("dev"); if (sel) sel.value = String(state.device || 0); }
+  function devName(d) { return d.display_name === "未命名设备" ? T("unnamed") : d.display_name; }
+  /* 设备管理弹层：重命名 / 合并 / 删除（沿用原侧栏 tabop 的接口与语义） */
+  function openDevices() {
+    var list = state.devices || [];
+    var rows = list.map(function (d) {
+      var sub = (d.sim ? d.sim + " · " : "") + T("devCount", { n: d.msg_count }) + (d.last_at ? " · " + relTime(d.last_at) : "");
+      return '<div class="devrow" data-dvid="' + esc(String(d.id)) + '">'
+        + '<div class="dinfo"><div class="dn">' + esc(devName(d)) + '</div><div class="ds">' + esc(sub) + '</div></div>'
+        + '<div class="dacts">'
+        + '<button type="button" data-dvact="rename" title="' + esc(T("tabRename")) + '" aria-label="' + esc(T("tabRename")) + '">✎</button>'
+        + (list.length > 1 ? '<button type="button" data-dvact="merge" title="' + esc(T("tabMerge")) + '" aria-label="' + esc(T("tabMerge")) + '">⇄</button>' : '')
+        /* UX-09 U9-14：有消息时删除按钮此前直接不渲染，用户看不出"为什么不能删"。
+           现在保留入口并把限制写进 title/aria，点击时给出明确解释。 */
+        + '<button type="button" class="danger" data-dvact="del"'
+        + (d.msg_count ? ' data-dvblocked="1" title="' + esc(T("devDelBlocked", { n: d.msg_count })) + '" aria-label="' + esc(T("devDelBlocked", { n: d.msg_count })) + '"'
+                       : ' title="' + esc(T("tabDel")) + '" aria-label="' + esc(T("tabDel")) + '"')
+        + '>×</button>'
+        + '</div></div>';
+    }).join("");
+    openModal('<h3>' + esc(T("navDevices")) + '</h3><div class="devlist">' + rows + '</div>');
+    var host = document.querySelector(".devlist");
+    if (host) host.onclick = function (ev) {
+      var b = ev.target.closest ? ev.target.closest("[data-dvact]") : null;
+      if (!b) return;
+      var row = b.closest("[data-dvid]");
+      var id = row ? parseInt(row.getAttribute("data-dvid"), 10) : 0;
+      var d = (state.devices || []).filter(function (x) { return x.id === id; })[0];
+      if (!d) return;
+      var act = b.getAttribute("data-dvact");
+      if (act === "del" && d.msg_count) { dsAlert(T("devDelBlocked", { n: d.msg_count })); return; }
+      if (act === "rename") devRename(d);
+      else if (act === "merge") devMerge(d);
+      else devDelete(d);
+    };
+  }
+  function devAfterChange() { if (DSP_RES) DSP_RES(null); closeModal(); refreshAll(); }
+  /* UX-08：设备重命名改为统一输入弹窗——带必填校验、提交中禁用、失败留在弹窗内可重试 */
+  function devRename(d) {
+    dsPrompt({
+      title: T("dspRenameTitle"),
+      message: T("renamePrompt", { name: devName(d) }),
+      value: d.alias || devName(d),
+      maxLength: 60,
+      /* UX-09 U9-05：兑现"留空则恢复默认名"的既有文案承诺。
+         旧实现 required:true 把空值拦成"请填写内容"，导致文案承诺的恢复路径根本不存在。
+         服务端 handleSetAlias 本就接受空字符串（alias="" → devices.alias 置空 → display_name 回落默认名），
+         因此这里放开必填即可，不改变任何接口语义。 */
+      required: false,
+      onSubmit: function (val) {
+        return fetch("/api/devices/alias", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: d.id, alias: val }) })
+          .then(function (r) { return r.json(); })
+          .then(function (res) {
+            if (!res || !res.success) return res && res.error ? res.error : T("renameFail");
+            /* UX-09 U9-13：成功也要有结果反馈，否则弹窗关闭后无法确认是否生效 */
+            toast(T("devRenamed"), { type: "success" });
+            devAfterChange();
+            return true;
+          });
+      }
+    });
+  }
+  function devMerge(d) {
+    var others = (state.devices || []).filter(function (x) { return x.id && x.id !== d.id; });
+    if (!others.length) { dsAlert(T("noOthers")); return; }
+    var lines = others.map(function (x, i) { return (i + 1) + ". " + devName(x) + " " + T("devCount", { n: x.msg_count }); });
+    dsPrompt({
+      title: T("dspMergeTitle"),
+      message: T("mergePrompt", { a: devName(d), list: "\n" + lines.join("\n") }),
+      placeholder: "1",
+      maxLength: 4,
+      required: true,
+      validate: function (v) {
+        var n = parseInt(v, 10);
+        /* 与原语义一致：只接受列表内的序号，非法输入不进入合并流程 */
+        return (n >= 1 && n <= others.length) ? "" : T("dspPickRange");
+      },
+      onSubmit: function (v) {
+        var target = others[parseInt(v, 10) - 1];
+        return dsConfirm({ message: T("mergeConfirm", { a: devName(d), b: devName(target) }), danger: true }).then(function (go) {
+          if (!go) return false;
+          return new Promise(function (resolve) {
             askPassword(function () {
               fetch("/api/devices/merge", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ from: d.id, to: target.id }) })
                 .then(function (r) { return r.json(); })
-                .then(function (res2) {
-                  if (!res2.success) { alert(res2.error === "device not found" ? T("targetMissing") : (res2.error || T("mergeFail"))); return; }
-                  if (state.device === d.id) { state.device = target.id; }
-                  refreshAll();
-                });
+                .then(function (res) {
+                  if (!res || !res.success) { resolve(res && res.error === "device not found" ? T("targetMissing") : T("mergeFail")); return; }
+                  if (state.device === d.id) state.device = target.id;
+                  toast(T("devMerged"), { type: "success" });
+                  devAfterChange();
+                  resolve(true);
+                })
+                .catch(function () { resolve(T("mergeFail")); });
             });
-          };
-          el.appendChild(mg);
-        }
-        /* 无短信的设备标签显示 × 可手动删除；有短信时后端拒绝删除 */
-        if (!d.msg_count && d.id) {
-          var x = document.createElement("span");
-          x.className = "tabx";
-          x.textContent = "×";
-          x.title = T("tabDel");
-          x.onclick = function (ev) {
-            ev.stopPropagation();
-            if (!confirm(T("delDevConfirm"))) return;
-            askPassword(function () {
-              fetch("/api/devices/" + d.id, { method: "DELETE" })
-                .then(function (r) { return r.json(); })
-                .then(function (res2) {
-                  if (!res2.success) {
-                    alert(res2.error === "has messages" ? T("hasMessages") : (res2.error || T("delFail")));
-                    return;
-                  }
-                  if (state.device === d.id) { state.device = 0; state.page = 1; }
-                  refreshAll();
-                });
-            });
-          };
-          el.appendChild(x);
-        }
-        tabs.appendChild(el);
-      });
+          });
+        });
+      }
     });
   }
-  /* 切换设备标签时只更新激活态，不重新拉取 /api/devices（此前每次点击都会多请求一次设备列表） */
-  function markActiveTabs() {
-    var tabs = $("tabs").children;
-    for (var i = 0; i < tabs.length; i++) {
-      var el = tabs[i];
-      var raw = el.getAttribute("data-dev");
-      var id = raw === null ? 0 : parseInt(raw, 10);
-      var active = id === state.device;
-      el.classList.toggle("active", active);
-      el.setAttribute("aria-selected", active ? "true" : "false");
-    }
+  function devDelete(d) {
+    dsConfirm({ message: T("delDevConfirm"), okText: T("del"), danger: true }).then(function (go) {
+      if (!go) return;
+      askPassword(function () {
+        fetch("/api/devices/" + d.id, { method: "DELETE" })
+          .then(function (r) { return r.json(); })
+          .then(function (res) {
+            if (!res.success) { dsAlert(res.error === "has messages" ? T("hasMessages") : (res.error || T("delFail"))); return; }
+            if (state.device === d.id) { state.device = 0; state.page = 1; }
+            toast(T("devDeleted"), { type: "success" });
+            devAfterChange();
+          })
+          .catch(function () { dsAlert(T("delFail")); });
+      });
+    });
   }
   function updateMeta(res) {
     $("stat").textContent = T("total", { n: res.total });
     $("pageinfo").textContent = res.pages > 1 ? T("pageOf", { a: res.page, b: res.pages }) : "";
+    /* 双栏下列表列变窄，工具栏不再显示条数（.toolbar-title 隐藏），条数并入分页行，信息不丢 */
+    if (splitOn()) $("pageinfo").textContent = (res.pages > 1 ? T("pageOf", { a: res.page, b: res.pages }) + " · " : "") + T("total", { n: res.total });
     $("pagenum").textContent = res.pages > 1 ? res.page + " / " + res.pages : "";
     $("prev").disabled = res.page <= 1;
     $("next").disabled = res.page >= res.pages;
@@ -6265,39 +7401,51 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (s === "cron") return "s-cron";
     return "s-other";
   }
-  function cardHtml(m, isFresh) {
+  /* UX-02B 消息卡三行结构：
+     ① 发件人 · 号码 · 时间（未读用小圆点，不再堆徽章）
+     ② 正文（2 行折叠，可点开详情看全文）
+     ③ 验证码胶囊 · 设备（仅设备分组首个）· 收藏 / 全文 / 删除（常驻可发现）
+     设备与收件 SIM 的完整信息保留在详情弹层，避免每卡重复。 */
+  function cardHtml(m, isFresh, showDev) {
     var text = (m.summary !== undefined ? m.summary : m.content) || "";
     var code = m.code !== undefined ? m.code : extractCode(m.content || "");
     var isSms = (m.source || "sms") === "sms";
-    var recv = m.sim_number || m.sim || "";
     var lbl = isSms ? numLabel(m.sender) : "";
-    var snum = isSms ? normalizeNum(m.sender) : "";
     var who = isSms ? (lbl || m.sender || T("unknownNum")) : (m.sender || m.device_name || T("srcNotify"));
-    var typeTag = code ? T("tagVerify") : (isSms ? T("srcSms") : srcLabel(m.source));
     var initial = String(who || "?").slice(0, 1);
-    return '<div class="card msg' + (isFresh ? " flash" : "") + (m.read_at ? "" : " unread") + '" data-id="' + m.id + '" data-day="' + esc(dayLabel(m.received_at)) + '">' +
+    /* 纯号码发件人（106xxxx / 95588）首字符没有识别价值，不画头像，避免出现「1」「9」这类噪声方块 */
+    var showAvatar = !(isSms && !lbl && /^[0-9+\-]+$/.test(String(who || "")));
+    var srcTag = isSms ? "" : '<span class="tag srctag">' + esc(srcLabel(m.source)) + '</span>';
+    var devChip = showDev && m.device_name
+      ? '<span class="devchip" title="' + esc(m.device_name) + '">' + esc(m.device_name) + '</span>' : "";
+    /* UX-08：卡片本身可聚焦（tabindex=0），键盘可用 Enter/Space 打开详情、方向键在列表内移动焦点；
+       role=article 而非 button——卡片内部已有收藏/删除等真按钮，嵌套 button 不合法 */
+    var aria = who + " · " + relTime(m.received_at) + (m.read_at ? "" : " · " + T("unread"));
+    return '<div class="card msg' + (isFresh ? " flash" : "") + (m.read_at ? "" : " unread") + '" data-id="' + m.id +
+      '" data-dev="' + esc(String(m.device_id || 0)) + '" data-day="' + esc(dayLabel(m.received_at)) + '"' +
+      ' tabindex="0" role="article" aria-label="' + esc(aria) + '">' +
       '<label class="selwrap" title="' + esc(T("selTip")) + '"><input type="checkbox" class="selbox" data-id="' + m.id + '"></label>' +
       '<div class="msg-main">' +
         '<div class="msg-top">' +
-          '<span class="avatar-sm">' + esc(initial) + '</span>' +
+          (showAvatar ? '<span class="avatar-sm">' + esc(initial) + '</span>' : '<span class="avatar-sm avatar-blank" aria-hidden="true"></span>') +
+          (m.read_at ? "" : '<span class="undot" aria-hidden="true"></span>') +
           '<span class="sender">' + esc(who) + '</span>' +
           (isSms && lbl ? '<span class="phone">' + esc(m.sender || "") + '</span>' : '') +
-          '<span class="tag type">' + esc(typeTag) + '</span>' +
-          (m.read_at ? "" : '<span class="tag unread-tag">' + esc(T("unread")) + '</span>') +
-          (code ? '<span class="code-chip' + (state.codeCopy ? '' : ' tapcopy') + '"><span class="code-val">' + esc(code) + '</span>' + (state.codeCopy ? '<button class="copy" type="button" data-code="' + esc(code) + '">' + esc(T("copy")) + '</button>' : '') + '</span>' : '') +
+          srcTag +
           '<span class="msg-time" title="' + esc(fmtTime(m.received_at)) + '">' + esc(relTime(m.received_at)) + '</span>' +
         '</div>' +
         '<p class="content summary" data-id="' + m.id + '" title="' + esc(T("detailTip")) + '">' + linkify(highlight(esc(text), state.q)) + '</p>' +
-        '<div class="msg-bottom">' +
-          '<span class="msg-meta">' + esc(m.device_name || "") +
-            (isSms && recv ? ' · <span class="recv" title="' + esc(T("recvTip")) + '">' + esc(recv) + '</span>' : '') +
-            (isSms && /^1[3-9]\d{9}$/.test(snum) ? '<span class="area" data-num="' + snum + '"></span>' : '') +
-          '</span>' +
-          '<div class="msg-actions">' +
-            '<button class="more" type="button" data-id="' + m.id + '" hidden>' + esc(T("detailBtn")) + '</button>' +
-            '<button class="star' + (m.starred ? " on" : "") + '" data-id="' + m.id + '" title="' + esc(T("starItemTip")) + '">' + (m.starred ? "★" : "☆") + '</button>' +
-            '<button class="del" data-id="' + m.id + '">' + esc(T("del")) + '</button>' +
-          '</div>' +
+        '<div class="msg-foot">' +
+          (code ? '<span class="code-chip' + (state.codeCopy ? '' : ' tapcopy') + '"><span class="code-val">' + esc(code) + '</span>' + (state.codeCopy ? '<button class="copy" type="button" data-code="' + esc(code) + '">' + esc(T("copy")) + '</button>' : '') + '</span>' : '') +
+          devChip +
+        '</div>' +
+      '</div>' +
+      /* 操作列独立于正文：桌面端固定在卡片右侧同一 x 位置，扫读时不需要横穿整行找按钮 */
+      '<div class="msg-rail">' +
+        '<div class="msg-actions">' +
+          '<button class="more" type="button" data-id="' + m.id + '" hidden>' + esc(T("detailBtn")) + '</button>' +
+          '<button class="star' + (m.starred ? " on" : "") + '" data-id="' + m.id + '" title="' + esc(T("starItemTip")) + '" aria-label="' + esc(T("starItemTip")) + '">' + (m.starred ? "★" : "☆") + '</button>' +
+          '<button class="del" data-id="' + m.id + '" title="' + esc(T("del")) + '">' + esc(T("del")) + '</button>' +
         '</div>' +
       '</div>' +
     '</div>';
@@ -6317,20 +7465,40 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   function renderFull(list, freshSet, res) {
     updateMeta(res);
     if (!list.length) {
-      var hasFilter = state.device || state.src || state.range || state.q;
-      $("list").innerHTML = '<div class="empty">' + (hasFilter ? esc(T("emptyFilter")) : esc(T("emptyAll")) + '<br><small>' + esc(T("emptyHint")) + '</small>') + '</div>';
+      /* UX-09 U9-06：空列表与「筛选后为空」必须区分。
+         旧的判定漏掉了顶部 chip（★收藏/未读/已读），导致收藏筛选为空时
+         错误显示"还没有收到消息 + 去配置 SmsForwarder"这种"从未收到消息"的文案。 */
+      var hasFilter = !!(state.device || state.src || state.range || state.q ||
+        state.starOnly || state.unreadOnly || state.readOnly ||
+        (state.filterMode && state.filterMode !== "all"));
+      if (hasFilter) {
+        $("list").innerHTML = '<div class="empty">' + esc(T("emptyFilter")) +
+          '<br><button class="tbtn" id="clearfilters" type="button">' + esc(T("emptyFilterClear")) + '</button></div>';
+        var cfBtn = $("clearfilters");
+        if (cfBtn) cfBtn.onclick = resetFilters;
+      } else {
+        $("list").innerHTML = '<div class="empty">' + esc(T("emptyAll")) +
+          '<br><small>' + esc(T("emptyHint")) + '</small></div>';
+      }
+      if (typeof syncPaneAfterLoad === "function") syncPaneAfterLoad();
       return;
     }
-    var html = "", lastDay = "";
+    var html = "", lastDay = "", lastDev = -1;
     list.forEach(function (m) {
       var day = dayLabel(m.received_at);
-      if (day !== lastDay) { html += '<div class="daysep">' + esc(day) + '</div>'; lastDay = day; }
-      html += cardHtml(m, freshSet[m.id]);
+      if (day !== lastDay) { html += '<div class="daysep">' + esc(day) + '</div>'; lastDay = day; lastDev = -1; }
+      /* 设备标签：单设备筛选时由筛选条件表达；全设备视图只在设备分组切换处显示一次 */
+      var dv = m.device_id || 0;
+      var showDev = !state.device && dv !== lastDev;
+      html += cardHtml(m, freshSet[m.id], showDev);
+      lastDev = dv;
     });
     $("list").innerHTML = html;
     fillAreas();
     syncSelBoxes();
     markClipped();
+    /* 双栏：列表重绘后恢复选中高亮；选中项已不在结果里则回到空态（不保留过期详情） */
+    if (typeof syncPaneAfterLoad === "function") syncPaneAfterLoad();
   }
   function trimToLimit(listEl) {
     var limit = state.limit || 20;
@@ -6351,23 +7519,41 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var listEl = root || $("list");
     if (!listEl) return;
     var els = listEl.querySelectorAll(".content.summary");
-    for (var i = 0; i < els.length; i++) {
-      var el = els[i];
+    if (!els.length) return;
+    /* ENG-01 OPT-2：批量化布局——旧实现逐元素「写样式→读 scrollHeight→写回」，
+       n 张卡片 = n 次强制同步布局（layout thrashing）。
+       新实现两轮批量：①统一解除截断（写）→ ②统一测量（读，单次布局）→ ③统一恢复+判定（写）。
+       语义不变：自然行数 = scrollHeight / 行高，lines<=2 隐藏「展开全文」；
+       函数全程同步执行，中间态不会产生一次绘制，视觉结果与旧实现一致。 */
+    var saved = new Array(els.length);
+    var i, el;
+    /* ① 写：统一解除截断 */
+    for (i = 0; i < els.length; i++) {
+      el = els[i];
+      saved[i] = { clamp: el.style.webkitLineClamp, display: el.style.display };
+      el.style.webkitLineClamp = "unset";
+      el.style.display = "block";
+    }
+    /* ② 读：统一测量（此时只发生一次布局计算） */
+    var linesArr = new Array(els.length);
+    for (i = 0; i < els.length; i++) {
+      el = els[i];
       var card = el.closest ? el.closest(".card") : null;
-      var btn = card ? card.querySelector(".more") : null;
-      if (!btn) continue;
+      if (!card || !card.querySelector(".more")) { linesArr[i] = -1; continue; }
       var cs = getComputedStyle(el);
       var lh = parseFloat(cs.lineHeight);
       if (!lh || !isFinite(lh)) lh = parseFloat(cs.fontSize) * 1.6 || 22;
-      /* 临时解除截断，测量自然高度 */
-      var oldClamp = el.style.webkitLineClamp;
-      var oldDisplay = el.style.display;
-      el.style.webkitLineClamp = "unset";
-      el.style.display = "block";
-      var lines = Math.round(el.scrollHeight / lh);
-      el.style.webkitLineClamp = oldClamp;
-      el.style.display = oldDisplay;
-      btn.hidden = lines <= 2;
+      linesArr[i] = Math.round(el.scrollHeight / lh);
+    }
+    /* ③ 写：统一恢复截断并设置按钮显隐 */
+    for (i = 0; i < els.length; i++) {
+      el = els[i];
+      el.style.webkitLineClamp = saved[i].clamp;
+      el.style.display = saved[i].display;
+      if (linesArr[i] >= 0) {
+        var btn = el.closest(".card").querySelector(".more");
+        if (btn) btn.hidden = linesArr[i] <= 2;
+      }
     }
   }
   function prependFresh(fresh, res) {
@@ -6379,11 +7565,15 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var oldestDay = dayLabel(fresh[fresh.length - 1].received_at);
     if (newestDay !== oldestDay) return false;
     var block = "", lastDay = null;
-    fresh.forEach(function (m) {
+    var oldTopDev = top ? parseInt(top.getAttribute("data-dev") || "0", 10) : -1;
+    fresh.forEach(function (m, i) {
       state.seen[m.id] = true;
       var d = dayLabel(m.received_at);
       if (d !== lastDay) { block += '<div class="daysep">' + esc(d) + '</div>'; lastDay = d; }
-      block += cardHtml(m, true);
+      /* 与「更旧的一条」比较设备，避免同设备连续消息重复贴标签 */
+      var dv = m.device_id || 0;
+      var olderDev = i + 1 < fresh.length ? (fresh[i + 1].device_id || 0) : oldTopDev;
+      block += cardHtml(m, true, !state.device && dv !== olderDev);
     });
     if (oldDay && oldestDay === oldDay) {
       block = block.replace(/^<div class="daysep">.*?<\/div>/, "");
@@ -6400,10 +7590,17 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     markClipped(listEl);
     return true;
   }
+  /* UX-09 U9-07：失败必须区分三种情境——网络不可用 / 登录过期 / 服务端错误。
+     旧实现一律显示 "加载失败：{message}"，断网时用户看到的是 "Failed to fetch" 这类技术串，
+     既看不懂也不知道该修网络还是重新登录。 */
   function showRetry(e) {
-    $("list").innerHTML = '<div class="empty">' + esc(T("loadFail", { m: (e && e.message) || "" })) + '<br><button class="tbtn" id="retrybtn" type="button">' + esc(T("retry")) + '</button></div>';
+    var kind = (e && e.unauth) ? "unauth" : ((e && e.offline) ? "offline" : "fail");
+    var msg = kind === "unauth" ? T("errUnauth")
+      : (kind === "offline" ? T("errOffline") : T("loadFail", { m: (e && e.message) || "" }));
+    var act = kind === "unauth" ? T("relogin") : T("retry");
+    $("list").innerHTML = '<div class="empty">' + esc(msg) + '<br><button class="tbtn" id="retrybtn" type="button">' + esc(act) + '</button></div>';
     var b = $("retrybtn");
-    if (b) b.onclick = function () { load(); };
+    if (b) b.onclick = function () { if (kind === "unauth") { location.reload(); return; } load(); };
   }
   /* 搜索高亮：在已转义文本上包裹 <mark>（关键词转义正则特殊字符） */
   function highlight(escaped, q) {
@@ -6427,18 +7624,285 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     try { localStorage.setItem("sms_qhist", JSON.stringify(arr)); } catch (e) {}
     loadQHist();
   }
+  /* ---------------- 对话框无障碍：焦点栈 ----------------
+     三个弹层共用一套语义：#modal（设置中心/详情）→ #pushmodal（目标编辑）→ #pwdmodal（密码确认）。
+     只有栈顶可聚焦，其余层与背景一律 inert；Esc 只关栈顶；关闭后焦点回到原触发元素。 */
+  var DLG_STACK = [];
+  var DLG_SEL = 'a[href],button,input,select,textarea,[tabindex]';
+  function dlgSheet(o) { return o.querySelector('[role="dialog"]') || o; }
+  /* 通用可聚焦识别：排除 disabled / hidden / display:none / visibility:hidden / tabindex=-1。
+     不硬编码按钮清单，动态新增的目标编辑控件也能被识别。 */
+  function dlgFocusables(root) {
+    var nodes = root.querySelectorAll(DLG_SEL), out = [];
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      if (el.disabled || el.type === "hidden") continue;
+      if (el.getAttribute("tabindex") === "-1") continue;
+      if (el.closest("[hidden]")) continue;
+      var cs = window.getComputedStyle(el);
+      if (cs.display === "none" || cs.visibility === "hidden") continue;
+      if (!el.getClientRects().length) continue;
+      out.push(el);
+    }
+    return out;
+  }
+  /* 背景隔离：非栈顶的 body 直接子元素全部 inert；toastroot 除外，保证提示仍能播报 */
+  function dlgApplyInert() {
+    var top = DLG_STACK.length ? DLG_STACK[DLG_STACK.length - 1].el : null;
+    var kids = document.body.children;
+    for (var i = 0; i < kids.length; i++) {
+      var el = kids[i];
+      if (el.id === "toastroot" || el.tagName === "SCRIPT" || el.tagName === "LINK") continue;
+      try { el.inert = DLG_STACK.length ? el !== top : false; } catch (e) {}
+    }
+  }
+  function dlgFocusIn(rec, initial) {
+    var t = null;
+    if (typeof initial === "string" && initial.charAt(0) === "#") t = document.querySelector(initial);
+    else if (initial && initial.nodeType === 1) t = initial;
+    if (initial === "container") t = rec.sheet;
+    if (!t || !rec.sheet.contains(t) || !t.getClientRects().length) {
+      var f = dlgFocusables(rec.sheet);
+      t = f.length ? f[0] : rec.sheet;
+    }
+    try { t.focus(); } catch (e) {}
+  }
+  /* 弹层打开时锁住背景滚动：遮罩是 fixed 元素，不锁的话滚轮会继续滚后面的列表，
+     出现「弹层不动、背景乱跑」的错觉；关闭后原样恢复，并补偿滚动条宽度避免横向跳动 */
+  var DLG_LOCK = null;
+  function dlgLockScroll() {
+    if (DLG_LOCK) return;
+    var de = document.documentElement;
+    var sw = window.innerWidth - de.clientWidth;
+    DLG_LOCK = { html: de.style.overflow, body: document.body.style.overflow, pad: document.body.style.paddingRight };
+    de.style.overflow = "hidden";
+    document.body.style.overflow = "hidden";
+    /* 标记「有弹层」：小屏抽屉贴底，提示条要改到顶部，避免压住抽屉底栏的保存/取消 */
+    de.classList.add("dlg-open");
+    if (sw > 0) document.body.style.paddingRight = sw + "px";
+  }
+  function dlgUnlockScroll() {
+    if (!DLG_LOCK) return;
+    document.documentElement.style.overflow = DLG_LOCK.html;
+    document.body.style.overflow = DLG_LOCK.body;
+    document.body.style.paddingRight = DLG_LOCK.pad;
+    document.documentElement.classList.remove("dlg-open");
+    DLG_LOCK = null;
+  }
+  function dlgOpen(overlay, opts) {
+    opts = opts || {};
+    for (var i = 0; i < DLG_STACK.length; i++) {
+      if (DLG_STACK[i].el === overlay) DLG_STACK.splice(i, 1)[0];
+    }
+    var act = document.activeElement;
+    var prev = act && act !== document.body && !overlay.contains(act) ? act : null;
+    overlay.hidden = false;
+    var sheet = dlgSheet(overlay);
+    if (!sheet.getAttribute("role")) sheet.setAttribute("role", "dialog");
+    sheet.setAttribute("aria-modal", "true");
+    if (!sheet.hasAttribute("tabindex")) sheet.setAttribute("tabindex", "-1");
+    var rec = { el: overlay, sheet: sheet, prev: prev };
+    DLG_STACK.push(rec);
+    dlgLockScroll();
+    dlgApplyInert();
+    dlgFocusIn(rec, opts.initial);
+    return rec;
+  }
+  function dlgClose(overlay, keepFocus) {
+    var i = -1;
+    for (var k = DLG_STACK.length - 1; k >= 0; k--) if (DLG_STACK[k].el === overlay) { i = k; break; }
+    var rec = i >= 0 ? DLG_STACK.splice(i, 1)[0] : null;
+    overlay.hidden = true;
+    if (!DLG_STACK.length) dlgUnlockScroll();
+    dlgApplyInert();
+    if (keepFocus === false) return;
+    var t = rec && rec.prev;
+    if (t && document.contains(t) && t.getClientRects().length) { try { t.focus(); return; } catch (e) {} }
+    var top = DLG_STACK[DLG_STACK.length - 1];
+    if (top) { dlgFocusIn(top, null); return; }
+    /* 触发元素已随移动端菜单收起时退回到仍然可见的入口，避免焦点落回 body */
+    if (rec && rec.el.id === "modal") {
+      var cands = ["morebtn", "setbtn"];
+      for (var c = 0; c < cands.length; c++) {
+        var b = $(cands[c]);
+        if (b && b.getClientRects().length) { try { b.focus(); return; } catch (e) {} }
+      }
+    }
+  }
+  /* ---------------- 统一确认弹层 ----------------
+     原生 confirm 的三个硬伤：不可主题化（深色下闪系统白框）、阻塞主线程、不进焦点栈
+     （Esc 与焦点返回语义和别的弹层不一致）。这里复用密码弹层的视觉与 dlgOpen 栈机制，
+     返回 Promise<boolean>；危险操作走 ds-btn--danger，默认焦点落在「取消」上，回车不误删。 */
+  var DSCF_RES = null;
+  function dscfResolve(v) {
+    var fn = DSCF_RES;
+    if (!fn) return;
+    DSCF_RES = null;
+    fn(!!v);
+  }
+  function dsConfirm(opt) {
+    opt = opt || {};
+    var el = $("dsconfirm"), msg = $("dscfmsg"), okBtn = $("dscfok"), noBtn = $("dscfcancel");
+    /* 极端降级：元素缺失时退回原生 confirm，保证危险操作仍有确认 */
+    if (!el || !msg || !okBtn || !noBtn) return Promise.resolve(window.confirm(opt.message || ""));
+    if (DSCF_RES) dscfResolve(false);
+    msg.textContent = opt.message || "";
+    okBtn.textContent = opt.okText || T("ok");
+    noBtn.textContent = T("cancel");
+    /* alert 模式：只有一个「知道了」，用于必须让用户看到的错误，避免用一闪而过的 Toast 承载关键失败 */
+    noBtn.hidden = !!opt.alert;
+    okBtn.className = "ds-btn " + (opt.danger ? "ds-btn--danger" : "ds-btn--primary");
+    dlgOpen(el, { initial: noBtn });
+    return new Promise(function (resolve) {
+      DSCF_RES = function (v) {
+        okBtn.onclick = noBtn.onclick = el.onclick = null;
+        dlgClose(el);
+        resolve(v);
+      };
+      okBtn.onclick = function () { dscfResolve(true); };
+      noBtn.onclick = function () { dscfResolve(false); };
+      el.onclick = function (ev) { if (ev.target === el) dscfResolve(false); };
+    });
+  }
+  /* ---------------- UX-08：统一输入弹窗（替代原生 prompt） ----------------
+     复用 .pwdmodal 的遮罩、焦点陷阱、Esc、焦点返回；相比原生 prompt 多了：
+     必填/自定义校验、提交中禁用（防重复提交）、失败保留输入并给出可读原因。 */
+  var DSP_RES = null;
+  function dsPrompt(opt) {
+    opt = opt || {};
+    var el = $("dsprompt"), ttl = $("dspTitle"), help = $("dspHelp"), inp = $("dspInput"),
+        err = $("dspErr"), ok = $("dspOk"), no = $("dspCancel");
+    /* 极端降级：DOM 缺失时退回原生 prompt，保证功能可用 */
+    if (!el || !ttl || !inp || !ok || !no) return Promise.resolve(window.prompt(opt.title || "", opt.value || ""));
+    if (DSP_RES) DSP_RES(null);
+    ttl.textContent = opt.title || "";
+    help.textContent = opt.message || "";
+    help.hidden = !opt.message;
+    inp.type = opt.password ? "password" : "text";
+    inp.value = opt.value != null ? String(opt.value) : "";
+    inp.maxLength = opt.maxLength || 200;
+    inp.placeholder = opt.placeholder || "";
+    inp.setAttribute("aria-label", opt.title || "");
+    err.hidden = true; err.textContent = "";
+    no.textContent = T("cancel");
+    ok.textContent = opt.okText || T("ok");
+    ok.className = "ds-btn " + (opt.danger ? "ds-btn--danger" : "ds-btn--primary");
+    ok.disabled = false; no.disabled = false;
+    dlgOpen(el, { initial: inp });
+    try { inp.focus(); inp.select(); } catch (e) {}
+    return new Promise(function (resolve) {
+      var busy = false;
+      var close = function (v) {
+        ok.onclick = no.onclick = el.onclick = inp.onkeydown = null;
+        DSP_RES = null;
+        dlgClose(el);
+        resolve(v);
+      };
+      DSP_RES = close;
+      var fail = function (m) {
+        busy = false; ok.disabled = false; no.disabled = false;
+        ok.textContent = opt.okText || T("ok");
+        err.textContent = m || opt.failMsg || T("dspFail");
+        err.hidden = false;
+        try { inp.focus(); inp.select(); } catch (e) {}
+      };
+      var submit = function () {
+        if (busy) return;
+        var raw = inp.value;
+        var val = opt.trim === false ? raw : String(raw).trim();
+        if (opt.required && !val) { err.textContent = opt.requiredMsg || T("dspRequired"); err.hidden = false; try { inp.focus(); } catch (e) {} return; }
+        if (opt.maxLength && String(raw).length > opt.maxLength) { err.textContent = T("dspTooLong", { n: opt.maxLength }); err.hidden = false; return; }
+        if (typeof opt.validate === "function") {
+          var e = opt.validate(val);
+          if (e) { err.textContent = e; err.hidden = false; try { inp.focus(); } catch (x) {} return; }
+        }
+        if (typeof opt.onSubmit !== "function") { close(val); return; }
+        busy = true; ok.disabled = true; no.disabled = true;
+        ok.textContent = T("dspSaving");
+        Promise.resolve(opt.onSubmit(val)).then(function (r) {
+          if (r === false) { fail(opt.failMsg); return; }
+          if (typeof r === "string" && r) { fail(r); return; }
+          close(val);
+        }).catch(function () { fail(opt.failMsg); });
+      };
+      ok.onclick = submit;
+      /* 提交中不允许关闭，避免"请求已发出但界面已消失"的不确定状态 */
+      no.onclick = function () { if (!busy) close(null); };
+      el.onclick = function (ev) { if (ev.target === el && !busy) close(null); };
+      inp.onkeydown = function (ev) {
+        if (ev.key === "Enter") { ev.preventDefault(); submit(); }
+        else if (ev.key === "Escape") {
+          /* 阻止冒泡：否则文档级 Esc 紧接着会关掉下一层，一次 Esc 连关两层 */
+          ev.preventDefault(); ev.stopPropagation();
+          if (!busy) close(null);
+        }
+      };
+    });
+  }
+  /* 关键错误用单一「知道了」弹窗，不用一闪而过的 Toast */
+  function dsAlert(message, okText) {
+    return dsConfirm({ message: message, alert: true, okText: okText || T("ok") });
+  }
+  function dlgTop() { return DLG_STACK.length ? DLG_STACK[DLG_STACK.length - 1] : null; }
+  /* Esc 只关最上层：一次按键不会连关两层 */
+  function dlgTopClose() {
+    var rec = dlgTop();
+    if (!rec) return false;
+    var id = rec.el.id;
+    if (id === "pwdmodal") pwdClose();
+    else if (id === "pushmodal") closePushEditor();
+    else if (id === "modal") closeModal();
+    else if (id === "dsprompt") { if (DSP_RES) DSP_RES(null); }
+    else if (id === "dsconfirm") dscfResolve(false);
+    else dlgClose(rec.el);
+    return true;
+  }
+  /* Tab / Shift+Tab 在栈顶内循环（捕获阶段，避免被页面快捷键先吃掉） */
+  document.addEventListener("keydown", function (e) {
+    if (e.key !== "Tab") return;
+    var rec = dlgTop();
+    if (!rec) return;
+    var f = dlgFocusables(rec.sheet);
+    if (!f.length) { e.preventDefault(); try { rec.sheet.focus(); } catch (err) {} return; }
+    var first = f[0], last = f[f.length - 1], a = document.activeElement;
+    if (!rec.sheet.contains(a) || a === rec.sheet) {
+      /* 焦点停在容器本身时，Tab 正向进首元素、Shift+Tab 反向进末元素 */
+      e.preventDefault();
+      (e.shiftKey ? last : first).focus();
+      return;
+    }
+    if (!e.shiftKey && a === last) { e.preventDefault(); first.focus(); }
+    else if (e.shiftKey && a === first) { e.preventDefault(); last.focus(); }
+  }, true);
+
   /* 通用弹层 */
   var tokenSecret = null; /* 接入令牌一次性明文：仅存内存变量，closeModal 时置 null 清引用；不落 localStorage/URL/console */
-  function openModal(html) { $("modalbody").innerHTML = html; $("modal").hidden = false; }
+  function openModal(html) {
+    var body = $("modalbody");
+    body.innerHTML = html;
+    /* 每个弹层都要有可访问名称：h3 缺 id 时补一个，供 aria-labelledby 指过去 */
+    var h = body.querySelector("h3");
+    if (h && !h.id) h.id = "modaltitle";
+    dlgOpen($("modal"), { initial: "container" });
+  }
   function closeModal() {
     /* 设置中心存在未保存修改时先确认，避免静默丢失；其它弹层（SC.dirty 为 false）行为不变 */
     if (typeof SC !== "undefined" && SC && SC.dirty) {
-      if (!window.confirm(T("scUnsavedConfirm"))) return;
-      SC.dirty = false;
+      dsConfirm({ message: T("scUnsavedConfirm"), danger: true }).then(function (go) {
+        if (!go) return;
+        SC.dirty = false;
+        closeModalNow();
+      });
+      return;
     }
-    $("modal").hidden = true; $("modalbody").innerHTML = ""; tokenSecret = null;
-    /* 关闭设置中心时同步收起第二层推送编辑器，避免残留遮罩 */
-    var pm = $("pushmodal"); if (pm) pm.hidden = true;
+    closeModalNow();
+  }
+  function closeModalNow() {
+    /* 关闭主弹层前先把叠在上面的子弹层按栈顺序收掉，避免残留遮罩与悬空焦点 */
+    var pm = $("pushmodal"); if (pm && !pm.hidden) closePushEditor();
+    var wm = $("pwdmodal"); if (wm && !wm.hidden) pwdClose();
+    $("modalbody").innerHTML = ""; tokenSecret = null;
+    dlgClose($("modal"));
   }
   /* 退出登录：复用后端 /api/logout（无状态语义——仅清除浏览器 Cookie）；
      先真正调用接口，再清理前端可能持有的敏感临时状态，最后整页重载回到登录页。
@@ -6452,11 +7916,11 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         tokenSecret = null; tokListCache = [];
         if (d && d.success) { location.reload(); return; }
         if (btn) btn.disabled = false;
-        toast(T("scLogoutFailed"));
+        toast(T("scLogoutFailed"), { type: "error" });
       })
       .catch(function () {
         if (btn) btn.disabled = false;
-        toast(T("scLogoutFailed"));
+        toast(T("scLogoutFailed"), { type: "error" });
       });
   }
   /* ---------------- 重要操作密码确认 ----------------
@@ -6465,7 +7929,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   var pwdAfter = null;
   function pwdShowErr(msg) { var e = $("pwderr"); if (!e) return; e.textContent = msg; e.hidden = false; }
   function pwdClose() {
-    $("pwdmodal").hidden = true;
+    dlgClose($("pwdmodal"));
     $("pwdinput").value = "";
     $("pwderr").hidden = true;
     pwdAfter = null;
@@ -6481,8 +7945,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     $("pwdcancel").textContent = T("cancel");
     $("pwdok").textContent = T("pwdVerify");
     $("pwdok").disabled = false;
-    $("pwdmodal").hidden = false;
-    setTimeout(function () { try { $("pwdinput").focus(); } catch (e) {} }, 30);
+    dlgOpen($("pwdmodal"), { initial: "#pwdinput" });
   }
   function pwdSubmit() {
     var pw = $("pwdinput").value;
@@ -6502,7 +7965,10 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       }
       if (res.s === 429) { pwdShowErr(T("pwdTooMany")); return; }
       if (res.s === 401) { location.reload(); return; }
+      /* UX-09 U9-16：密码错误后立刻清空并回焦，避免用户在旧值后面继续输入造成二次失败 */
       pwdShowErr(T("pwdWrong"));
+      var pi = $("pwdinput");
+      if (pi) { pi.value = ""; try { pi.focus(); } catch (e) {} }
     }).catch(function () { btn.disabled = false; pwdShowErr(T("pwdWrong")); });
   }
   function drow(label, val) {
@@ -6514,21 +7980,40 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     return null;
   }
   function toggleStar(id, starred) {
+    /* UX-09 U9-08：收藏此前无论成功失败都没有任何反馈，失败是纯静默的 */
     return fetch("/api/messages/star", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: id, starred: starred }) })
-      .then(function (r) { return r.json(); }).then(function () { load(); });
+      .then(function (r) {
+        if (r.status === 401) { var ue = new Error("unauthorized"); ue.unauth = true; throw ue; }
+        return r.json();
+      })
+      .then(function (d) {
+        if (!d || !d.success) { toast(T("starFail"), { type: "error" }); return; }
+        load();
+      })
+      .catch(function () { toast(T("starFail"), { type: "error" }); });
   }
   function doDelete(ids) {
     fetch("/api/messages/remove", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: ids }) })
       .then(function (r) { return r.json(); })
-      .then(function (d) { if (d && d.success) { undoToast(ids); load(); } });
+      .then(function (d) {
+        /* UX-09 U9-08：删除失败必须告知，否则用户以为已经删掉了 */
+        if (!d || !d.success) { toast(T("delFail"), { type: "error" }); return; }
+        undoToast(ids); load();
+      })
+      .catch(function () { toast(T("delFail"), { type: "error" }); });
   }
   function saveLabel(num, label) {
     num = normalizeNum(num);
     if (!num) return;
     if (label) state.labels[num] = label; else delete state.labels[num];
-    try { localStorage.setItem("sms_labels", JSON.stringify(state.labels)); } catch (e) {}
+    var saved = true;
+    try { localStorage.setItem("sms_labels", JSON.stringify(state.labels)); } catch (e) { saved = false; }
+    /* UX-09 U9-08：标签保存/清除是本地即时操作，此前完全静默，看不出有没有生效 */
+    toast(saved ? T("labelSaved") : T("labelFail"), { type: saved ? "success" : "warning" });
   }
   function openDetail(id) {
+    /* 宽屏双栏：详情进右侧面板，不再打断列表浏览；窄屏保持弹层 */
+    if (splitOn() && $("detailpane")) { openPane(id); return; }
     /* slim 列表不含正文：统一按 id 取完整消息，保证详情/复制与摘要一致 */
     fetch("/api/messages/" + id)
       .then(function (r) {
@@ -6536,101 +8021,283 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         return r.json();
       })
       .then(function (res) {
-        if (!res || !res.success || !res.item) { toast(T("detailFail")); return; }
+        if (!res || !res.success || !res.item) { toast(T("detailFail"), { type: "error" }); return; }
         renderDetail(res.item);
       })
-      .catch(function () { toast(T("detailFail")); });
+      .catch(function () { toast(T("detailFail"), { type: "error" }); });
   }
-  function renderDetail(m) {
+  /* ===== UX-07C：详情渲染复用层 =====
+     弹层（<1600）与宽屏右侧面板（≥1600）共用同一份内容生成与操作绑定：
+     两处不能各写一套渲染，否则会出现"弹层有运营商、面板没有"这类信息不一致。 */
+  function detailHTML(m, mode) {
     var isSms = (m.source || "sms") === "sms";
     var code = extractCode(m.content);
     var snum = normalizeNum(m.sender);
-    var wasRead = !!m.read_at;
     var body = String(m.content || "");
+    /* 卡片不再重复展示设备/SIM，完整来源信息统一收敛到详情（信息不丢失） */
+    var recv = m.sim_number || m.sim || "";
     var typeText = code ? T("tagVerify") : (isSms ? T("srcSms") : (m.source || T("srcNotify")));
+    /* 标题即身份：号码/名称已经在 h3，元信息行不再重复同一个值 */
+    var who = isSms ? (numLabel(m.sender) || m.sender || T("unknownNum")) : (m.sender || m.device_name || T("srcNotify"));
     var parts = [];
-    if (isSms) parts.push('<span class="m-num">' + esc(m.sender || T("unknownNum")) + '</span>');
+    if (isSms && String(who) !== String(m.sender || "")) parts.push('<span class="m-num">' + esc(m.sender || T("unknownNum")) + '</span>');
     parts.push('<span class="m-strong">' + esc(typeText) + '</span>');
     if (!isSms) parts.push('<span>' + esc(m.source || T("srcNotify")) + '</span>');
     parts.push('<span class="m-num">' + esc(fmtTime(m.received_at)) + '</span>');
-    if (m.device_name) parts.push('<span>' + esc(m.device_name) + '</span>');
-    parts.push('<span id="dstate">' + esc(wasRead ? T("read") : T("unread")) + '</span>');
+    if (isSms && /^1[3-9]\d{9}$/.test(snum)) parts.push('<span class="area" data-num="' + snum + '"></span>');
+    if (m.device_name) parts.push('<span>' + esc(m.device_name) + (recv ? ' · ' + esc(recv) : '') + '</span>');
+    parts.push('<span id="dstate">' + esc(m.read_at ? T("read") : T("unread")) + '</span>');
     if (m.starred) parts.push('<span class="m-star">★</span>');
-    var html = '<h3>' + esc(isSms ? (numLabel(m.sender) || m.sender || T("unknownNum")) : (m.sender || m.device_name || T("srcNotify"))) + '</h3>' +
+    var acts =
+      '<button class="tbtn" id="dcopy">' + esc(T("copyBody")) + '</button>' +
+      '<button class="tbtn" id="dstar">' + esc(m.starred ? T("unstar") : T("star")) + '</button>' +
+      (isSms && snum ? '<a class="tbtn" href="tel:' + esc(snum) + '">' + esc(T("call")) + '</a>' : '') +
+      (isSms && snum ? '<button class="tbtn" id="dlabel">' + esc(T("setLabel")) + '</button>' : '');
+    var actsEnd =
+      '<button class="tbtn tbtn--danger" id="ddel">' + esc(T("del")) + '</button>' +
+      '<button class="tbtn tbtn--accent" id="dunread">' + esc(T("markUnread")) + '</button>';
+    var foot;
+    if (mode === "pane") {
+      foot = '<div class="dp-foot">' + acts + '<span class="grow"></span>' + actsEnd + '</div>';
+    } else {
+      foot = '<div class="modal-foot"><div class="foot-left">' + acts + '</div>' +
+        '<div class="foot-right">' + actsEnd +
+        '<button class="tbtn tbtn--primary" id="dclose">' + esc(T("modalClose")) + '</button></div></div>';
+    }
+    var head = mode === "pane"
+      ? '<div class="dp-head"><h3>' + esc(who) + '</h3><button class="dp-close" id="dpclose" type="button" aria-label="' + esc(T("paneClose")) + '" data-i18n-aria="paneClose" title="' + esc(T("paneClose")) + '">×</button></div>'
+      : '<h3>' + esc(who) + '</h3>';
+    return head +
       '<div class="detail-metarow">' + parts.join('<span class="sep">·</span>') + '</div>' +
       '<div class="detail-body">' + (body ? linkify(esc(body)) : '<span class="empty-text">' + esc(T("emptyBody")) + '</span>') + '</div>' +
-      '<div class="modal-foot">' +
-        '<div class="foot-left">' +
-          '<button class="tbtn" id="dcopy">' + esc(T("copyBody")) + '</button>' +
-          '<button class="tbtn" id="dstar">' + esc(m.starred ? T("unstar") : T("star")) + '</button>' +
-          (isSms && snum ? '<a class="tbtn" href="tel:' + esc(snum) + '">' + esc(T("call")) + '</a>' : '') +
-          (isSms && snum ? '<button class="tbtn" id="dlabel">' + esc(T("setLabel")) + '</button>' : '') +
-          '<button class="tbtn" id="ddel" style="color:var(--ds-color-danger);border-color:var(--ds-color-danger)">' + esc(T("del")) + '</button>' +
-        '</div>' +
-        '<div class="foot-right">' +
-          '<button class="tbtn" id="dunread" style="border-color:var(--accent);color:var(--accent)">' + esc(T("markUnread")) + '</button>' +
-          '<button class="tbtn" id="dclose">' + esc(T("modalClose")) + '</button>' +
-        '</div>' +
-      '</div>';
-    openModal(html);
-    if (!wasRead) {
-      /* 现有语义：打开详情自动标记已读；失败则回滚本地状态并提示，不做“假成功” */
-      m.read_at = "now";
-      fetch("/api/messages/read", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: m.id, read: true }) })
-        .then(function (r) { return r.json(); })
-        .then(function (res) {
-          if (res && res.success) {
-            /* 列表卡片同步切换为已读样式：去掉加粗、未读标签，并更新详情里的状态与按钮 */
-            var card = $("list").querySelector('.card[data-id="' + m.id + '"]');
-            if (card) {
-              card.classList.remove("unread");
-              var dot = card.querySelector(".undot");
-              if (dot) dot.remove();
-              var utag = card.querySelector(".unread-tag");
-              if (utag) utag.remove();
-            }
-            var st = $("dstate");
-            if (st) st.textContent = T("read");
-            refreshUnreadCount();
-          } else {
-            m.read_at = null;
-            toast(T("readFail"));
+      foot;
+  }
+  /* 打开详情即标记已读；失败回滚本地状态并提示，不做"假成功" */
+  function markDetailRead(m, root) {
+    if (m.read_at) return;
+    m.read_at = "now";
+    fetch("/api/messages/read", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: m.id, read: true }) })
+      .then(function (r) { return r.json(); })
+      .then(function (res) {
+        if (res && res.success) {
+          /* 列表卡片同步切换为已读样式：去掉加粗、未读标签，并更新详情里的状态 */
+          var card = $("list").querySelector('.card[data-id="' + m.id + '"]');
+          if (card) {
+            card.classList.remove("unread");
+            var dot = card.querySelector(".undot");
+            if (dot) dot.remove();
+            var utag = card.querySelector(".unread-tag");
+            if (utag) utag.remove();
           }
-        })
-        .catch(function () { m.read_at = null; toast(T("readFail")); });
-    }
-    $("dstar").onclick = function () { toggleStar(m.id, !m.starred).then(closeModal); };
-    $("dcopy").onclick = function () { doCopy(m.content, $("dcopy")); };
-    $("ddel").onclick = function () { closeModal(); doDelete([m.id]); };
-    $("dunread").onclick = function () {
+          var st = root ? root.querySelector("#dstate") : null;
+          if (st) st.textContent = T("read");
+          refreshUnreadCount();
+        } else {
+          m.read_at = null;
+          toast(T("readFail"), { type: "error" });
+        }
+      })
+      .catch(function () { m.read_at = null; toast(T("readFail"), { type: "error" }); });
+  }
+  function bindDetail(m, root, mode) {
+    if (!root) return;
+    var q = function (sel) { return root.querySelector(sel); };
+    var snum = normalizeNum(m.sender);
+    var star = q("#dstar");
+    if (star) star.onclick = function () {
+      /* UX-09 U9-01：不能再用打开详情时的 m.starred 快照。
+         双栏面板在收藏后不会重渲染，闭包里的旧快照会让"再点一次取消收藏"
+         仍然发出 starred=true，导致双栏下收藏无法取消。
+         这里以列表最新数据为准，并在双栏下重渲染面板，让按钮文案/★与真实状态一致。 */
+      var latest = null;
+      try { latest = typeof msgById === "function" ? msgById(m.id) : null; } catch (e) { latest = null; }
+      var cur = latest && typeof latest.starred !== "undefined" ? !!latest.starred : !!m.starred;
+      toggleStar(m.id, !cur).then(function () {
+        if (mode === "pane") {
+          m.starred = !cur;
+          if (typeof openPane === "function") openPane(m.id);
+        } else closeModal();
+      });
+    };
+    var cp = q("#dcopy");
+    if (cp) cp.onclick = function () { doCopy(m.content, cp); };
+    var del = q("#ddel");
+    if (del) del.onclick = function () {
+      /* UX-09 U9-02：先确认再关闭详情，避免"点了就没了"且无法追问 */
+      confirmDelOne().then(function (go) {
+        if (!go) return;
+        if (mode === "pane") { state.detailId = 0; paneMarkSel(0); paneEmptyState(); } else closeModal();
+        doDelete([m.id]);
+      });
+    };
+    var un = q("#dunread");
+    if (un) un.onclick = function () {
       fetch("/api/messages/read", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: m.id, read: false }) })
         .then(function (r) { return r.json(); })
         .then(function (res) {
-          if (res && res.success) { closeModal(); load(); } else { toast(T("readFail")); }
+          if (res && res.success) {
+            /* UX-09 U9-08：动作成功要给结果反馈，否则双栏下面板一清空像是"点没了" */
+            toast(T("markedUnread"), { type: "success" });
+            if (mode === "pane") { state.detailId = 0; paneMarkSel(0); paneEmptyState(); load(); } else closeModal();
+          } else { toast(T("readFail"), { type: "error" }); }
         })
-        .catch(function () { toast(T("readFail")); });
+        .catch(function () { toast(T("readFail"), { type: "error" }); });
     };
-    $("dclose").onclick = closeModal;
-    var lb = $("dlabel");
+    var lb = q("#dlabel");
     if (lb) lb.onclick = function () {
       var cur = state.labels[snum] || "";
-      var nm = prompt(T("labelPrompt", { n: snum }), cur);
-      if (nm === null) return;
-      saveLabel(snum, String(nm).trim());
-      closeModal(); load();
+      /* UX-08：不再用原生 prompt；留空语义保持"清除标签"，并有明确说明。
+         先关输入弹窗、再关详情弹层，避免两层同时收起导致焦点落回 body。 */
+      dsPrompt({
+        title: T("dspLabelTitle"),
+        message: T("labelPrompt", { n: snum }) + " · " + T("dspLabelEmpty"),
+        value: cur,
+        maxLength: 40,
+        trim: true,
+        onSubmit: function (val) { saveLabel(snum, val); return true; }
+      }).then(function (v) {
+        if (v === null) return;
+        if (mode === "pane") load(); else closeModal();
+      });
     };
+    var cl = q("#dclose");
+    if (cl) cl.onclick = closeModal;
+    var pc = q("#dpclose");
+    if (pc) pc.onclick = function () { state.detailId = 0; paneMarkSel(0); paneEmptyState(); };
+  }
+  function renderDetail(m) {
+    openModal(detailHTML(m, "modal"));
+    var root = $("modalbody");
+    bindDetail(m, root, "modal");
+    markDetailRead(m, root);
+  }
+
+  /* ===== UX-07C：宽屏右侧详情面板（≥1600）===== */
+  var SPLIT_MQ = window.matchMedia ? window.matchMedia("(min-width: 1600px)") : null;
+  function splitOn() { return !!(SPLIT_MQ && SPLIT_MQ.matches); }
+  var paneSeq = 0;
+  function paneMarkSel(id) {
+    var list = $("list"); if (!list) return;
+    var cards = list.querySelectorAll(".card");
+    for (var i = 0; i < cards.length; i++) {
+      cards[i].classList.toggle("dsel", id !== 0 && cards[i].getAttribute("data-id") === String(id));
+    }
+  }
+  /* 空态：状态（语义）与文案（i18n）分离——切换语言时按状态重新生成，不会把 paneMissing 冲成默认文案 */
+  function panEmptyRender() {
+    var pane = $("detailpane"), scroll = $("dpscroll"), empty = $("dpempty");
+    if (!pane || !scroll || !empty) return;
+    scroll.hidden = true; scroll.innerHTML = "";
+    empty.hidden = false;
+    var key = state.paneState || "empty";
+    var b = empty.querySelector("b"), s = empty.querySelector("span");
+    /* 状态 → 文案的映射保持为单一表达式：既便于逐项核对，也避免中间变量把默认分支藏起来 */
+    if (b) b.textContent = key === "missing" ? T("paneMissing") : key === "fail" ? T("detailFail")
+      : key === "loading" ? T("paneLoading") : key === "unauth" ? T("errUnauth") : T("paneEmpty");
+    if (s) s.textContent = key === "empty" ? T("paneEmptySub") : key === "fail" ? T("detailFailSub") : "";
+    /* UX-09 U9-12：失败/登录过期态给出可执行的下一步，而不是让人对着错误文案干等。
+       按钮随状态重建，不引入新的弹层或组件。 */
+    var old = empty.querySelector("#paneretry");
+    if (old) old.parentNode.removeChild(old);
+    if ((key === "fail" || key === "unauth") ) {
+      var btn = document.createElement("button");
+      btn.className = "tbtn";
+      btn.id = "paneretry";
+      btn.type = "button";
+      btn.textContent = key === "unauth" ? T("relogin") : T("retry");
+      btn.onclick = function () {
+        if (key === "unauth") { location.reload(); return; }
+        if (state.detailId) openPane(state.detailId);
+      };
+      empty.appendChild(btn);
+    }
+  }
+  function paneEmptyState(stateKey) {
+    state.paneState = stateKey || "empty";
+    panEmptyRender();
+  }
+  function openPane(id) {
+    var pane = $("detailpane"), scroll = $("dpscroll"), empty = $("dpempty");
+    if (!pane || !scroll) return;
+    state.detailId = id;
+    paneMarkSel(id);
+    var seq = ++paneSeq;
+    /* UX-09 U9-11：右侧原本已有内容时保留旧内容到新内容到达，避免闪白；
+       只有本来就空着才显示加载态，让"点了有反应"可感知。 */
+    if (scroll.hidden) paneEmptyState("loading");
+    fetch("/api/messages/" + id)
+      .then(function (r) {
+        if (r.status === 401) { var ue = new Error("unauthorized"); ue.unauth = true; throw ue; }
+        return r.json();
+      })
+      .then(function (res) {
+        /* 快速连续切换时丢弃过期响应，避免右侧显示上一条的内容 */
+        if (seq !== paneSeq) return;
+        if (!res || !res.success || !res.item) { paneEmptyState("fail"); return; }
+        if (empty) empty.hidden = true;
+        scroll.hidden = false;
+        scroll.innerHTML = detailHTML(res.item, "pane");
+        bindDetail(res.item, scroll, "pane");
+        markDetailRead(res.item, scroll);
+        scroll.scrollTop = 0;
+      })
+      .catch(function (e) {
+        if (seq !== paneSeq) return;
+        paneEmptyState((e && e.unauth) ? "unauth" : "fail");
+      });
+  }
+  /* 列表重绘后同步选中态：选中项被筛选排除或已删除时，面板回到空态而不是继续显示旧内容 */
+  function syncPaneAfterLoad() {
+    if (!splitOn()) return;
+    var pane = $("detailpane"); if (!pane) return;
+    if (!state.detailId) { paneMarkSel(0); paneEmptyState(); return; }
+    var card = $("list").querySelector('.card[data-id="' + state.detailId + '"]');
+    if (card) { paneMarkSel(state.detailId); return; }
+    paneMarkSel(0);
+    paneEmptyState("missing");
   }
   /* 未读数以服务端为准（避免只改前端数字）。消息列表接口不返回 unread，
      故这里仍需读取一次 /api/stats；首屏只此一处（已移除侧栏重复统计请求）。 */
+  /* 同一时刻只允许一个在途请求：首屏首载与轮询增量会先后触发，去重后只发一次 /api/stats */
+  var unreadPending = null;
   function refreshUnreadCount() {
-    return fetch("/api/stats").then(function (r) { return r.json(); }).then(function (res) {
+    if (unreadPending) return unreadPending;
+    unreadPending = fetch("/api/stats").then(function (r) { return r.json(); }).then(function (res) {
       if (res && res.success && typeof res.unread === "number") {
         state.unread = res.unread;
         var el = $("unreadcount");
         if (el) { el.textContent = state.unread; el.hidden = state.unread <= 0; }
+        fillStatBar(res);
       }
-    }).catch(function () {});
+    }).catch(function () {}).then(function () { unreadPending = null; });
+    return unreadPending;
   }
+  /* 首页统计摘要（默认隐藏）：关闭时不请求 /api/stats，也不保留任何占位高度 */
+  function fillStatBar(d) {
+    if (!d) return;
+    var tot = $("sttotal"), un = $("stunread"), td = $("sttoday");
+    if (tot) tot.textContent = d.total != null ? d.total : 0;
+    if (un) un.textContent = d.unread != null ? d.unread : 0;
+    if (td) {
+      /* /api/stats 的 days 为「日期字符串 → 条数」，按本地当天日期精确匹配；当天无数据即 0，
+         不用「最后一条」兜底（那会把昨天当成今天） */
+      var now = new Date();
+      var key = now.getFullYear() + "-" + ("0" + (now.getMonth() + 1)).slice(-2) + "-" + ("0" + now.getDate()).slice(-2);
+      var days = d.days || [], todayN = 0, i;
+      for (i = 0; i < days.length; i++) if (days[i] && days[i].d === key) { todayN = days[i].n || 0; break; }
+      td.textContent = todayN;
+    }
+  }
+  function applyHomeStats() {
+    var bar = $("statbar");
+    if (!bar) return Promise.resolve();
+    if (!state.homeStats) { bar.hidden = true; return Promise.resolve(); }
+    bar.hidden = false;
+    return fetch("/api/stats").then(function (r) { return r.json(); })
+      .then(function (d) { if (d && d.success) fillStatBar(d); })
+      .catch(function () {});
+  }
+  function refreshHomeStats() { return applyHomeStats(); }
   /* 免打扰：sms_dnd = {on,start,end}（小时，支持跨夜） */
   function getDND() {
     try { var d = JSON.parse(localStorage.getItem("sms_dnd") || ""); if (d && typeof d === "object") return d; } catch (e) {}
@@ -6651,18 +8318,18 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       var maxS = 1, maxD = 1;
       (d.sources || []).forEach(function (x) { if (x.n > maxS) maxS = x.n; });
       (d.days || []).forEach(function (x) { if (x.n > maxD) maxD = x.n; });
+      var srcRows = (d.sources || []).map(function (x) {
+        return '<div class="barrow"><span class="bl">' + esc(srcLabel(x.source) || x.source) + '</span><span class="bt"><span class="bf" style="width:' + Math.round(x.n / maxS * 100) + '%"></span></span><span class="bn">' + x.n + '</span></div>';
+      }).join("");
+      var dayRows = (d.days || []).map(function (x) {
+        return '<div class="barrow"><span class="bl">' + esc(String(x.d || "").slice(5)) + '</span><span class="bt"><span class="bf" style="width:' + Math.round(x.n / maxD * 100) + '%"></span></span><span class="bn">' + x.n + '</span></div>';
+      }).join("");
       var html = '<div class="statgrid">' +
         '<div class="statbox"><b>' + d.total + '</b><span>' + esc(T("statTotal")) + '</span></div>' +
         '<div class="statbox"><b>' + d.unread + '</b><span>' + esc(T("statUnread")) + '</span></div>' +
         '<div class="statbox"><b>' + d.starred + '</b><span>' + esc(T("statStarred")) + '</span></div></div>';
-      html += '<h3 style="font-size:13px;margin:6px 0">' + esc(T("statSources")) + '</h3>';
-      (d.sources || []).forEach(function (x) {
-        html += '<div class="barrow"><span class="bl">' + esc(srcLabel(x.source) || x.source) + '</span><span class="bt"><span class="bf" style="width:' + Math.round(x.n / maxS * 100) + '%"></span></span><span class="bn">' + x.n + '</span></div>';
-      });
-      html += '<h3 style="font-size:13px;margin:12px 0 6px">' + esc(T("statDays")) + '</h3>';
-      (d.days || []).forEach(function (x) {
-        html += '<div class="barrow"><span class="bl">' + esc(String(x.d || "").slice(5)) + '</span><span class="bt"><span class="bf" style="width:' + Math.round(x.n / maxD * 100) + '%"></span></span><span class="bn">' + x.n + '</span></div>';
-      });
+      html += '<div class="stat-sec"><h5>' + esc(T("statSources")) + '</h5>' + (srcRows || '<div class="stat-empty">—</div>') + '</div>';
+      html += '<div class="stat-sec"><h5>' + esc(T("statDays")) + '</h5>' + (dayRows || '<div class="stat-empty">—</div>') + '</div>';
       $("statbody").innerHTML = html;
     }).catch(function () { var b = $("statbody"); if (b) b.textContent = T("statFail"); });
   }
@@ -6748,13 +8415,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   function createTokenUi() {
     var inp = $("tokname");
     var name = inp ? inp.value.trim() : "";
-    if (!name) { toast(T("scTokNameRequired")); if (inp) inp.focus(); return; }
+    if (!name) { toast(T("scTokNameRequired"), { type: "warning" }); if (inp) inp.focus(); return; }
     var payload = { name: name };
     var ninp = $("toknotenew");
     if (ninp && ninp.value.trim()) payload.note = ninp.value.trim();
     var sel = $("tokexp"), dinp = $("tokexpdate");
     if (sel && sel.value === "custom") {
-      if (!dinp || !dinp.value) { toast(T("scTokExpDateRequired")); if (dinp) dinp.focus(); return; }
+      if (!dinp || !dinp.value) { toast(T("scTokExpDateRequired"), { type: "warning" }); if (dinp) dinp.focus(); return; }
       payload.expires_at = dinp.value;
     } else if (sel && sel.value !== "0") {
       payload.expires_in_days = parseInt(sel.value, 10) || 0;
@@ -6770,48 +8437,59 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         return;
       }
       showTokenSecret(T("scTokCreatedTitle"), name, res.d.token);
-    }).catch(function () { toast(T("scTokCreateFail")); });
+    }).catch(function () { toast(T("scTokCreateFail"), { type: "error" }); });
   }
   function tokNameOf(id) {
     var t = tokListCache.filter(function (x) { return x.id === id; })[0];
     return t ? t.name : id;
   }
   function revokeTokenUi(id) {
-    if (!confirm(T("scTokRevokeConfirm", { name: tokNameOf(id) }))) return;
-    askPassword(function () {
-      tokApi("POST", "/api/tokens/revoke", { id: id }).then(function (res) {
-        if (res.s === 401) { location.reload(); return; }
-        if (res.d && res.d.success) { toast(res.d.revoked ? T("scTokRevoked") : T("scTokAlreadyRevoked")); loadTokens(); }
-        else if (res.d && res.d.error === "NOT_FOUND") { toast(T("scTokNotFound")); loadTokens(); }
-        else toast(T("scTokRevokeFail"));
-      }).catch(function () { toast(T("scTokRevokeFail")); });
+    dsConfirm({ message: T("scTokRevokeConfirm", { name: tokNameOf(id) }), danger: true }).then(function (go) {
+      if (!go) return;
+      askPassword(function () {
+        tokApi("POST", "/api/tokens/revoke", { id: id }).then(function (res) {
+          if (res.s === 401) { location.reload(); return; }
+          if (res.d && res.d.success) { toast(res.d.revoked ? T("scTokRevoked") : T("scTokAlreadyRevoked")); loadTokens(); }
+          else if (res.d && res.d.error === "NOT_FOUND") { toast(T("scTokNotFound"), { type: "error" }); loadTokens(); }
+          else toast(T("scTokRevokeFail"), { type: "error" });
+        }).catch(function () { toast(T("scTokRevokeFail"), { type: "error" }); });
+      });
     });
   }
   function rotateTokenUi(id) {
-    if (!confirm(T("scTokRotateConfirm", { name: tokNameOf(id) }))) return;
-    askPassword(function () {
-      tokApi("POST", "/api/tokens/rotate", { id: id }).then(function (res) {
-        if (res.s === 401) { location.reload(); return; }
-        if (res.d && res.d.success) { showTokenSecret(T("scTokRotatedTitle"), tokNameOf(id), res.d.token); }
-        else if (res.d && res.d.error === "NOT_FOUND") { toast(T("scTokNotFound")); loadTokens(); }
-        else toast(T("scTokRotateFail"));
-      }).catch(function () { toast(T("scTokRotateFail")); });
+    dsConfirm({ message: T("scTokRotateConfirm", { name: tokNameOf(id) }), danger: true }).then(function (go) {
+      if (!go) return;
+      askPassword(function () {
+        tokApi("POST", "/api/tokens/rotate", { id: id }).then(function (res) {
+          if (res.s === 401) { location.reload(); return; }
+          if (res.d && res.d.success) { showTokenSecret(T("scTokRotatedTitle"), tokNameOf(id), res.d.token); }
+          else if (res.d && res.d.error === "NOT_FOUND") { toast(T("scTokNotFound"), { type: "error" }); loadTokens(); }
+          else toast(T("scTokRotateFail"), { type: "error" });
+        }).catch(function () { toast(T("scTokRotateFail"), { type: "error" }); });
+      });
     });
   }
   function renameTokenUi(id) {
     var old = tokNameOf(id);
-    var nm = prompt(T("scTokRenamePrompt", { name: old }), old);
-    if (nm === null) return;
-    nm = String(nm).trim();
-    if (!nm) { toast(T("scTokNameEmpty")); return; }
-    tokApi("POST", "/api/tokens/rename", { id: id, name: nm }).then(function (res) {
-      if (res.s === 401) { location.reload(); return; }
-      if (res.d && res.d.success) { toast(T("scTokRenamed")); loadTokens(); return; }
-      if (res.d && res.d.error === "NAME_TAKEN") { toast(T("scTokNameTaken")); return; }
-      if (res.d && res.d.error === "INVALID_NAME") { toast(T("scTokNameInvalid")); return; }
-      if (res.d && res.d.error === "NOT_FOUND") { toast(T("scTokNotFoundOrRevoked")); loadTokens(); return; }
-      toast(T("scTokRenameFail"));
-    }).catch(function () { toast(T("scTokRenameFail")); });
+    /* UX-08：原生 prompt → 统一输入弹窗（必填 + 长度 + 后端错误就地回显，不改接口与语义） */
+    dsPrompt({
+      title: T("dspTokTitle"),
+      message: T("scTokRenamePrompt", { name: old }),
+      value: old,
+      maxLength: 60,
+      required: true,
+      requiredMsg: T("scTokNameEmpty"),
+      onSubmit: function (val) {
+        return tokApi("POST", "/api/tokens/rename", { id: id, name: val }).then(function (res) {
+          if (res.s === 401) { location.reload(); return false; }
+          if (res.d && res.d.success) { toast(T("scTokRenamed"), { type: "success" }); loadTokens(); return true; }
+          if (res.d && res.d.error === "NAME_TAKEN") return T("scTokNameTaken");
+          if (res.d && res.d.error === "INVALID_NAME") return T("scTokNameInvalid");
+          if (res.d && res.d.error === "NOT_FOUND") { toast(T("scTokNotFoundOrRevoked"), { type: "error" }); loadTokens(); return true; }
+          return T("scTokRenameFail");
+        });
+      }
+    });
   }
   function registerSW() {
     try { if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(function () {}); } catch (e) {}
@@ -6833,9 +8511,9 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var q = qs();
     return fetch("/api/messages?" + q)
       .then(function (r) {
-        /* 登录过期（cookie 7 天 Max-Age）：401 时整页重载，由服务端下发登录页，
-           避免停在「加载失败」重试界面 */
-        if (r.status === 401) { location.reload(); return new Promise(function () {}); }
+        /* 登录过期（cookie 7 天 Max-Age）：不再无条件整页重载，
+           交给 showRetry 呈现「登录已过期 + 重新登录」，用户能分清是断网还是要重登（UX-09 U9-07） */
+        if (r.status === 401) { var ue = new Error("unauthorized"); ue.unauth = true; throw ue; }
         return r.json();
       })
       .then(function (res) {
@@ -6894,7 +8572,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
            因此过期请求（含增量/轮询）失败时一律不得触碰当前 UI；
            仅最新一次加载仍可展示错误与重试入口。 */
         if (seq !== loadSeq) return;
-        showRetry(e);
+        /* fetch 因网络层失败 reject 的是 TypeError（断网/域名不可达/CORS 前置失败），
+           与「服务端返回 success:false」区分开，两种情境给不同文案（UX-09 U9-07） */
+        var err = e || {};
+        if (!err.unauth && (err.name === "TypeError" || (typeof navigator !== "undefined" && navigator.onLine === false))) {
+          err = { offline: true };
+        }
+        showRetry(err);
       });
   }
   /* 来源下拉：从 /api/sources 动态聚合所有来源（含自定义 cron/alert 等），替代原先写死的三项 */
@@ -6916,36 +8600,9 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       sel.value = cur;
     }).catch(function () {});
   }
-  /* 右侧栏：设置概览（读取真实设置） */
-  function scMini(label, value, scope) {
-    return '<div class="settings-mini"><span>' + esc(label) + '</span><span><strong>' + esc(value) + '</strong>'
-      + (scope ? ' <span class="scope ' + scope + '">' + esc(scope === "browser" ? T("scScopeBrowser") : T("scScopeGlobal")) + '</span>' : "")
-      + '</span></div>';
-  }
-  function loadSideSettings() {
-    return fetch("/api/settings").then(function (r) { return r.json(); }).then(function (d) {
-      var box = $("sideSettings");
-      if (!box || !d || !d.success) return;
-      var local = parseInt(localStorage.getItem(TTL_LOCAL_KEY), 10);
-      var localSet = Number.isInteger(local) && local >= 5 && local <= 43200;
-      var ttl = localSet ? local : (parseInt(d.session_ttl_minutes, 10) || 30);
-      var cfg = d.notify || {}, chans = cfg.channels || {};
-      var tgts = cfg.targets || [];
-      var nch = tgts.length ? tgts.filter(function (t) { return t.enabled; }).length
-        : Object.keys(chans).filter(function (k) { return chans[k] && chans[k].configured; }).length;
-      box.innerHTML =
-        scMini(T("scTtl"), T("scMinN", { n: ttl }), localSet ? "browser" : "global") +
-        scMini(T("scNotifyChannels"), T("scChannelsN", { n: nch }), "") +
-        scMini(T("scRetention"), T("scDaysN", { n: d.retention_days || 30 }), "global") +
-        scMini(T("scLanguage"), LANG_NAMES[LANG], "browser");
-    }).catch(function () {});
-  }
-  /* 右侧栏系统统计（P3）改为按需：统一由「查看统计」按钮打开 openStats 弹层读取 /api/stats，
-     首屏不再常驻统计行，也不再额外发起一次 /api/stats 请求。 */
-  function refreshSide() { loadSideSettings(); }
   /* 首屏工作台：短信列表立即加载，不再被来源/设备等辅助接口串行阻塞；
-     两条辅助请求并行自行更新 UI（来源下拉、设备标签），互不阻塞首条消息出现。 */
-  function refreshAll() { refreshSide(); loadSources(); loadDevices(); return load(); }
+     两条辅助请求并行自行更新 UI（来源下拉、设备下拉），互不阻塞首条消息出现。 */
+  function refreshAll() { loadSources(); loadDevices(); refreshHomeStats(); return load(); }
   function syncClear() { $("clearq").hidden = !$("q").value; }
   $("q").addEventListener("input", function () {
     syncClear();
@@ -6955,8 +8612,27 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   $("clearq").onclick = function () { $("q").value = ""; state.q = ""; state.page = 1; syncClear(); load(); $("q").focus(); };
   $("prev").onclick = function () { if (state.page > 1) { state.page--; load(); } };
   $("next").onclick = function () { if (state.page < state.pages) { state.page++; load(); } };
-  $("src").onchange = function () { state.src = $("src").value; state.page = 1; load(); };
-  $("range").onchange = function () { state.range = $("range").value; state.page = 1; load(); };
+  $("src").onchange = function () { state.src = $("src").value; state.page = 1; syncFilterBtn(); load(); };
+  $("range").onchange = function () { state.range = $("range").value; state.page = 1; syncFilterBtn(); load(); };
+  /* 移动端「筛选」：默认收起设备/来源/时间，把首屏让给消息；有生效条件时按钮高亮并显示条数 */
+  function syncFilterBtn() {
+    var btn = $("filterbtn");
+    if (!btn) return;
+    var n = (state.device ? 1 : 0) + (state.src ? 1 : 0) + (state.range ? 1 : 0);
+    btn.textContent = n ? T("filterBtn") + " " + n : T("filterBtn");
+    btn.classList.toggle("active", n > 0);
+    btn.setAttribute("aria-pressed", n > 0 ? "true" : "false");
+  }
+  $("filterbtn").onclick = function () {
+    var f = document.querySelector(".filters");
+    if (!f) return;
+    var adv = f.classList.toggle("adv");
+    this.setAttribute("aria-expanded", adv ? "true" : "false");
+  };
+  syncFilterBtn();
+  /* UX-09 U9-18：首屏也要把单选筛选的可访问状态补齐——此前只有 class=active，
+     aria-pressed 要等用户手动切换一次才出现 */
+  applyFilterUI(state.filterMode || "all");
   function doJump() {
     var n = parseInt($("jump").value, 10);
     if (!Number.isInteger(n)) return;
@@ -6975,7 +8651,11 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var map = { fall: "all", funread: "unread", fread: "read", fstar: "starred" };
     Object.keys(map).forEach(function (id) {
       var b = $(id);
-      if (b) b.classList.toggle("active", map[id] === mode);
+      if (!b) return;
+      var on = map[id] === mode;
+      b.classList.toggle("active", on);
+      /* UX-09 U9-18：单选筛选的选中态此前只体现在颜色上，读屏无法得知当前筛选 */
+      b.setAttribute("aria-pressed", on ? "true" : "false");
     });
   }
   function setFilterMode(mode) {
@@ -6987,15 +8667,60 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     applyFilterUI(mode);
     load();
   }
+  /* UX-09 U9-06：把筛选恢复到初始状态（空态里的「清除筛选」入口用它）。
+     只动前端筛选条件，不触碰分页大小、排序与业务语义。 */
+  function resetFilters() {
+    state.device = 0; state.src = ""; state.range = ""; state.q = "";
+    var qEl = $("q"); if (qEl) qEl.value = "";
+    var dEl = $("dev"); if (dEl) dEl.value = "0";
+    var sEl = $("src"); if (sEl) sEl.value = "";
+    var rEl = $("range"); if (rEl) rEl.value = "";
+    state.filterMode = "all"; state.starOnly = false; state.unreadOnly = false; state.readOnly = false;
+    state.page = 1; state.cursor = ""; state.loadMoreDepth = 0;
+    applyFilterUI("all");
+    if (typeof syncFilterBtn === "function") syncFilterBtn();
+    load();
+  }
   $("fall").onclick = function () { setFilterMode("all"); };
   $("funread").onclick = function () { setFilterMode("unread"); };
   $("fread").onclick = function () { setFilterMode("read"); };
   $("fstar").onclick = function () { setFilterMode(state.filterMode === "starred" ? "all" : "starred"); };
   $("refreshbtn").onclick = function () { refreshAll(); };
-  $("sideSetBtn").onclick = function () { openSettingsCenter("session"); };
-  $("sideNotifyBtn").onclick = function () { openSettingsCenter("notify"); };
-  $("logoutbtn").onclick = function () { if (!window.confirm(T("scLogoutConfirm"))) return; doLogout(); };
-  $("sideStatsBtn").onclick = openStats;
+  $("dev").onchange = function () { state.device = parseInt($("dev").value, 10) || 0; state.page = 1; syncFilterBtn(); load(); };
+  $("statsbtn").onclick = openStats;
+  $("devbtn").onclick = openDevices;
+  $("stdetail").onclick = openStats;
+  var doLogoutConfirm = function () {
+    dsConfirm({ message: T("scLogoutConfirm"), danger: true }).then(function (go) { if (go) doLogout(); });
+  };
+  $("logoutbtn").onclick = doLogoutConfirm;
+  /* 移动端「更多」菜单：把统计/设备/设置/退出收进 ⋯，桌面端这些按钮直接可见 */
+  (function navMenu() {
+    var btn = $("morebtn"), menu = $("navmenu");
+    if (!btn || !menu) return;
+    function close() { menu.hidden = true; btn.setAttribute("aria-expanded", "false"); }
+    btn.onclick = function (ev) {
+      ev.stopPropagation();
+      var open = menu.hidden;
+      menu.hidden = !open;
+      btn.setAttribute("aria-expanded", open ? "true" : "false");
+    };
+    menu.onclick = function (ev) {
+      var b = ev.target.closest ? ev.target.closest("button") : null;
+      if (!b) return;
+      close();
+      if (b.id === "mnurefresh") refreshAll();
+      else if (b.id === "mnustats") openStats();
+      else if (b.id === "mnudev") openDevices();
+      else if (b.id === "mnuset") openSettingsCenter("display");
+      else if (b.id === "mnulogout") doLogoutConfirm();
+    };
+    document.addEventListener("click", function (ev) {
+      if (menu.hidden) return;
+      if (ev.target === btn || btn.contains(ev.target)) return;
+      close();
+    });
+  })();
   /* 导出：按当前筛选条件下载 CSV / JSON（附件下载，不跳转页面） */
   function exportUrl(fmt) {
     var p = new URLSearchParams();
@@ -7114,19 +8839,66 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var m = SC_CH[LANG];
     return (m && m[ch.key]) || SC_CH_EN[ch.key] || ch.label || ch.key;
   }
+  /* 设置中心分区：短标签用于导航，title/desc 用于分区标题与作用域说明。
+     顺序按使用频率排列：界面 → 消息 → 登录 → 通知 → 数据 → 安全 */
   var SET_SECTIONS = [
-    { key: "session", label: "scTabSession" },
-    { key: "notify", label: "scTabNotify" },
-    { key: "biz", label: "scTabBiz" },
-    { key: "security", label: "scTabSec" }
+    { key: "display", nav: "scNavDisplay", title: "scTabDisplay", desc: "scSecDisplayHelp" },
+    { key: "messages", nav: "scNavMessages", title: "scTabMessages", desc: "scSecMessagesHelp" },
+    { key: "session", nav: "scNavSession", title: "scTabSession", desc: "scSecSessionHelp" },
+    { key: "notify", nav: "scNavNotify", title: "scTabNotify", desc: "scSecNotifyHelp" },
+    { key: "biz", nav: "scNavBiz", title: "scTabBiz", desc: "scSecBizHelp" },
+    { key: "security", nav: "scNavSecurity", title: "scTabSec", desc: "scSecSecurityHelp" }
   ];
-  var SC = { d: null, section: "session", dirty: false, targets: [], tgSeq: 0, conflict: null, saving: false, lastSaveAt: 0 };
+  var SC = { d: null, section: "display", dirty: false, targets: [], tgSeq: 0, conflict: null,
+    saving: false, lastSaveAt: 0, loading: true, loadError: false };
 
   function scBadge(kind) {
     var k = kind === "global" ? "global" : "browser";
     return '<span class="ds-scope ds-scope--' + k + '">' + T(k === "global" ? "scScopeGlobal" : "scScopeBrowser") + '</span>';
   }
   function scHelp(t) { return '<div class="ds-help">' + t + '</div>'; }
+  /* 分组：标题 + 说明 + 行式设置项；不再为每项套一层卡片边框 */
+  function scGroup(title, badge, desc, inner) {
+    return '<div class="sc-group"><div class="sc-gtitle">' + title
+      + (badge ? scBadge(badge) : "") + '</div>'
+      + (desc ? '<div class="sc-gdesc">' + desc + '</div>' : "") + inner + '</div>';
+  }
+  /* 行式设置项：左侧名称+说明，右侧控件；窄屏自动堆叠（见媒体查询） */
+  function scItem(label, desc, ctl, opts) {
+    var o = opts || {};
+    var labId = "sclb-" + o.id;
+    return '<div class="sc-item' + (o.cls ? " " + o.cls : "") + '">'
+      + '<div class="sc-item-main"><div class="sc-ilabel" id="' + labId + '">'
+      + (o.htmlLabel ? label : '<label for="' + o.id + '">' + label + '</label>') + '</div>'
+      + (desc ? '<div class="sc-idesc">' + desc + '</div>' : "") + '</div>'
+      + '<div class="sc-ictl' + (o.wide ? " sc-ictl--wide" : "") + '">' + ctl + '</div></div>';
+  }
+  /* 行式开关：整块可点，触控高度 24px + 外扩 10px 内边距，键盘可用（原生 checkbox + aria-labelledby） */
+  function scSwitch(id, on, labelledBy, extra) {
+    return '<label class="sc-switch"><input type="checkbox" id="' + id + '"'
+      + (on ? " checked" : "")
+      + (labelledBy ? ' aria-labelledby="' + labelledBy + '"' : "")
+      + (extra || "") + '><span class="sc-knob" aria-hidden="true"></span></label>';
+  }
+  /* 保存/加载状态条：#scstatus 固定位于底部操作区左侧，aria-live 让读屏同步 */
+  function scStatus(kind, msg) {
+    var el = $("scstatus");
+    if (!el) return;
+    if (!msg) { el.hidden = true; el.textContent = ""; el.className = "sc-status"; return; }
+    el.hidden = false;
+    el.className = "sc-status" + (kind ? " sc-status--" + kind : "");
+    /* 错误与冲突需要立刻播报，用 alert/assertive；进行中与成功保持礼貌播报 */
+    var loud = kind === "error" || kind === "conflict";
+    el.setAttribute("role", loud ? "alert" : "status");
+    el.setAttribute("aria-live", loud ? "assertive" : "polite");
+    el.textContent = msg;
+  }
+  function scSkeleton() {
+    return '<div class="sc-skel" aria-hidden="true">'
+      + '<div class="sc-skel-bar"></div><div class="sc-skel-bar"></div><div class="sc-skel-bar"></div>'
+      + '<div class="sc-skel-bar"></div><div class="sc-skel-bar"></div></div>'
+      + '<span class="sr-only">' + T("loading") + '</span>';
+  }
   function scMarkDirty(on) {
     SC.dirty = !!on;
     var b = $("scdirty"), c = $("scrcancel");
@@ -7143,31 +8915,54 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         fields: t.fields || {}, configured: !!t.configured, _new: false };
     });
   }
+  /* 打开设置中心：先立刻弹出骨架（不等网络），再填充真实内容，消除空白等待 */
   function openSettingsCenter(section) {
-    SC.section = section || "session";
+    SC.section = section || "display";
     SC.dirty = false;
     SC.conflict = null;
-    nfFetchSettings().then(function (d) {
-      if (!d || !d.success) { toast(T("scReadFail")); return; }
+    SC.loading = true;
+    SC.loadError = false;
+    SC.d = null;
+    SC.targets = [];
+    scRenderShell();
+    scLoad();
+  }
+  /* 读取设置：首次进入显示骨架，失败给出可重试的错误态（而不是静默空白） */
+  function scLoad() {
+    return nfFetchSettings().then(function (d) {
+      if (!d || !d.success) {
+        SC.loading = false; SC.loadError = true;
+        scRenderBody(); toast(T("scReadFail"), { type: "error" }); return false;
+      }
       SC.d = d;
       SC.targets = scTargetsFrom(d);
-      scRenderShell();
-    }).catch(function () { toast(T("scReadFail")); });
+      SC.loading = false;
+      SC.loadError = false;
+      scRenderBody();
+      return true;
+    }).catch(function () {
+      SC.loading = false; SC.loadError = true;
+      scRenderBody(); toast(T("scReadFail"), { type: "error" }); return false;
+    });
   }
   /* 保存后 / 冲突恢复时回读服务端最新视图：保持当前分组与弹层不关闭，
-     多目标场景可以连续编辑；新目标由服务端分配 id，必须回读才能继续编辑与测试。 */
+     多目标场景可以连续编辑；新目标由服务端分配 id，必须回读才能继续编辑与测试。
+     只重绘正文，不重建外壳：保留当前焦点与底部保存状态提示。 */
   function scReload() {
     var sec = SC.section;
     return nfFetchSettings().then(function (d) {
-      if (!d || !d.success) { toast(T("scReadFail")); return false; }
+      if (!d || !d.success) { toast(T("scReadFail"), { type: "error" }); return false; }
       SC.d = d;
       SC.targets = scTargetsFrom(d);
       SC.section = sec;
       SC.dirty = false;
       SC.conflict = null;
-      scRenderShell();
+      SC.loading = false;
+      SC.loadError = false;
+      scMarkDirty(false);
+      scRenderBody();
       return true;
-    }).catch(function () { toast(T("scReadFail")); return false; });
+    }).catch(function () { toast(T("scReadFail"), { type: "error" }); return false; });
   }
   /* revision 冲突：就地给出可执行的恢复路径，避免「关掉重开」死胡同；
      用户的未提交编辑保持原样，只有明确点「重新加载」才会丢弃。 */
@@ -7184,52 +8979,122 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     body.insertBefore(box, body.firstChild);
     var rb = $("screload");
     if (rb) rb.onclick = function () {
-      if (!window.confirm(T("scReloadConfirm"))) return;
-      scReload();
+      dsConfirm({ message: T("scReloadConfirm"), danger: true }).then(function (go) {
+        if (!go) return;
+        scStatus("pending", T("loading"));
+        scReload().then(function (ok) {
+          scStatus(ok ? "success" : "error", ok ? T("scSavedOk") : T("scReadFail"));
+        });
+      });
     };
   }
-  function scRenderShell() {
-    var tabs = SET_SECTIONS.map(function (x) {
-      return '<button class="tab' + (x.key === SC.section ? " active" : "") + '" role="tab" data-sc-tab="' + x.key + '"'
-        + ' aria-selected="' + (x.key === SC.section ? "true" : "false") + '">' + T(x.label) + '</button>';
+  function scTabHtml() {
+    return SET_SECTIONS.map(function (x) {
+      var on = x.key === SC.section;
+      return '<button class="sc-tab" type="button" role="tab" id="sctab-' + x.key + '"'
+        + ' data-sc-tab="' + x.key + '" aria-selected="' + (on ? "true" : "false") + '"'
+        + ' aria-controls="scbody" tabindex="' + (on ? "0" : "-1") + '">' + T(x.nav) + '</button>';
     }).join("");
+  }
+  /* 安全分组只有说明与令牌入口，没有可提交的配置：
+     隐藏「保存/恢复默认」，避免用户点了才收到「此页无需保存」的无效反馈 */
+  function scSectionActions() {
+    var secOnly = SC.section === "security" || SC.loading || !!SC.loadError;
+    var s = $("scrsave"), d = $("scrdefault");
+    if (s) s.hidden = secOnly;
+    if (d) d.hidden = secOnly;
+  }
+  function scRenderShell() {
     openModal('<h3>' + T("scTitle") + ' <span class="ds-badge" id="scdirty" hidden>' + T("scDirty") + '</span></h3>'
-      + '<div class="ds-tabs" id="sctabs" role="tablist">' + tabs + '</div>'
-      + '<div class="setform" id="scbody"></div>'
-      + '<div class="ds-dialog-actions">'
+      + '<div class="ds-tabs" id="sctabs" role="tablist" aria-label="' + esc(T("scTitle")) + '">' + scTabHtml() + '</div>'
+      + '<div class="setform" id="scbody" role="tabpanel" tabindex="-1" aria-labelledby="sctab-' + SC.section + '"></div>'
+      + '<div class="sc-foot"><span class="sc-status" id="scstatus" role="status" aria-live="polite" hidden></span>'
+      + '<div class="sc-btns">'
       + '<button class="ds-btn" id="scrdefault" type="button">' + T("scReset") + '</button>'
       + '<button class="ds-btn" id="scrcancel" type="button" hidden>' + T("cancel") + '</button>'
-      + '<button class="ds-btn ds-btn--primary" id="scrsave" type="button">' + T("save") + '</button></div>');
-    $("sctabs").onclick = function (ev) {
+      + '<button class="ds-btn ds-btn--primary" id="scrsave" type="button">' + T("save") + '</button>'
+      + '</div></div>');
+    var tabs = $("sctabs");
+    tabs.onclick = function (ev) {
       var t = ev.target && ev.target.closest ? ev.target.closest("[data-sc-tab]") : null;
       if (!t) return;
-      var next = t.getAttribute("data-sc-tab");
-      if (next === SC.section) return;
-      if (SC.dirty && !window.confirm(T("scSwitchConfirm"))) return;
-      SC.section = next;
-      scRenderShell();
+      scSetSection(t.getAttribute("data-sc-tab"), false);
     };
+    /* 键盘：左右/上下箭头在分区之间移动，Home/End 跳到首尾（WAI-ARIA tablist 模式） */
+    tabs.addEventListener("keydown", function (ev) {
+      var keys = SET_SECTIONS.map(function (x) { return x.key; });
+      var i = keys.indexOf(SC.section), to = -1;
+      if (ev.key === "ArrowRight" || ev.key === "ArrowDown") to = (i + 1) % keys.length;
+      else if (ev.key === "ArrowLeft" || ev.key === "ArrowUp") to = (i - 1 + keys.length) % keys.length;
+      else if (ev.key === "Home") to = 0;
+      else if (ev.key === "End") to = keys.length - 1;
+      if (to < 0) return;
+      ev.preventDefault();
+      scSetSection(keys[to], true);
+    });
     $("scbody").addEventListener("input", function () { scMarkDirty(true); });
     $("scbody").addEventListener("change", function () { scMarkDirty(true); });
     $("scbody").addEventListener("click", scTargetAction);
-    $("scrcancel").onclick = function () { scMarkDirty(false); scRenderBody(); toast(T("scCancelDone")); };
+    $("scrcancel").onclick = function () { scMarkDirty(false); scRenderBody(); scStatus(null, ""); toast(T("scCancelDone")); };
     $("scrdefault").onclick = scReset;
     $("scrsave").onclick = scSave;
-    /* 安全分组只有说明与令牌入口，没有可提交的配置：
-       隐藏「保存/恢复默认」，避免用户点了才收到「此页无需保存」的无效反馈 */
-    var secOnly = SC.section === "security";
-    $("scrsave").hidden = secOnly;
-    $("scrdefault").hidden = secOnly;
     scMarkDirty(false);
+    scSectionActions();
+    scRenderBody();
+  }
+  /* 切换分区：只重绘正文与标签选中态，不重建整个弹层（保留焦点、不重复绑定事件） */
+  function scSetSection(next, focusTab) {
+    if (next === SC.section) { if (focusTab) { var cur = $("sctab-" + next); if (cur) cur.focus(); } return; }
+    if (SC.dirty) {
+      dsConfirm({ message: T("scSwitchConfirm"), danger: true }).then(function (go) {
+        if (go) scApplySection(next, focusTab);
+        else if (focusTab) { var back = $("sctab-" + SC.section); if (back) back.focus(); }
+      });
+      return;
+    }
+    scApplySection(next, focusTab);
+  }
+  function scApplySection(next, focusTab) {
+    SC.section = next;
+    scMarkDirty(false);
+    var tabs = $("sctabs");
+    if (tabs) {
+      var btns = tabs.querySelectorAll("[data-sc-tab]");
+      for (var i = 0; i < btns.length; i++) {
+        var on = btns[i].getAttribute("data-sc-tab") === next;
+        btns[i].setAttribute("aria-selected", on ? "true" : "false");
+        btns[i].setAttribute("tabindex", on ? "0" : "-1");
+        if (on && focusTab) btns[i].focus();
+      }
+    }
+    var body = $("scbody");
+    if (body) body.setAttribute("aria-labelledby", "sctab-" + next);
+    scStatus(null, "");
+    scSectionActions();
     scRenderBody();
   }
   function scRenderBody() {
     var body = $("scbody");
     if (!body) return;
-    if (SC.section === "session") body.innerHTML = scBodySession();
-    else if (SC.section === "notify") body.innerHTML = scBodyNotify();
-    else if (SC.section === "biz") body.innerHTML = scBodyBiz();
-    else body.innerHTML = scBodySecurity();
+    /* 加载完成后要重新决定「保存 / 恢复默认」是否可用（骨架与错误态下隐藏） */
+    scSectionActions();
+    if (SC.loading) { body.innerHTML = scSkeleton(); return; }
+    if (SC.loadError || !SC.d) {
+      body.innerHTML = '<div class="sc-head"><h4>' + T("scTitle") + '</h4></div>'
+        + '<div class="sc-loaderr"><span>' + T("scReadFail") + '</span>'
+        + '<button class="ds-btn" type="button" id="scretry">' + T("scRetryLoad") + '</button></div>';
+      var rb = $("scretry");
+      if (rb) rb.onclick = function () {
+        SC.loading = true; SC.loadError = false; scSectionActions(); scRenderBody(); scLoad();
+      };
+      return;
+    }
+    if (SC.section === "display") body.innerHTML = scHead() + scBodyDisplay();
+    else if (SC.section === "messages") body.innerHTML = scHead() + scBodyMessages();
+    else if (SC.section === "session") body.innerHTML = scHead() + scBodySession();
+    else if (SC.section === "notify") body.innerHTML = scHead() + scBodyNotify();
+    else if (SC.section === "biz") body.innerHTML = scHead() + scBodyBiz();
+    else body.innerHTML = scHead() + scBodySecurity();
     if (SC.section === "session") {
       var sel = $("scbttl"), inp = $("scbttlmin");
       if (sel && inp) sel.onchange = function () { inp.hidden = sel.value !== "custom"; scMarkDirty(true); };
@@ -7241,6 +9106,47 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     }
     /* 冲突提示在切换分组后仍然可见（否则用户会以为冲突已消失） */
     if (SC.conflict !== null && SC.conflict !== undefined) scShowConflict(SC.conflict);
+  }
+  function scHead() {
+    var x = SET_SECTIONS.filter(function (s) { return s.key === SC.section; })[0];
+    return '<div class="sc-head"><h4>' + T(x.title) + '</h4><p>' + T(x.desc) + '</p></div>';
+  }
+
+  /* ---- 界面与显示：语言 / 分页 / 首页统计摘要（全部是本浏览器偏好） ---- */
+  function scBodyDisplay() {
+    var langItem = scItem(T("scLang"), T("scLangHelp"),
+      '<select id="sclang" class="ds-select">' + langOptions() + '</select>', { id: "sclang", wide: true });
+    var opts = [10, 20, 50, 100].map(function (n) {
+      return '<option value="' + n + '"' + (state.limit === n ? " selected" : "") + '>'
+        + T("perPage", { n: n }) + '</option>';
+    }).join("");
+    var perItem = scItem(T("scPerPage"), T("scPageSizeHelp"),
+      '<select id="sclimit" class="ds-select">' + opts + '</select>', { id: "sclimit", wide: true });
+    /* UX-02B 的首页统计摘要默认隐藏；UX-03 从「登录与会话」迁到此处，语义与存储键保持不变 */
+    var homeItem = scItem(T("scHomeStats"), T("scHomeStatsHelp") + " " + T("scHomeStatsScope"),
+      scSwitch("schomestats", !!state.homeStats, "sclb-schomestats"), { id: "schomestats" });
+    return scGroup(T("scUiGroup"), "browser", "", langItem + perItem)
+      + scGroup(T("scHomeDisplay"), "browser", "", homeItem);
+  }
+
+  /* ---- 消息与提醒：本浏览器的新消息提醒行为 ---- */
+  function scBodyMessages() {
+    var dnd = getDND();
+    var rows = scItem(T("autoCopy"), "", scSwitch("scautocopy", !!state.autoCopy, "sclb-scautocopy"), { id: "scautocopy" })
+      + scItem(T("codeCopyBtn"), "", scSwitch("scodecopy", !!state.codeCopy, "sclb-scodecopy"), { id: "scodecopy" })
+      + scItem(T("notifyOn"), "", scSwitch("scnotifyon", !!state.notify, "sclb-scnotifyon"), { id: "scnotifyon" })
+      + scItem(T("soundOn"), "", scSwitch("scsoundon", !!state.sound, "sclb-scsoundon"), { id: "scsoundon" });
+    var dndRow = scItem(T("sDnd"), T("sDndRange"),
+      scSwitch("scdndon", !!dnd.on, "sclb-scdndon"), { id: "scdndon" });
+    var rangeRow = scItem(T("sDndRange"), "",
+      '<input type="number" id="scdnds" class="ds-input" min="0" max="23" inputmode="numeric"'
+      + ' aria-label="' + esc(T("sDndFrom")) + '" value="' + (parseInt(dnd.start, 10) || 0) + '">'
+      + '<span class="sc-idesc">–</span>'
+      + '<input type="number" id="scdnde" class="ds-input" min="0" max="23" inputmode="numeric"'
+      + ' aria-label="' + esc(T("sDndTo")) + '" value="' + (parseInt(dnd.end, 10) || 0) + '">',
+      { id: "scdndrange", htmlLabel: true, wide: true });
+    return scGroup(T("scBrowserPrefs"), "browser", T("scBrowserPrefsHelp"), rows)
+      + scGroup(T("scDndGroup"), "browser", "", dndRow + rangeRow);
   }
 
   /* ---- 登录与会话：本浏览器（localStorage） + 全局默认（settings 表） ---- */
@@ -7262,33 +9168,17 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       + '<option value="custom"' + (localSet && !hit ? " selected" : "") + '>' + T("scCustom") + '</option>';
     var eff = localSet
       ? T("scEffLocal", { v: fmtMinutes(localVal) }) : T("scEffGlobal", { v: fmtMinutes(g) });
-    var langCard = '<div class="setgrp"><h4>' + T("scLanguage") + scBadge("browser") + '</h4>'
-      + scHelp(T("scLangHelp"))
-      + '<div class="setrow"><label for="sclang">' + T("scLang") + '</label>'
-      + '<select id="sclang" class="ds-select">' + langOptions() + '</select></div></div>';
-    var pageCard = '<div class="setgrp"><h4>' + T("scPageSize") + scBadge("browser") + '</h4>'
-      + scHelp(T("scPageSizeHelp"))
-      + '<div class="setrow"><label for="sclimit">' + T("scPerPage") + '</label>'
-      + '<select id="sclimit" class="ds-select">'
-      + [10, 20, 50, 100].map(function (n) {
-          return '<option value="' + n + '"' + (state.limit === n ? " selected" : "") + '>' + T("perPage", { n: n }) + '</option>';
-        }).join("")
-      + '</select></div></div>';
-    return langCard + pageCard
-      + '<div class="setgrp"><h4>' + T("scSessionBrowser") + scBadge("browser") + '</h4>'
-      + '<div class="ds-alert">' + eff + '</div>'
-      + '<div class="setrow"><label for="scbttl">' + T("scTtl") + '</label>'
-      + '<select id="scbttl" class="ds-select">' + opts + '</select>'
-      + '<input type="number" id="scbttlmin" class="ds-input" min="5" max="43200" inputmode="numeric"'
-      + (localSet && !hit ? '' : ' hidden') + ' value="' + (localSet && !hit ? localVal : "") + '"'
-      + ' aria-label="' + T("scCustom") + '" placeholder="5~43200"></div>'
-      + scHelp(T("scHelpLocal"))
-      + '</div>'
-      + '<div class="setgrp"><h4>' + T("scSessionGlobal") + scBadge("global") + '</h4>'
-      + '<div class="setrow"><label for="scgttl">' + T("scTtlGlobal") + '</label>'
-      + '<input type="number" id="scgttl" class="ds-input" min="5" max="43200" inputmode="numeric" value="' + g + '"></div>'
-      + scHelp(T("scHelpGlobal"))
-      + '</div>';
+    var localItem = scItem(T("scTtl"), T("scHelpLocal"),
+      '<select id="scbttl" class="ds-select">' + opts + '</select>', { id: "scbttl", wide: true })
+      + scItem(T("scCustom"), "",
+        '<input type="number" id="scbttlmin" class="ds-input" min="5" max="43200" inputmode="numeric"'
+        + (localSet && !hit ? '' : ' hidden') + ' value="' + (localSet && !hit ? localVal : "") + '"'
+        + ' aria-label="' + esc(T("scCustom")) + '" placeholder="5~43200">', { id: "scbttlmin", wide: true });
+    var globalItem = scItem(T("scTtlGlobal"), T("scHelpGlobal"),
+      '<input type="number" id="scgttl" class="ds-input" min="5" max="43200" inputmode="numeric" value="' + g + '">',
+      { id: "scgttl", wide: true });
+    return scGroup(T("scSessionBrowser"), "browser", "", '<div class="ds-alert">' + eff + '</div>' + localItem)
+      + scGroup(T("scSessionGlobal"), "global", "", globalItem);
   }
 
   /* ---- 通知：已配置推送卡片 ---- */
@@ -7310,110 +9200,116 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       }
     });
     var types = (t.types && t.types.length ? t.types : ["verify", "sms", "notify"]).map(scTypeLabel).join(" · ");
-    return '<div class="pushcard' + (t.enabled ? "" : " pushcard--off") + '">'
-      + '<div class="pushcard-head"><span class="pushcard-name">' + esc(t.name) + '</span>'
-      + '<span class="pushbadge">' + esc(scChannelName(ch)) + '</span>'
-      + '<span class="pushbadge ' + (t.enabled ? "on" : "off") + '">'
+    /* 目标行：名称 + 渠道 + 启停状态 + 接收类型/配置摘要，右侧常驻四个操作（不藏进长按菜单） */
+    return '<div class="sc-target' + (t.enabled ? "" : " sc-target--off") + '">'
+      + '<div class="sc-target-main"><div class="sc-target-head">'
+      + '<span class="sc-target-name">' + esc(t.name) + '</span>'
+      + '<span class="ds-badge">' + esc(scChannelName(ch)) + '</span>'
+      + '<span class="ds-badge ' + (t.enabled ? "ds-badge--success" : "") + '">'
       + esc(t.enabled ? T("scEnable") : T("scTargetOff")) + '</span></div>'
-      + '<div class="pushcard-meta">' + esc(types) + '</div>'
-      + '<div class="pushcard-fields">' + esc(parts.join(" · ") || T("scNotConfigured")) + '</div>'
-      + '<div class="pushcard-acts">'
+      + '<div class="sc-target-meta">' + esc(types) + ' · '
+      + esc(parts.join(" · ") || T("scNotConfigured")) + '</div></div>'
+      + '<div class="sc-target-acts">'
       + '<button class="tbtn" type="button" data-tgact="edit" data-tgid="' + esc(t.id) + '">' + esc(T("scEdit")) + '</button>'
-      + '<button class="tbtn" type="button" data-tgact="test" data-tgid="' + esc(t.id) + '" data-tgch="' + esc(ch.key) + '">' + esc(T("scSendTest")) + '</button>'
+      + '<button class="tbtn" type="button" data-tgact="test" data-tgid="' + esc(t.id) + '" data-tgch="' + esc(ch.key) + '">' + esc(T("scTest")) + '</button>'
       + '<button class="tbtn" type="button" data-tgact="toggle" data-tgid="' + esc(t.id) + '">' + esc(t.enabled ? T("scTargetOff") : T("scEnable")) + '</button>'
       + '<button class="tbtn" type="button" data-tgact="del" data-tgid="' + esc(t.id) + '">' + esc(T("del")) + '</button>'
       + '</div></div>';
   }
-  /* ---- 通知：全局规则 + 各渠道 ---- */
+  /* ---- 通知：全局规则 + 渠道一览 + 多目标 + 环境变量渠道 ---- */
   function scBodyNotify() {
     var d = SC.d;
     var schema = d.notify_schema || { channels: [], types: [], retry_max: 3 };
     var cfg = d.notify || { enabled: true, types: [], retry: 0, link: "", channels: {} };
-    var dnd = getDND();
-    var html = '<div class="setgrp"><h4>' + T("scBrowserPrefs") + scBadge("browser") + '</h4>'
-      + scHelp(T("scBrowserPrefsHelp"))
-      + '<div class="prefgrid">'
-      + '<label class="prefitem" for="scautocopy"><span>' + T("autoCopy") + '</span><input type="checkbox" id="scautocopy" class="ds-check" ' + (state.autoCopy ? "checked" : "") + '></label>'
-      + '<label class="prefitem" for="scodecopy"><span>' + T("codeCopyBtn") + '</span><input type="checkbox" id="scodecopy" class="ds-check" ' + (state.codeCopy ? "checked" : "") + '></label>'
-      + '<label class="prefitem" for="scnotifyon"><span>' + T("notifyOn") + '</span><input type="checkbox" id="scnotifyon" class="ds-check" ' + (state.notify ? "checked" : "") + '></label>'
-      + '<label class="prefitem" for="scsoundon"><span>' + T("soundOn") + '</span><input type="checkbox" id="scsoundon" class="ds-check" ' + (state.sound ? "checked" : "") + '></label>'
-      + '<label class="prefitem" for="scdndon"><span>' + T("sDnd") + '</span><input type="checkbox" id="scdndon" class="ds-check" ' + (dnd.on ? "checked" : "") + '></label>'
-      + '</div>'
-      + '<div class="setrow"><label>' + T("sDndRange") + '</label>'
-      + '<input type="number" id="scdnds" class="ds-input" min="0" max="23" inputmode="numeric" value="' + (parseInt(dnd.start, 10) || 0) + '">'
-      + '<span>' + T("to") + '</span>'
-      + '<input type="number" id="scdnde" class="ds-input" min="0" max="23" inputmode="numeric" value="' + (parseInt(dnd.end, 10) || 0) + '"></div></div>'
-      + '<div class="setgrp"><h4>' + T("scNotifyRules") + scBadge("global") + '</h4>'
-      + scHelp(T("scNotifyHelp"))
-      + '<div class="setrow"><label for="nfen">' + T("scNotifyEnabled") + '</label><input type="checkbox" id="nfen" class="ds-check" ' + (cfg.enabled ? "checked" : "") + '></div>'
-      + '<div class="setrow"><label>' + T("scNotifyTypes") + '</label><span>';
-    (schema.types || []).forEach(function (t) {
-      var label = t === "verify" ? T("scTypeVerify") : (t === "sms" ? T("scTypeSms") : T("scTypeNotify"));
-      html += '<label class="ds-inline"><input type="checkbox" class="ds-check" data-nftype="' + esc(t) + '" '
-        + (cfg.types.indexOf(t) !== -1 ? "checked" : "") + '> ' + label + '</label>';
-    });
-    html += '</span></div><div class="setrow"><label for="nfretry">' + T("scRetry") + '</label><select id="nfretry" class="ds-select">';
+    var targets = SC.targets || [];
+    var chans = schema.channels || [];
+
+    /* 1) 通知规则：总开关 / 转发类型 / 重试 / 跳转链接 */
+    var typeCtl = (schema.types || []).map(function (t) {
+      return '<label class="ds-inline"><input type="checkbox" class="ds-check" data-nftype="' + esc(t) + '" '
+        + (cfg.types.indexOf(t) !== -1 ? "checked" : "") + '> ' + scTypeLabel(t) + '</label>';
+    }).join("");
+    var retryOpts = "";
     for (var i = 0; i <= (schema.retry_max || 0); i++) {
-      html += '<option value="' + i + '" ' + (Number(cfg.retry) === i ? "selected" : "") + '>'
+      retryOpts += '<option value="' + i + '" ' + (Number(cfg.retry) === i ? "selected" : "") + '>'
         + (i === 0 ? T("scNoRetry") : T("scRetryN", { n: i })) + '</option>';
     }
-    html += '</select><span class="ds-help">' + T("scRetryHelp") + '</span></div>'
-      + '<div class="setrow"><label for="nflink">' + T("scLink") + '</label>'
-      + '<input type="text" id="nflink" class="ds-input" placeholder="' + T("scLinkPh") + '" value="'
-      + esc(cfg.link || "") + '"></div></div>';
+    var rules = scItem(T("scNotifyEnabled"), "", scSwitch("nfen", !!cfg.enabled, "sclb-nfen"), { id: "nfen" })
+      + scItem(T("scNotifyTypes"), "", typeCtl, { id: "nfTypes", htmlLabel: true, wide: true })
+      + scItem(T("scRetry"), T("scRetryHelp"),
+        '<select id="nfretry" class="ds-select">' + retryOpts + '</select>', { id: "nfretry" })
+      + scItem(T("scLink"), "",
+        '<input type="text" id="nflink" class="ds-input" placeholder="' + esc(T("scLinkPh")) + '" value="'
+        + esc(cfg.link || "") + '">', { id: "nflink", wide: true });
 
-    /* 已配置推送：只展示已经创建好的推送卡片，每张可编辑/测试/启停/删除 */
-    var targets = SC.targets || [];
+    /* 2) 渠道一览：11 个内置渠道的配置状态，可直接为某渠道新增目标 */
+    var grid = chans.map(function (ch) {
+      var n = targets.filter(function (x) { return x.channel === ch.key; }).length;
+      var st = cfg.channels[ch.key] || {};
+      var on = n > 0 || !!st.configured;
+      return '<div class="sc-ch' + (on ? " sc-ch--on" : "") + '">'
+        + '<span class="sc-ch-name" title="' + esc(scChannelName(ch)) + '">' + esc(scChannelName(ch)) + '</span>'
+        + (n ? '<span class="sc-ch-n">' + n + '</span>' : "")
+        + '<button class="sc-ch-add" type="button" data-pushadd="' + esc(ch.key) + '"'
+        + ' aria-label="' + esc(T("scAddPush") + " · " + scChannelName(ch)) + '">+</button></div>';
+    }).join("");
+
+    /* 3) 推送目标：多目标列表（target_id 稳定，编辑/测试/启停/删除均为行内常驻操作） */
     var cards = "";
     targets.forEach(function (tg) {
       var ch = scChannelSpec(tg.channel);
       if (ch) cards += scTargetRow(tg, ch);
     });
-    html += '<div class="setgrp"><h4>' + T("scPushList") + scBadge("global")
-      + '<span class="ds-badge">' + T("scChannelsN", { n: targets.length }) + '</span></h4>'
-      + scHelp(T("scPushListHelp"))
-      + (cards ? '<div class="pushlist">' + cards + '</div>' : '<div class="pushempty">' + T("scPushEmpty") + '</div>')
-      + '<div class="setrow"><label></label><button class="ds-btn ds-btn--primary" id="pushadd" type="button">'
+    /* 列表末尾只放「说明 + 添加推送」一行：分组标题已经叫「已配置推送」，此处不再重复一遍标题 */
+    var listInner = (cards || '<div class="sc-empty">' + T("scPushEmpty") + '</div>')
+      + '<div class="sc-item"><div class="sc-item-main"><div class="sc-idesc">'
+      + T("scPushListHelp") + '</div></div>'
+      + '<div class="sc-ictl"><button class="ds-btn ds-btn--primary" id="pushadd" type="button">'
       + T("scAddPush") + '</button></div></div>';
 
-    /* 环境变量渠道：仅展示已配置且未被推送卡片覆盖的渠道（只读，可停用/测试） */
+    /* 4) 环境变量渠道：仅展示已配置且未被推送目标覆盖的渠道（可停用/测试） */
     var envRows = "";
-    (schema.channels || []).forEach(function (ch) {
+    chans.forEach(function (ch) {
       var st = cfg.channels[ch.key] || { enabled: true, configured: false };
       var hasTg = targets.some(function (x) { return x.channel === ch.key; });
       if (!st.configured || hasTg) return;
-      envRows += '<div class="setrow"><label>' + esc(scChannelName(ch)) + '</label>'
-        + '<span class="pushbadge">' + T(st.source === "db" ? "scFromDb" : "scFromEnv") + '</span>'
-        + '<label class="ds-inline"><input type="checkbox" id="nf_' + ch.key + '_enabled" class="ds-check" '
-        + (st.enabled ? "checked" : "") + '> ' + T("scEnable") + '</label>'
-        + '<button class="ds-btn settest" id="nf_test_' + ch.key + '" type="button">' + T("scSendTest") + '</button></div>';
+      envRows += '<div class="sc-item"><div class="sc-item-main"><div class="sc-ilabel">'
+        + esc(scChannelName(ch)) + '</div><div class="sc-idesc">'
+        + T(st.source === "db" ? "scFromDb" : "scFromEnv") + '</div></div>'
+        + '<div class="sc-ictl">' + scSwitch("nf_" + ch.key + "_enabled", !!st.enabled, "")
+        + '<button class="ds-btn settest" id="nf_test_' + ch.key + '" type="button">' + T("scTest") + '</button>'
+        + '</div></div>';
     });
-    if (envRows) {
-      /* 说明环境变量与设置的优先级，避免用户重复配置后困惑 */
-      html += '<div class="setgrp"><h4>' + T("scEnvChannels") + scBadge("global") + '</h4>'
-        + scHelp(T("scEnvChannelsHelp")) + scHelp(T("scEnvPriority")) + envRows + '</div>';
-    }
-    html += '<div class="setgrp"><h4>' + T("scImportEnv") + scBadge("global") + '</h4>'
-      + scHelp(T("scImportEnvHelp"))
-      + '<div class="setrow"><button class="ds-btn" id="nfimport" type="button">' + T("scImportEnv") + '</button></div>'
-      + '<div class="ds-alert ds-alert--warning">' + T("scTestSaved") + '</div></div>';
+
+    var html = scGroup(T("scNotifyRules"), "global", T("scNotifyHelp"), rules)
+      + scGroup(T("scChGridTitle"), "global", T("scChGridHelp"), '<div class="sc-chgrid">' + grid + '</div>')
+      + scGroup(T("scPushList") + ' <span class="ds-badge">' + T("scChannelsN", { n: targets.length }) + '</span>',
+        "global", "", listInner);
+    if (envRows) html += scGroup(T("scEnvChannels"), "global", T("scEnvChannelsHelp") + " " + T("scEnvPriority"), envRows);
+    html += scGroup(T("scImportEnv"), "global", T("scImportEnvHelp"),
+      '<div class="sc-item"><div class="sc-item-main"><div class="sc-idesc">' + T("scTestSaved") + '</div></div>'
+      + '<div class="sc-ictl"><button class="ds-btn" id="nfimport" type="button">' + T("scImportEnv") + '</button></div></div>');
     return html;
   }
   /* ---- 推送编辑器：第二层独立弹层（先选方案 → 再填配置） ---- */
   var PUSH = null;
-  function openPushEditor(t) {
+  function openPushEditor(t, presetChannel) {
     if (t) {
       PUSH = { mode: "edit", channel: t.channel, id: t.id, name: t.name,
         types: (t.types || ["verify", "sms", "notify"]).slice(), enabled: !!t.enabled,
         fields: t.fields || {}, _new: !!t._new };
+    } else if (presetChannel) {
+      /* 从「支持的渠道」点 + 直接进入该渠道的配置表单，省掉一次方案选择 */
+      PUSH = { mode: "new", channel: presetChannel, id: "", name: "", types: ["verify", "sms", "notify"],
+        enabled: true, fields: {}, _new: true };
     } else {
       PUSH = { mode: "pick", channel: "", id: "", name: "", types: ["verify", "sms", "notify"],
         enabled: true, fields: {}, _new: true };
     }
     pushRender();
-    $("pushmodal").hidden = false;
+    dlgOpen($("pushmodal"));
   }
-  function closePushEditor() { $("pushmodal").hidden = true; PUSH = null; }
+  function closePushEditor() { dlgClose($("pushmodal")); PUSH = null; }
   function pushRender() {
     if (!PUSH) return;
     $("pushtitle").textContent = PUSH.mode === "edit" ? T("scPushEditor") : T("scAddPush");
@@ -7453,8 +9349,15 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       if (f.sensitive) {
         var ph = old.configured ? T("scSensitivePhCfg", { m: old.masked || "••••" }) : T("scSensitivePhNew");
         html += '<div class="setrow"><label for="' + id + '">' + esc(nfLabel(f.key)) + '</label>'
+          + '<div class="sc-credwrap">'
           + '<input type="text" id="' + id + '" class="ds-input" autocomplete="off" spellcheck="false" placeholder="'
-          + esc(ph) + '"></div>';
+          + esc(ph) + '">'
+          + '<div class="ds-help">' + (old.configured ? T("scCredOn") : T("scCredOff")) + '</div>'
+          + (old.configured
+            ? '<label class="ds-inline"><input type="checkbox" class="ds-check" data-pfclr="' + esc(f.key) + '"> '
+              + T("scClearCred") + '</label><div class="ds-help">' + T("scClearWarn") + '</div>'
+            : '')
+          + '</div></div>';
       } else {
         html += '<div class="setrow"><label for="' + id + '">' + esc(nfLabel(f.key)) + '</label>'
           + '<input type="text" id="' + id + '" class="ds-input" autocomplete="off" value="'
@@ -7470,26 +9373,40 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   }
   function pushSave() {
     var ch = scChannelSpec(PUSH.channel);
-    if (!ch) { toast(T("scPickChannel")); return; }
+    if (!ch) { toast(T("scPickChannel"), { type: "warning" }); return; }
     var nameEl = $("pfname"), name = nameEl ? nameEl.value.trim() : "";
-    if (!name) { toast(T("scPushNameRequired")); if (nameEl) nameEl.focus(); return; }
+    if (!name) { toast(T("scPushNameRequired"), { type: "warning" }); if (nameEl) nameEl.focus(); return; }
     var types = [];
     var nodes = document.querySelectorAll("[data-pftype]");
     for (var i = 0; i < nodes.length; i++) if (nodes[i].checked) types.push(nodes[i].getAttribute("data-pftype"));
-    if (!types.length) { toast(T("scPushNeedTypes")); return; }
+    if (!types.length) { toast(T("scPushNeedTypes"), { type: "warning" }); return; }
     var need = ch.need || [];
     var fields = {}, ok = true;
+    /* 敏感字段清除勾选：只收集本弹层里真实存在的勾选框，避免跨渠道串味 */
+    var cleared = {};
+    var clrs = document.querySelectorAll("[data-pfclr]");
+    for (var ci = 0; ci < clrs.length; ci++) {
+      if (clrs[ci].checked) cleared[clrs[ci].getAttribute("data-pfclr")] = true;
+    }
     (ch.fields || []).forEach(function (f) {
       var el = $("pf_" + ch.key + "_" + f.key);
       var v = el ? el.value.trim() : "";
       var old = (PUSH.fields && PUSH.fields[f.key]) || {};
-      if (!v) {
-        if (f.sensitive && PUSH.mode === "edit" && old.configured) { fields[f.key] = old; return; }
-        if (need.indexOf(f.key) !== -1) { toast(T("scPushFieldNeed", { f: nfLabel(f.key) })); ok = false; return; }
-        fields[f.key] = { sensitive: !!f.sensitive, value: "", configured: false };
+      if (f.sensitive) {
+        /* 三态：显式清除 → clear；输入新值 → set；留空 → keep（服务端保留原值） */
+        if (cleared[f.key]) { fields[f.key] = { sensitive: true, value: "", configured: false, clear: true }; return; }
+        if (v) { fields[f.key] = { sensitive: true, value: v, configured: true }; return; }
+        if (PUSH.mode === "edit" && old.configured) { fields[f.key] = { sensitive: true, value: "", configured: true, keep: true }; return; }
+        if (need.indexOf(f.key) !== -1) { toast(T("scPushFieldNeed", { f: nfLabel(f.key) }), { type: "warning" }); ok = false; return; }
+        fields[f.key] = { sensitive: true, value: "", configured: false };
         return;
       }
-      fields[f.key] = { sensitive: !!f.sensitive, value: v, configured: true };
+      if (!v) {
+        if (need.indexOf(f.key) !== -1) { toast(T("scPushFieldNeed", { f: nfLabel(f.key) }), { type: "warning" }); ok = false; return; }
+        fields[f.key] = { sensitive: false, value: "", configured: false };
+        return;
+      }
+      fields[f.key] = { sensitive: false, value: v, configured: true };
     });
     if (!ok) return;
     var enabled = !!$("pfon").checked;
@@ -7501,13 +9418,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
           break;
         }
       }
-      toast(T("scPushUpdated"));
+      toast(T("scPushUpdated"), { type: "success" });
     } else {
       SC.tgSeq += 1;
       /* 新推送用本地临时 id 参与行内操作；保存时 _new 不向上回传 id，由服务端分配 */
       SC.targets.push({ id: "__new" + SC.tgSeq, channel: ch.key, name: name, enabled: enabled,
         types: types, fields: fields, configured: true, _new: true });
-      toast(T("scPushAdded"));
+      toast(T("scPushAdded"), { type: "success" });
     }
     scMarkDirty(true);
     closePushEditor();
@@ -7532,6 +9449,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   function scTargetAction(ev) {
     var addBtn = ev.target && ev.target.closest ? ev.target.closest("#pushadd") : null;
     if (addBtn) { openPushEditor(null); return; }
+    var addFor = ev.target && ev.target.closest ? ev.target.closest("[data-pushadd]") : null;
+    if (addFor) { openPushEditor(null, addFor.getAttribute("data-pushadd")); return; }
     var b = ev.target && ev.target.closest ? ev.target.closest("[data-tgact]") : null;
     if (!b) return;
     var act = b.getAttribute("data-tgact"), id = b.getAttribute("data-tgid");
@@ -7542,12 +9461,16 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     }
     if (act === "edit") { openPushEditor(t); return; }
     if (act === "del") {
-      if (!window.confirm(T("scTargetDelConfirm", { n: t.name || t.channel }))) return;
-      SC.targets = SC.targets.filter(function (x) { return x.id !== id; });
-      scMarkDirty(true); scRenderBody(); toast(T("scTargetRemoved")); return;
+      dsConfirm({ message: T("scTargetDelConfirm", { n: t.name || t.channel }), okText: T("del"), danger: true }).then(function (go) {
+        if (!go) return;
+        SC.targets = SC.targets.filter(function (x) { return x.id !== id; });
+        /* UX-09 U9-15：删除是破坏性操作，成功要用 success 语义明确告知（不引入撤销，保持既有交互） */
+        scMarkDirty(true); scRenderBody(); toast(T("scTargetRemoved"), { type: "success" });
+      });
+      return;
     }
     if (act === "test") {
-      if (t._new || !t.id) { toast(T("scTargetSaveFirst")); return; }
+      if (t._new || !t.id) { toast(T("scTargetSaveFirst"), { type: "warning" }); return; }
       b.disabled = true; b.setAttribute("data-loading", "1");
       fetch("/api/settings/notify/test", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -7558,10 +9481,11 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       }).then(function (res) {
         b.disabled = false; b.removeAttribute("data-loading");
         if (!res) return;
-        if (res.success) { toast(T("scTestOk")); return; }
-        if (res.error === "NOT_CONFIGURED") { toast(T("scTestNotCfg")); return; }
-        toast(res.message ? T("scTestFailMsg", { m: res.message }) : T("scTestFail"));
-      }).catch(function () { b.disabled = false; b.removeAttribute("data-loading"); toast(T("scTestFail")); });
+        if (res.success) { toast(T("scTestOk"), { type: "success" }); return; }
+        if (res.error === "NOT_CONFIGURED") { toast(T("scTestNotCfg"), { type: "warning" }); return; }
+        /* UX-09 U9-09：失败提示此前落在默认 info 类型上，视觉上与成功提示无区别 */
+        toast(T("scTestFailTarget", { name: t.name || t.channel, m: res.message ? T("scTestFailMsg", { m: res.message }) : T("scTestFail") }), { type: "error" });
+      }).catch(function () { b.disabled = false; b.removeAttribute("data-loading"); toast(T("scTestFail"), { type: "error" }); });
     }
   }
   function scWireNotify() {
@@ -7580,10 +9504,10 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         }).then(function (res) {
           btn.disabled = false; btn.setAttribute("data-loading", "0");
           if (!res) return;
-          if (res.success) { toast(T("scTestOk")); return; }
-          if (res.error === "NOT_CONFIGURED") { toast(T("scTestNotCfg")); return; }
-          toast(res.message ? T("scTestFailMsg", { m: res.message }) : T("scTestFail"));
-        }).catch(function () { btn.disabled = false; btn.setAttribute("data-loading", "0"); toast(T("scTestFail")); });
+          if (res.success) { toast(T("scTestOk"), { type: "success" }); return; }
+          if (res.error === "NOT_CONFIGURED") { toast(T("scTestNotCfg"), { type: "warning" }); return; }
+          toast(res.message ? T("scTestFailMsg", { m: res.message }) : T("scTestFail"), { type: "error" });
+        }).catch(function () { btn.disabled = false; btn.setAttribute("data-loading", "0"); toast(T("scTestFail"), { type: "error" }); });
       };
     });
     var imp = $("nfimport");
@@ -7597,73 +9521,86 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       }).then(function (res) {
         imp.disabled = false; imp.setAttribute("data-loading", "0");
         if (!res) return;
-        if (!res.success) { toast(res.error ? T("scImportFailMsg", { e: res.error }) : T("scImportFail")); return; }
+        if (!res.success) { toast(res.error ? T("scImportFailMsg", { e: res.error }) : T("scImportFail"), { type: "error" }); return; }
         closeModal();
         toast(res.imported ? T("scImported", { n: res.imported }) : T("scNoImport"));
         openSettingsCenter("notify");
-      }).catch(function () { imp.disabled = false; imp.setAttribute("data-loading", "0"); toast(T("scImportFail")); });
+      }).catch(function () { imp.disabled = false; imp.setAttribute("data-loading", "0"); toast(T("scImportFail"), { type: "error" }); });
     };
   }
 
   /* ---- 数据与业务：保留天数 / 号码归属地 ---- */
   function scBodyBiz() {
     var d = SC.d;
-    return '<div class="setgrp"><h4>' + T("scRetention") + scBadge("global") + '</h4>'
-      + '<div class="setrow"><label for="sysdays">' + T("scDays") + '</label>'
-      + '<input type="number" id="sysdays" class="ds-input" min="1" max="3650" inputmode="numeric" value="'
-      + esc(String(d.retention_days || 30)) + '"></div>'
-      + scHelp(T("scDaysHelp"))
-      + '</div>'
-      + '<div class="setgrp"><h4>' + T("scArea") + scBadge("global") + '</h4>'
-      + '<div class="setrow"><label for="sysarea">' + T("scAreaEnable") + '</label>'
-      + '<input type="checkbox" id="sysarea" class="ds-check" ' + (d.phone_area_enabled ? "checked" : "") + '></div>'
-      + '<div class="setrow"><label for="sysareaapi">' + T("scAreaApi") + '</label>'
-      + '<input type="text" id="sysareaapi" class="ds-input" placeholder="' + T("scAreaApiPh") + '" value="'
-      + esc(d.phone_area_api || "") + '"></div>'
-      + scHelp(T("scAreaHelp"))
-      + '</div>';
+    var retRow = scItem(T("scDays"), T("scDaysHelp"),
+      '<input type="number" id="sysdays" class="ds-input" min="1" max="3650" inputmode="numeric" value="'
+      + esc(String(d.retention_days || 30)) + '">', { id: "sysdays", wide: true });
+    var areaRow = scItem(T("scAreaEnable"), T("scAreaHelp"),
+      scSwitch("sysarea", !!d.phone_area_enabled, "sclb-sysarea"), { id: "sysarea" })
+      + scItem(T("scAreaApi"), T("scAreaApiPh"),
+        '<input type="text" id="sysareaapi" class="ds-input" placeholder="' + esc(T("scAreaApiPh")) + '" value="'
+        + esc(d.phone_area_api || "") + '">', { id: "sysareaapi", wide: true });
+    return scGroup(T("scRetention"), "global", "", retRow)
+      + scGroup(T("scArea"), "global", "", areaRow);
   }
 
   /* ---- 安全：接入令牌（凭据加密属后续安全专项，本轮只做入口与说明） ---- */
   function scBodySecurity() {
-    return '<div class="setgrp"><h4>' + T("scTokenTitle") + scBadge("global") + '</h4>'
-      + scHelp(T("scTokenHelp"))
-      + '<div class="setrow"><label>' + T("scManage") + '</label>'
-      + '<button class="ds-btn" id="sctokbtn" type="button">' + T("scOpenTokens") + '</button></div>'
-      + '<div class="ds-alert">' + T("scTokenAlert") + '</div>'
-      + '</div>'
-      + '<div class="setgrp"><h4>' + T("scLoginGuard") + scBadge("global") + '</h4>'
-      + scHelp(T("scLoginGuardHelp"))
-      + '</div>';
+    var tokRow = scItem(T("scManage"), T("scTokenHelp"),
+      '<button class="ds-btn" id="sctokbtn" type="button">' + T("scOpenTokens") + '</button>', { id: "sctokbtn" });
+    return scGroup(T("scTokenTitle"), "global",
+        '<div class="ds-alert">' + T("scTokenAlert") + '</div>', tokRow)
+      + scGroup(T("scLoginGuard"), "global", T("scLoginGuardHelp"), "");
   }
 
   function scReset() {
+    /* 界面与显示 / 消息与提醒只写本浏览器，恢复默认不需要密码，也不需要服务端写入 */
+    if (SC.section === "display" || SC.section === "messages") { scResetLocal(); return; }
     var what = "";
     if (SC.section === "session") what = T("scResetSession");
     else if (SC.section === "notify") what = T("scResetNotify");
     else if (SC.section === "biz") what = T("scResetBiz");
-    else { toast(T("scResetNoDefault")); return; }
-    if (!window.confirm(T("scResetConfirm", { what: what }))) return;
-    askPassword(function () {
-      if (SC.section === "session") {
-        try { localStorage.removeItem(TTL_LOCAL_KEY); } catch (e) {}
-        SC.d.session_ttl_minutes = 30;
-      } else if (SC.section === "notify") {
-        var schema = SC.d.notify_schema || { types: [] };
-        SC.d.notify = SC.d.notify || {};
-        SC.d.notify.enabled = true;
-        SC.d.notify.types = (schema.types || []).slice();
-        SC.d.notify.retry = 0;
-        SC.d.notify.link = "";
-      } else if (SC.section === "biz") {
-        SC.d.retention_days = 30;
-        SC.d.phone_area_enabled = true;
-        SC.d.phone_area_api = "";
-      }
-      scRenderBody();
-      scMarkDirty(true);
-      toast(T("scResetFilled"));
+    else { toast(T("scResetNoDefault"), { type: "warning" }); return; }
+    dsConfirm({ message: T("scResetConfirm", { what: what }), danger: true }).then(function (go) {
+      if (!go) return;
+      askPassword(function () {
+        if (SC.section === "session") {
+          try { localStorage.removeItem(TTL_LOCAL_KEY); } catch (e) {}
+          SC.d.session_ttl_minutes = 30;
+        } else if (SC.section === "notify") {
+          var schema = SC.d.notify_schema || { types: [] };
+          SC.d.notify = SC.d.notify || {};
+          SC.d.notify.enabled = true;
+          SC.d.notify.types = (schema.types || []).slice();
+          SC.d.notify.retry = 0;
+          SC.d.notify.link = "";
+        } else if (SC.section === "biz") {
+          SC.d.retention_days = 30;
+          SC.d.phone_area_enabled = true;
+          SC.d.phone_area_api = "";
+        }
+        scRenderBody();
+        scMarkDirty(true);
+        toast(T("scResetFilled"), { type: "success" });
+      });
     });
+  }
+  /* 本浏览器偏好的默认值来自 state 初始化逻辑：自动复制/复制按钮/后台通知开，提示音与免打扰关，每页 10 条。
+     语言属个人选择（首访按浏览器语言自动判定），不在此处强行重置。 */
+  function scResetLocal() {
+    function chk(id, v) { var el = $(id); if (el) el.checked = !!v; }
+    if (SC.section === "display") {
+      var lim = $("sclimit"); if (lim) lim.value = "10";
+      chk("schomestats", false);
+    } else {
+      chk("scautocopy", true); chk("scodecopy", true); chk("scnotifyon", true);
+      chk("scsoundon", false); chk("scdndon", false);
+      var s = $("scdnds"), e = $("scdnde");
+      if (s) s.value = 22;
+      if (e) e.value = 8;
+    }
+    scMarkDirty(true);
+    toast(T("scResetFilled"), { type: "success" });
   }
 
   /* 「全局默认登录时长」是否真的被改动：只有它才需要写库，才需要密码确认 */
@@ -7676,12 +9613,16 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   }
   function scSave() {
     var btn = $("scrsave");
-    if (SC.section === "security") { toast(T("scNoSave")); return; }
+    if (SC.section === "security") { toast(T("scNoSave"), { type: "warning" }); return; }
+    /* 数据未加载完成时不允许提交，避免把空值写回服务端 */
+    if (SC.loading || SC.loadError || !SC.d) return;
     /* 重复点击守卫：请求在途、或刚保存完且没有任何新改动时，重复点击不再发起第二次写入
        （双击会产生两次 PUT，第二次带着已刷新的 revision 触发误报冲突）；
        只要用户改过内容（dirty）就正常放行，不会吞掉真实保存 */
     if (SC.saving) return;
     if (Date.now() - SC.lastSaveAt < 800 && !SC.dirty) return;
+    if (SC.section === "display") return scSaveDisplay(btn);
+    if (SC.section === "messages") return scSaveMessages(btn);
     /* 通知凭据属敏感设置、登录有效时间属全局设置：写库前要求登录密码确认 */
     var raw = function () {
       if (SC.section === "session") return scSaveSession(btn);
@@ -7689,7 +9630,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       return scSaveBiz(btn);
     };
     if (SC.section === "notify") { askPassword(raw); return; }
-    /* 语言 / 分页 / 本浏览器时长只写 localStorage，不产生任何服务端写入，
+    /* 本浏览器登录时长只写 localStorage，不产生任何服务端写入，
        不必再要求输入密码；只有全局默认时长变化时才走密码确认 */
     if (SC.section === "session" && scGlobalTtlChanged()) { askPassword(raw); return; }
     return raw();
@@ -7697,6 +9638,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   function scPut(body, btn, okMsg) {
     scBusy(btn, true);
     SC.saving = true;
+    scStatus("pending", T("scSaving"));
     function done() { scBusy(btn, false); SC.saving = false; SC.lastSaveAt = Date.now(); }
     return fetch("/api/settings", {
       method: "PUT", headers: { "Content-Type": "application/json" },
@@ -7713,19 +9655,77 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         SC.conflict = null;
         /* 保存后不再整层关闭设置中心：回读最新视图并留在当前分组，
            避免「保存一次就要重新打开」以及新增目标拿不到服务端 id */
-        scReload();
-        toast(okMsg || T("saved"));
-        return true;
+        return scReload().then(function (ok) {
+          if (ok) { scStatus("success", T("scSavedOk")); toast(okMsg || T("saved")); }
+          else { scStatus("error", T("scReadFail")); toast(T("scReadFail"), { type: "error" }); }
+          return ok;
+        });
       }
       if (res.error === "REVISION_CONFLICT") {
         SC.conflict = typeof res.revision === "number" ? res.revision : 0;
         scShowConflict(SC.conflict);
-        toast(T("scRevisionConflict"));
+        scStatus("conflict", T("scRevisionConflict"));
+        toast(T("scRevisionConflict"), { type: "error" });
         return false;
       }
-      toast(res.error ? T("scSaveFailMsg", { e: res.error }) : T("scSaveFail"));
+      var msg = res.error ? T("scSaveFailMsg", { e: res.error }) : T("scSaveFail");
+      scStatus("error", msg);
+      /* UX-09 B-发现-1（GPT 授权单行修复）：保存失败提示此前走默认 info，
+         与全局 39 处显式 error 的口径不一致，失败语义必须用 error 类型表达 */
+      toast(msg, { type: "error" });
       return false;
-    }).catch(function () { done(); toast(T("scSaveFail")); return false; });
+    }).catch(function () {
+      done(); scStatus("error", T("scSaveFail")); toast(T("scSaveFail"), { type: "error" }); return false;
+    });
+  }
+  /* 界面与显示：语言 / 分页 / 首页统计摘要，全部只写 localStorage */
+  function scSaveDisplay(btn) {
+    var lim = $("sclimit"), langEl = $("sclang"), hsEl = $("schomestats");
+    var newLimit = lim ? parseInt(lim.value, 10) : state.limit;
+    if ([10, 20, 50, 100].indexOf(newLimit) === -1) newLimit = state.limit;
+    var newLang = langEl ? langEl.value : LANG;
+    var langChanged = !!(newLang && newLang !== LANG);
+    var limitChanged = newLimit !== state.limit;
+    /* 首页统计摘要：纯本地偏好，不写 settings 表、不新增 API */
+    var hsNow = hsEl ? !!hsEl.checked : state.homeStats;
+    var hsChanged = hsNow !== state.homeStats;
+    if (!limitChanged && !langChanged && !hsChanged) { toast(T("scNoChanges"), { type: "warning" }); return; }
+    if (hsChanged) {
+      state.homeStats = hsNow;
+      try { localStorage.setItem("sms_homestats", hsNow ? "1" : "0"); } catch (e) {}
+      applyHomeStats();
+    }
+    if (limitChanged) {
+      state.limit = newLimit;
+      try { localStorage.setItem("sms_perpage", String(newLimit)); } catch (e) {}
+    }
+    if (langChanged) { try { localStorage.setItem("sms_lang", newLang); } catch (e) {} }
+    scMarkDirty(false);
+    SC.lastSaveAt = Date.now();
+    scStatus("success", T("scSavedOk"));
+    toast(T("scSavedLocal"), { type: "success" });
+    if (langChanged) {
+      try {
+        var u = new URL(location.href);
+        u.searchParams.set("lang", newLang);
+        location.replace(u.toString());
+      } catch (e) { location.reload(); }
+    }
+  }
+  /* 消息与提醒：本浏览器偏好，先读快照再落地，保证「提示成功」与真实状态一致 */
+  function scSaveMessages(btn) {
+    var p = readBrowserPrefs();
+    var cur = getDND();
+    var same = p.autoCopy === state.autoCopy && p.codeCopy === state.codeCopy
+      && p.notify === state.notify && p.sound === state.sound
+      && (!p.dnd || (p.dnd.on === !!cur.on && p.dnd.start === (parseInt(cur.start, 10) || 0)
+        && p.dnd.end === (parseInt(cur.end, 10) || 0)));
+    if (same) { toast(T("scNoChanges"), { type: "warning" }); return; }
+    applyBrowserPrefs(p);
+    scMarkDirty(false);
+    SC.lastSaveAt = Date.now();
+    scStatus("success", T("scSavedOk"));
+    toast(T("scSavedLocal"), { type: "success" });
   }
   function scSaveSession(btn) {
     var sel = $("scbttl"), inp = $("scbttlmin"), gl = $("scgttl");
@@ -7735,49 +9735,25 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         try { localStorage.removeItem(TTL_LOCAL_KEY); localChanged = true; } catch (e) {}
       } else {
         var v = sel.value === "custom" ? parseInt(inp && inp.value, 10) : parseInt(sel.value, 10);
-        if (!Number.isInteger(v) || v < 5 || v > 43200) { toast(T("scTtlRange")); return; }
+        if (!Number.isInteger(v) || v < 5 || v > 43200) { scStatus("error", T("scTtlRange")); toast(T("scTtlRange"), { type: "warning" }); return; }
         try { localStorage.setItem(TTL_LOCAL_KEY, String(v)); localChanged = true; } catch (e) {}
       }
     }
     var g = parseInt(gl && gl.value, 10);
-    if (!Number.isInteger(g) || g < 5 || g > 43200) { toast(T("scTtlRange")); return; }
-    var lim = $("sclimit"), langEl = $("sclang");
-    var newLimit = lim ? parseInt(lim.value, 10) : state.limit;
-    if ([10, 20, 50, 100].indexOf(newLimit) === -1) newLimit = state.limit;
-    var newLang = langEl ? langEl.value : LANG;
-    var langChanged = !!(newLang && newLang !== LANG);
-    var limitChanged = newLimit !== state.limit;
-    function applyLocal() {
-      try { localStorage.setItem("sms_perpage", String(newLimit)); } catch (e) {}
-      state.limit = newLimit;
-      if (langChanged) { try { localStorage.setItem("sms_lang", newLang); } catch (e) {} }
-    }
-    function afterSaved() {
-      if (!langChanged) return;
-      try {
-        var u = new URL(location.href);
-        u.searchParams.set("lang", newLang);
-        location.replace(u.toString());
-        return;
-      } catch (e) { location.reload(); }
-    }
+    if (!Number.isInteger(g) || g < 5 || g > 43200) { scStatus("error", T("scTtlRange")); toast(T("scTtlRange"), { type: "warning" }); return; }
     if (g !== parseInt(SC.d.session_ttl_minutes, 10)) {
       SC.d.session_ttl_minutes = g;
-      applyLocal();
-      return scPut({ revision: SC.d.revision, session_ttl_minutes: g }, btn, T("scSavedTtlGlobal")).then(function (ok) {
-        if (ok) afterSaved();
-      });
+      return scPut({ revision: SC.d.revision, session_ttl_minutes: g }, btn, T("scSavedTtlGlobal"));
     }
-    if (localChanged || limitChanged || langChanged) {
-      applyLocal();
+    if (localChanged) {
       /* 只改了本浏览器的项：提示语必须与真实范围一致（不写成「下次登录生效」） */
       scMarkDirty(false);
       SC.lastSaveAt = Date.now();
-      toast(T("scSavedLocal"));
-      afterSaved();
+      scStatus("success", T("scSavedOk"));
+      toast(T("scSavedLocal"), { type: "success" });
       return;
     }
-    toast(T("scNoChanges"));
+    toast(T("scNoChanges"), { type: "warning" });
   }
   /* 本浏览器偏好（消息开关 / 免打扰）：先读成纯数据快照，保存成功后再落地，
      避免「服务端保存失败但本地开关已经改了」这种反馈与状态不一致 */
@@ -7812,8 +9788,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var types = [];
     var nodes = document.querySelectorAll("[data-nftype]");
     for (var i = 0; i < nodes.length; i++) if (nodes[i].checked) types.push(nodes[i].getAttribute("data-nftype"));
-    if (!types.length) { toast(T("scKeepOneType")); return; }
-    var prefs = readBrowserPrefs();
+    if (!types.length) { scStatus("error", T("scKeepOneType")); toast(T("scKeepOneType"), { type: "warning" }); return; }
     var schema = SC.d.notify_schema || { channels: [] };
     var body = {
       revision: SC.d.revision,
@@ -7826,21 +9801,29 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       },
       clear: [],
     };
-    /* 多目标：新目标携带完整字段；已保存目标不回传敏感明文，服务端按 id 合并 */
+    /* 多目标：普通字段照旧走 fields（空串=空值）；敏感字段改走显式三态 sensitive:
+       { op: "keep" } 保留服务端原值 / { op: "set", value } 覆盖 / { op: "clear" } 删除。
+       敏感明文只在 op=set 时出现在请求体里，且从不进入回读与界面。 */
     var schemaCh = (SC.d.notify_schema || {}).channels || [];
     body.notify.targets = (SC.targets || []).map(function (tg) {
       var spec = schemaCh.filter(function (c) { return c.key === tg.channel; })[0];
-      var fields = {};
+      var fields = {}, sensitive = {}, hasSens = false;
       (spec ? spec.fields : []).forEach(function (f) {
         var v = (tg.fields || {})[f.key] || {};
         if (f.sensitive) {
-          if (tg._new && (v.value || v.configured)) fields[f.key] = v.value || "";
+          /* fields 里对敏感字段恒为空串：兼容未升级的服务端，避免明文进普通字段通道 */
+          fields[f.key] = "";
+          hasSens = true;
+          if (v.clear) sensitive[f.key] = { op: "clear" };
+          else if (v.value) sensitive[f.key] = { op: "set", value: v.value };
+          else sensitive[f.key] = { op: "keep" };
         } else {
           fields[f.key] = v.value || "";
         }
       });
       var out = { channel: tg.channel, name: tg.name, enabled: !!tg.enabled, fields: fields,
         types: (tg.types && tg.types.length ? tg.types : ["verify", "sms", "notify"]).slice() };
+      if (hasSens) out.sensitive = sensitive;
       if (!tg._new && tg.id) out.id = tg.id;
       return out;
     });
@@ -7863,17 +9846,17 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       });
       body.notify.channels[ch.key] = c;
     });
-    return scPut(body, btn).then(function (ok) {
-      /* 只有服务端确认保存成功才落地本浏览器偏好，失败时保持原状并如实提示 */
-      if (ok) applyBrowserPrefs(prefs);
-      return ok;
-    });
+    return scPut(body, btn);
   }
   function scSaveBiz(btn) {
     var days = parseInt($("sysdays").value, 10);
-    if (!Number.isInteger(days) || days < 1 || days > 3650) { toast(T("scDaysInvalid")); return; }
+    if (!Number.isInteger(days) || days < 1 || days > 3650) {
+      scStatus("error", T("scDaysInvalid")); toast(T("scDaysInvalid"), { type: "warning" }); return;
+    }
     var api = $("sysareaapi").value.trim();
-    if (api && !/^(http|https):\/\/[^\s]+$/i.test(api)) { toast(T("scApiInvalid")); return; }
+    if (api && !/^(http|https):\/\/[^\s]+$/i.test(api)) {
+      scStatus("error", T("scApiInvalid")); toast(T("scApiInvalid"), { type: "warning" }); return;
+    }
     SC.d.retention_days = days;
     SC.d.phone_area_enabled = !!$("sysarea").checked;
     SC.d.phone_area_api = api;
@@ -7889,8 +9872,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   function openSessTtl() { openSettingsCenter("session"); }
   function openNotifySettings() { openSettingsCenter("notify"); }
   function openSystemSettings() { openSettingsCenter("biz"); }
-  /* 顶部「设置」直接打开设置中心（原下拉菜单内容已迁入设置中心） */
-  $("setbtn").onclick = function () { openSettingsCenter("session"); };
+  /* 顶部「设置」直接打开设置中心，默认落在「界面与显示」分区 */
+  $("setbtn").onclick = function () { openSettingsCenter("display"); };
   /* 回到页面即清零未读数、恢复标题，并立刻补拉一次（移动端切后台常被冻结，长轮询可能已断） */
   document.addEventListener("visibilitychange", function () {
     if (!document.hidden) {
@@ -7908,6 +9891,14 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (state.selectMode) {
       var card = ev.target.closest ? ev.target.closest(".card") : null;
       if (card && !ev.target.closest("button,label,input,a")) { toggleSelCard(card); return; }
+    }
+    /* UX-07C：双栏模式下整卡可点选（不再要求精确命中摘要小字），详情进右侧面板 */
+    if (splitOn() && !state.selectMode) {
+      var paneCard = ev.target.closest ? ev.target.closest(".card") : null;
+      if (paneCard && !ev.target.closest("button,label,input,a,.code-chip")) {
+        openPane(parseInt(paneCard.getAttribute("data-id"), 10));
+        return;
+      }
     }
     var starBtn = ev.target.closest ? ev.target.closest(".star") : null;
     if (starBtn) {
@@ -7936,30 +9927,108 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var btn = ev.target.closest ? ev.target.closest(".del") : null;
     if (!btn) return;
     var id = btn.getAttribute("data-id");
-    fetch("/api/messages/" + id, { method: "DELETE" })
-      .then(function (r) { return r.json(); })
-      .then(function (d) { if (d && d.success) { undoToast([parseInt(id, 10)]); load(); } });
+    /* UX-09 U9-02：行内删除也先确认；取消时不得产生任何副作用 */
+    confirmDelOne().then(function (go) {
+      if (!go) return;
+      fetch("/api/messages/" + id, { method: "DELETE" })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          /* UX-09 U9-08：行内删除失败此前完全静默，用户会以为已经删掉 */
+          if (!d || !d.success) { toast(T("delFail"), { type: "error" }); return; }
+          undoToast([parseInt(id, 10)]); load();
+        })
+        .catch(function () { toast(T("delFail"), { type: "error" }); });
+    });
   });
-  /* 双击收件号直接复制；双击验证码同样直接复制 */
-  $("list").addEventListener("dblclick", function (ev) {
+  /* UX-08：列表键盘路径——卡片聚焦时 Enter/Space 打开详情，方向键/Home/End 在列表内移动焦点，
+     Esc 在宽屏双栏下清除选中。焦点移动后滚到可视区，避免键盘用户"看不见自己在哪"。 */
+  $("list").addEventListener("keydown", function (ev) {
+    /* UX-09 U9-03：Ctrl/Cmd+A 只在「已进入多选 + 焦点在列表内」时接管，
+       不做全局无条件绑定，避免抢走浏览器/输入框的原生全选 */
+    if ((ev.ctrlKey || ev.metaKey) && (ev.key === "a" || ev.key === "A") && state.selectMode) {
+      ev.preventDefault();
+      var bs = $("list").querySelectorAll(".selbox");
+      for (var bi = 0; bi < bs.length; bi++) {
+        bs[bi].checked = true;
+        state.selected[bs[bi].getAttribute("data-id")] = true;
+      }
+      updateSelBar();
+      return;
+    }
+    var card = ev.target && ev.target.closest ? ev.target.closest(".card") : null;
+    if (!card || ev.target !== card) return;
+    var cards = Array.prototype.slice.call($("list").querySelectorAll(".card"));
+    var i = cards.indexOf(card);
+    var go = function (el) {
+      if (!el) return;
+      ev.preventDefault();
+      el.focus();
+      try { el.scrollIntoView({ block: "nearest" }); } catch (e) {}
+    };
+    /* Esc 优先退出多选，其次才是清空双栏详情 */
+    if (ev.key === "Escape" && state.selectMode) {
+      ev.preventDefault();
+      setSelectMode(false, { focusFrom: $("selmodebtn") });
+      return;
+    }
+    /* 键盘进入多选：卡片聚焦时按 X 切换本条选中（无需鼠标右键/触屏长按） */
+    if ((ev.key === "x" || ev.key === "X") && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+      ev.preventDefault();
+      if (!state.selectMode) setSelectMode(true);
+      toggleSelCard(card);
+      return;
+    }
+    if (ev.key === "Enter" || ev.key === " " || ev.key === "Spacebar") {
+      ev.preventDefault();
+      openDetail(parseInt(card.getAttribute("data-id"), 10));
+      return;
+    }
+    if (ev.key === "ArrowDown") { go(cards[i + 1]); return; }
+    if (ev.key === "ArrowUp") { go(cards[i - 1]); return; }
+    if (ev.key === "Home") { go(cards[0]); return; }
+    if (ev.key === "End") { go(cards[cards.length - 1]); return; }
+    if (ev.key === "Escape" && splitOn() && state.detailId) {
+      ev.preventDefault();
+      state.detailId = 0;
+      paneMarkSel(0);
+      paneEmptyState();
+    }
+  });
+  /* 双击收件号直接复制；双击验证码同样直接复制 */  $("list").addEventListener("dblclick", function (ev) {
     var chip = ev.target.closest ? ev.target.closest(".code-chip.tapcopy") : null;
     if (chip) { ev.preventDefault(); copyCodeChip(chip); return; }
     var el = ev.target.closest ? ev.target.closest(".recv") : null;
     if (!el) return;
     var text = el.textContent;
-    var fin = function () { toast(T("recvCopied")); };
+    var fin = function () { toast(T("recvCopied"), { type: "success" }); };
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).then(fin, function () { fallbackCopy(text); fin(); });
     } else { fallbackCopy(text); fin(); }
   });
-  /* ---------- 批量选择（右键 / 长按进入，默认隐藏） ---------- */
-  function setSelectMode(on) {
+  /* ---------- 批量选择（工具栏入口 / 右键 / 长按进入，默认隐藏） ---------- */
+  function setSelectMode(on, opts) {
     state.selectMode = !!on;
     document.body.classList.toggle("selecting", state.selectMode);
     $("selbar").hidden = !state.selectMode;
-    if (!state.selectMode) state.selected = {};
+    var smb = $("selmodebtn");
+    if (smb) smb.setAttribute("aria-pressed", state.selectMode ? "true" : "false");
+    if (!state.selectMode) {
+      state.selected = {};
+      /* 退出时必须把 DOM 复选框一并复位：只清 state 会留下"已勾选"的残留视觉，
+         下次进入多选（或键盘路径读状态）时与实际选择不一致 */
+      var bs = $("list").querySelectorAll(".selbox");
+      for (var bi = 0; bi < bs.length; bi++) bs[bi].checked = false;
+    }
     syncSelBoxes();
     updateSelBar();
+    /* UX-09 U9-03：操作条出现/消失会让焦点失去落点，键盘用户必须能被带到可操作处 */
+    var back = opts && opts.focusFrom;
+    if (state.selectMode && opts && opts.moveFocus) {
+      var all = $("selall");
+      if (all) { try { all.focus(); } catch (e) {} }
+    } else if (!state.selectMode && back) {
+      try { back.focus(); } catch (e) {}
+    }
   }
   function toggleSelCard(card) {
     if (!card) return;
@@ -7968,6 +10037,16 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var box = card.querySelector(".selbox");
     if (box) box.checked = !!state.selected[id];
     updateSelBar();
+  }
+  /* UX-09 U9-19：右键与长按必须产生完全相同的选择语义。
+     此前两条路径各自实现「进入多选 + 选中当前卡」，容易演化成一边选中一边反选；
+     现在只在这里实现一次，两个入口都调用它。 */
+  function beginSelectWith(card) {
+    if (!card) return false;
+    setSelectMode(true);
+    var id = card.getAttribute("data-id");
+    if (!state.selected[id]) toggleSelCard(card);
+    return true;
   }
   var pressTimer = null, pressCard = null, pressX = 0, pressY = 0, suppressClick = false;
   function cancelPress() {
@@ -7978,8 +10057,19 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var card = ev.target.closest ? ev.target.closest(".card") : null;
     if (!card) return;
     ev.preventDefault();
-    setSelectMode(true);
-    if (!state.selected[card.getAttribute("data-id")]) toggleSelCard(card);
+    beginSelectWith(card);
+  });
+  /* UX-09 U9-03：工具栏上的常驻「多选」入口 —— 右键/长按不再是唯一入口 */
+  if ($("selmodebtn")) $("selmodebtn").onclick = function () {
+    var on = !state.selectMode;
+    setSelectMode(on, { moveFocus: on, focusFrom: this });
+  };
+  /* 焦点落在操作条内时，Esc 直接退出多选（不必先 Tab 回列表） */
+  $("selbar").addEventListener("keydown", function (ev) {
+    if (ev.key === "Escape") {
+      ev.preventDefault();
+      setSelectMode(false, { focusFrom: $("selmodebtn") });
+    }
   });
   $("list").addEventListener("touchstart", function (ev) {
     var card = ev.target.closest ? ev.target.closest(".card") : null;
@@ -7995,8 +10085,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       card.classList.remove("pressing");
       suppressClick = true;
       setTimeout(function () { suppressClick = false; }, 400);
-      setSelectMode(true);
-      if (!state.selected[card.getAttribute("data-id")]) toggleSelCard(card);
+      /* U9-19：与右键走同一条语义（进入多选 + 选中当前卡），不各写一套 */
+      beginSelectWith(card);
       if (navigator.vibrate) navigator.vibrate(10);
     }, 500);
   }, { passive: true });
@@ -8007,7 +10097,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   }, { passive: true });
   $("list").addEventListener("touchend", cancelPress, { passive: true });
   $("list").addEventListener("touchcancel", cancelPress, { passive: true });
-  $("selcancel").onclick = function () { setSelectMode(false); };
+  $("selcancel").onclick = function () { setSelectMode(false, { focusFrom: $("selmodebtn") }); };
   $("selall").onclick = function () {
     var boxes = $("list").querySelectorAll(".selbox");
     var allOn = boxes.length > 0, i;
@@ -8031,26 +10121,28 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       .then(function (res) {
         btn.disabled = false;
         btn.removeAttribute("data-loading");
-        if (!res || !res.success) { toast(T("bulkFail")); return; }
-        if (res.failed) toast(T("bulkPartial", { ok: res.updated, ng: res.failed }));
-        else toast(T("bulkOk", { n: res.updated }));
+        if (!res || !res.success) { toast(T("bulkFail"), { type: "error" }); return; }
+        if (res.failed) toast(T("bulkPartial", { ok: res.updated, ng: res.failed }), { type: "warning" });
+        else toast(T("bulkOk", { n: res.updated }), { type: "success" });
         if (typeof res.unread === "number") {
           state.unread = res.unread;
           var el = $("unreadcount");
           if (el) { el.textContent = state.unread; el.hidden = state.unread <= 0; }
         }
-        setSelectMode(false);
+        setSelectMode(false, { focusFrom: $("selmodebtn") });
         load();
       })
-      .catch(function () { btn.disabled = false; btn.removeAttribute("data-loading"); toast(T("bulkFail")); });
+      .catch(function () { btn.disabled = false; btn.removeAttribute("data-loading"); toast(T("bulkFail"), { type: "error" }); });
   };
   $("seldel").onclick = function () {
     var ids = Object.keys(state.selected).map(function (k) { return parseInt(k, 10); }).filter(function (n) { return n > 0; });
     if (!ids.length) return;
-    if (!confirm(T("confirmDelN", { n: ids.length }))) return;
-    fetch("/api/messages/remove", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: ids }) })
-      .then(function (r) { return r.json(); })
-      .then(function (d) { if (d && d.success) { setSelectMode(false); undoToast(ids); load(); } });
+    dsConfirm({ message: T("confirmDelN", { n: ids.length }), okText: T("del"), danger: true }).then(function (go) {
+      if (!go) return;
+      fetch("/api/messages/remove", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: ids }) })
+        .then(function (r) { return r.json(); })
+        .then(function (d) { if (d && d.success) { setSelectMode(false, { focusFrom: $("selmodebtn") }); undoToast(ids); load(); } });
+    });
   };
   $("list").addEventListener("change", function (ev) {
     var box = ev.target.closest ? ev.target.closest(".selbox") : null;
@@ -8061,25 +10153,47 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   });
   $("clearbtn").onclick = function () {
     var scope = state.device ? T("scopeDevice") : (state.src || state.range || state.q ? T("scopeFilter") : T("scopeAll"));
-    if (!confirm(T("confirmClear", { scope: scope }))) return;
-    if (!confirm(T("confirmClear2", { scope: scope }))) return;
-    askPassword(function () {
-      fetch("/api/messages/clear", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ device_id: state.device, source: state.src, range: state.range, q: state.q }) })
-        .then(function (r) { return r.json(); })
-        .then(function (d) { if (d && d.success) { toast(T("clearedN", { n: d.removed })); state.selected = {}; load(); } });
+    dsConfirm({ message: T("confirmClear", { scope: scope }), okText: T("del"), danger: true }).then(function (go) {
+      if (!go) return;
+      return dsConfirm({ message: T("confirmClear2", { scope: scope }), okText: T("del"), danger: true });
+    }).then(function (go2) {
+      if (!go2) return;
+      askPassword(function () {
+        fetch("/api/messages/clear", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ device_id: state.device, source: state.src, range: state.range, q: state.q }) })
+          .then(function (r) { return r.json(); })
+          .then(function (d) { if (d && d.success) { toast(T("clearedN", { n: d.removed })); state.selected = {}; load(); } });
+      });
     });
   };
   /* 主题三态：auto → light → dark */
   var THEMES = ["auto", "light", "dark"];
   function currentTheme() { try { return localStorage.getItem("sms_theme") || "auto"; } catch (e) { return "auto"; } }
+  /* auto 在应用前解析成具体值：attribute 永远是 light|dark，样式表因此不需要 media 副本 */
+  function resolveTheme(t) {
+    if (t === "light" || t === "dark") return t;
+    try { return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"; } catch (e) { return "light"; }
+  }
+  /* 浏览器顶部色带跟随当前主题：取值来自令牌 --ds-color-chrome，不在 JS 里另存一份色值 */
+  function syncThemeColor() {
+    var m = document.querySelector('meta[name="theme-color"]');
+    if (!m) return;
+    var v = getComputedStyle(document.documentElement).getPropertyValue("--ds-color-chrome").trim();
+    if (v) m.setAttribute("content", v);
+  }
   function applyTheme(t) {
-    if (t === "auto") document.documentElement.removeAttribute("data-theme");
-    else document.documentElement.setAttribute("data-theme", t);
+    document.documentElement.setAttribute("data-theme", resolveTheme(t));
+    syncThemeColor();
     $("themebtn").textContent = t === "auto" ? T("themeAuto") : (t === "light" ? T("themeLight") : T("themeDark"));
   }
   (function initTheme() {
     var t = currentTheme(); if (THEMES.indexOf(t) === -1) t = "auto";
     applyTheme(t);
+    try {
+      var mq = window.matchMedia("(prefers-color-scheme: dark)");
+      var onScheme = function () { if (currentTheme() === "auto") applyTheme("auto"); };
+      if (mq.addEventListener) mq.addEventListener("change", onScheme);
+      else if (mq.addListener) mq.addListener(onScheme);
+    } catch (e) {}
     $("themebtn").onclick = function () {
       var cur = currentTheme(); if (THEMES.indexOf(cur) === -1) cur = "auto";
       var next = THEMES[(THEMES.indexOf(cur) + 1) % THEMES.length];
@@ -8087,16 +10201,45 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       applyTheme(next);
     };
   })();
+  /* UX-07C：跨 1600px 断点时切换详情承载方式——进入双栏即恢复选中详情，退回单栏则收起面板 */
+  (function initSplitPane() {
+    var pane = $("detailpane");
+    if (!pane) return;
+    var sync = function () {
+      var pi = $("pageinfo");
+      if (pi) {
+        var pageTxt = state.pages > 1 ? T("pageOf", { a: state.page, b: state.pages }) : "";
+        /* 与 updateMeta 保持同一规则：双栏时把条数并入分页行，单栏时还原 */
+        pi.textContent = splitOn() ? (pageTxt ? pageTxt + " · " : "") + T("total", { n: state.total }) : pageTxt;
+      }
+      if (splitOn()) {
+        pane.hidden = false;
+        if (state.detailId) openPane(state.detailId);
+        else paneEmptyState();
+      } else {
+        pane.hidden = true;
+        /* 离开双栏：只清视觉选中，保留 state.detailId。
+           单栏下没有面板承接高亮，留着就是幽灵高亮；但记忆要留，放大回来才能还原刚才看的那条 */
+        paneMarkSel(0);
+      }
+    };
+    if (SPLIT_MQ) {
+      if (SPLIT_MQ.addEventListener) SPLIT_MQ.addEventListener("change", sync);
+      else if (SPLIT_MQ.addListener) SPLIT_MQ.addListener(sync);
+    }
+    sync();
+  })();
   /* 键盘：/ 聚焦搜索；Esc 退出批量选择 */
   document.addEventListener("keydown", function (e) {
     var tag = (e.target && e.target.tagName) || "";
     var typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
     if (e.key === "/" && !typing) { e.preventDefault(); $("q").focus(); }
     if (e.key === "Escape") {
-      var pm = $("pushmodal");
-      if (pm && !pm.hidden) { closePushEditor(); return; }
-      if (!$("modal").hidden) { closeModal(); return; }
-      if (state.selectMode) setSelectMode(false);
+      /* 只要还有弹层，Esc 只关最上层；没有弹层时才处理页面级状态 */
+      if (dlgTop()) { e.preventDefault(); dlgTopClose(); return; }
+      if (state.selectMode) { setSelectMode(false, { focusFrom: $("selmodebtn") }); return; }
+      /* 双栏：无弹层时 Esc 清除右侧选中，回到空态（不依赖焦点是否在列表里） */
+      if (splitOn() && state.detailId) { state.detailId = 0; paneMarkSel(0); paneEmptyState(); }
     }
   });
   /* 横向滑轨：触屏用原生左右滑；桌面把纵向滚轮映射为横向滚动 */
@@ -8116,8 +10259,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     $("pwdcancel").onclick = pwdClose;
     $("pwdok").onclick = pwdSubmit;
     $("pwdinput").onkeydown = function (e) {
+      /* Esc 统一交给焦点栈处理，避免一次按键连关两层 */
       if (e.key === "Enter") { e.preventDefault(); pwdSubmit(); }
-      else if (e.key === "Escape") { e.preventDefault(); pwdClose(); }
     };
     $("pwdmodal").addEventListener("click", function (ev) { if (ev.target === $("pwdmodal")) pwdClose(); });
     $("pushmodal").addEventListener("click", function (ev) {
@@ -8145,51 +10288,101 @@ const LOGIN_HTML = String.raw`<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <meta name="format-detection" content="telephone=no">
+<meta name="theme-color" content="#f2f4f6">
+<script>
+/* 首帧前确定主题：data-theme 是运行时唯一真源（auto 在此解析为 light/dark），
+   这样样式表只需 :root(浅) + html[data-theme="dark"](深) 两段，且深色不闪白。 */
+(function () {
+  var t = "light";
+  try {
+    var saved = localStorage.getItem("sms_theme") || "auto";
+    if (saved === "light" || saved === "dark") t = saved;
+    else if (window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches) t = "dark";
+  } catch (e) {}
+  document.documentElement.setAttribute("data-theme", t);
+  /* 浏览器色带取值来自令牌，不在 JS 里另存色值；样式解析完成后再同步一次 */
+  document.addEventListener("DOMContentLoaded", function () {
+    try {
+      var m = document.querySelector('meta[name="theme-color"]');
+      var v = getComputedStyle(document.documentElement).getPropertyValue("--ds-color-chrome").trim();
+      if (m && v) m.setAttribute("content", v);
+    } catch (e) {}
+  });
+})();
+</script>
 <link rel="icon" href="__SITE_ICON__">
 <title>__SITE_NAME__ - 登录</title>
 <style>
   ${DS_TOKENS_CSS}
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font: var(--ds-text-md)/var(--ds-leading) var(--ds-font-family);
+  body { font: var(--ds-font-size-md)/var(--ds-line-height-base) var(--ds-font-family);
          background: var(--ds-color-bg-page); color: var(--ds-color-text); display: flex; align-items: center;
          justify-content: center; min-height: 100vh; min-height: 100dvh;
-         padding: calc(16px + env(safe-area-inset-top, 0px)) 16px calc(16px + env(safe-area-inset-bottom, 0px));
-         -webkit-text-size-adjust: 100%; -webkit-tap-highlight-color: transparent; }
-  .box { background: var(--ds-color-bg-surface); border: 1px solid var(--ds-color-border);
-         border-radius: var(--ds-radius-xl); box-shadow: var(--ds-shadow-2);
-         padding: 28px 24px; width: 100%; max-width: 320px; text-align: center; position: relative; }
-  h1 { font-size: var(--ds-text-xl); font-weight: var(--ds-weight-medium); margin-bottom: 16px; word-break: break-word; }
-  input { width: 100%; padding: 11px 12px; border: 1px solid var(--ds-color-border);
-          border-radius: var(--ds-radius-md); font-size: 16px; margin-bottom: 10px;
-          background: var(--ds-color-bg-surface); color: var(--ds-color-text); }
-  input:focus-visible { outline: 2px solid var(--ds-color-link); outline-offset: 1px; border-color: var(--ds-color-primary); }
+         padding: calc(20px + env(safe-area-inset-top, 0px)) 16px calc(20px + env(safe-area-inset-bottom, 0px));
+         -webkit-text-size-adjust: 100%; -webkit-tap-highlight-color: transparent;
+         /* 极淡的品牌光晕：给大面积留白一个视觉锚点，不是装饰性渐变块 */
+         background-image: radial-gradient(680px 340px at 50% -6%, rgba(21,128,61,.10), transparent 70%); }
+  .box { background: var(--ds-color-bg-surface); border: 1px solid var(--ds-color-border-subtle);
+         border-radius: var(--ds-radius-2xl); box-shadow: var(--ds-shadow-2);
+         padding: 32px 28px 22px; width: 100%; max-width: 380px; text-align: left; position: relative;
+         display: flex; flex-direction: column; }
+  .lg-brand { display: flex; align-items: center; gap: 11px; margin-bottom: 22px; }
+  .lg-logo { width: 40px; height: 40px; border-radius: 11px; background: var(--ds-color-primary-fill); color: var(--ds-color-on-primary);
+             display: grid; place-items: center; font-weight: 800; font-size: 13px; letter-spacing: .02em;
+             box-shadow: inset 0 0 0 1px rgba(255,255,255,.14); flex: none; }
+  h1 { font-size: 18px; font-weight: 700; letter-spacing: -.2px; margin: 0 0 2px; word-break: break-word; line-height: 1.3; }
+  .tagline { font-size: 12.5px; color: var(--ds-color-text-secondary); margin: 0; line-height: 1.5; }
+  .lg-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+  .lg-label { font-size: 12.5px; font-weight: 600; color: var(--ds-color-text-secondary); }
+  input { width: 100%; padding: 11px 12px; border: 1px solid var(--ds-field-border);
+          border-radius: var(--ds-radius-md); font-size: 16px; background: var(--ds-field-bg);
+          color: var(--ds-color-text); transition: border-color var(--ds-duration-fast) var(--ds-ease),
+          box-shadow var(--ds-duration-fast) var(--ds-ease); }
+  input::placeholder { color: var(--ds-color-text-tertiary); }
+  input:focus-visible { outline: none; border-color: var(--ds-color-primary);
+          box-shadow: var(--ds-focus-ring); }
   button#go { width: 100%; padding: 11px 0; border: none; border-radius: var(--ds-radius-md);
-           background: var(--ds-color-primary); color: #fff; font-size: 15px; font-weight: var(--ds-weight-medium);
-           cursor: pointer; touch-action: manipulation; min-height: 40px; }
-  button#go:hover { background: var(--ds-color-primary-hover); }
+           background: var(--ds-color-primary-fill); color: var(--ds-color-on-primary);
+           font-size: var(--ds-font-size-md); font-weight: var(--ds-font-weight-semibold);
+           cursor: pointer; touch-action: manipulation; min-height: var(--ds-control-h-lg); letter-spacing: .01em;
+           transition: background var(--ds-duration-fast) var(--ds-ease); }
+  button#go:hover { background: var(--ds-color-primary-fill-hover); }
   button#go:disabled { opacity: .6; cursor: not-allowed; }
-  button#go:focus-visible, .langbtn:focus-visible { outline: 2px solid var(--ds-color-link); outline-offset: 2px; }
-  .err { color: var(--ds-color-danger); font-size: var(--ds-text-xs); min-height: 18px; margin-top: 8px; }
-  .langbtn { position: absolute; top: 8px; right: 10px; border: 1px solid var(--ds-color-border); background: none;
-             color: var(--ds-color-text-secondary); border-radius: var(--ds-radius-sm); padding: 3px 8px;
-             font-size: 11px; cursor: pointer; }
-  .langmenu { position: fixed; z-index: 200; background: var(--ds-color-bg-surface); border: 1px solid var(--ds-color-border);
+  button#go:focus-visible { outline: 2px solid var(--ds-color-primary); outline-offset: 2px; }
+  .langbtn:focus-visible { outline: 2px solid var(--ds-color-primary); outline-offset: 2px; }
+  .err { color: var(--ds-color-danger); font-size: var(--ds-font-size-xs); min-height: 18px; margin-top: 8px; line-height: 1.5; }
+  .langbtn { position: absolute; top: 14px; right: 14px; display: inline-grid; place-items: center;
+             width: 30px; height: 30px; border: 1px solid var(--ds-color-border-subtle); background: none;
+             color: var(--ds-color-text-secondary); border-radius: var(--ds-radius-md); padding: 0;
+             font-size: 13px; line-height: 1; cursor: pointer; }
+  .langbtn:hover { background: var(--ds-color-bg-subtle); color: var(--ds-color-text); }
+  .langmenu { position: fixed; z-index: var(--ds-z-popover); background: var(--ds-color-bg-raised); border: var(--ds-border-w) solid var(--ds-color-border);
               border-radius: var(--ds-radius-lg); box-shadow: var(--ds-shadow-2); padding: 4px; min-width: 150px; }
-  .langitem { padding: 8px 14px; border-radius: 7px; cursor: pointer; font-size: var(--ds-text-sm); white-space: nowrap;
+  .langitem { padding: 8px 14px; border-radius: 7px; cursor: pointer; font-size: var(--ds-font-size-sm); white-space: nowrap;
               color: var(--ds-color-text); }
   .langitem:hover { background: var(--ds-color-bg-subtle); }
-  .langitem.cur { color: var(--ds-color-link); font-weight: var(--ds-weight-medium); }
-  .foot { color: var(--ds-color-text-tertiary); font-size: var(--ds-text-xs); margin-top: 14px; }
+  .langitem.cur { color: var(--ds-color-link); font-weight: var(--ds-font-weight-semibold); }
+  .foot { color: var(--ds-color-text-tertiary); font-size: 11.5px; margin-top: 20px; padding-top: 14px;
+          border-top: 1px solid var(--ds-color-divider); text-align: center; }
   .foot a { color: var(--ds-color-text-tertiary); }
 </style>
 </head>
 <body>
 <div class="box">
   <button class="langbtn" id="langbtn" type="button">🌐</button>
-  <h1>__SITE_NAME__</h1>
-  <input type="password" id="pw" data-i18n-ph="loginPw" placeholder="管理密码" autofocus autocomplete="current-password">
+  <div class="lg-brand">
+    <span class="lg-logo" aria-hidden="true">SMS</span>
+    <div>
+      <h1>__SITE_NAME__</h1>
+      <p class="tagline" data-i18n="tagline">集中查看设备短信，快速处理未读消息</p>
+    </div>
+  </div>
+  <div class="lg-field">
+    <label class="lg-label" for="pw" data-i18n="loginLabel">管理密码</label>
+    <input type="password" id="pw" placeholder="••••••••" autofocus autocomplete="current-password">
+  </div>
   <button id="go" data-i18n="loginBtn">登 录</button>
-  <div class="err" id="err"></div>
+  <div class="err" id="err" role="alert" aria-live="assertive"></div>
   <div class="foot">© 2026 <a href="https://cbm.im/" target="_blank" rel="noopener noreferrer">左立方</a> · <a href="https://github.com/ShenDoyle/SMSToWeb" target="_blank" rel="noopener noreferrer">SMSToWeb</a> <span class="ver">__APP_VERSION__</span></div>
 </div>
 <script>
@@ -8227,31 +10420,31 @@ const LOGIN_HTML = String.raw`<!DOCTYPE html>
   var D = {
     "zh-CN": { loginPw: "管理密码", loginBtn: "登 录", wrongPw: "密码错误",
                tooMany: "尝试次数过多，请 10 分钟后再试", loginFail: "登录失败", netErr: "网络错误",
-               title: " - 登录", btnLang: "🌐", tipLang: "切换语言" },
+               title: " - 登录", btnLang: "🌐", tipLang: "切换语言", tagline: "集中查看设备短信，快速处理未读消息", loginLabel: "管理密码" },
     "zh-TW": { loginPw: "管理密碼", loginBtn: "登 入", wrongPw: "密碼錯誤",
                tooMany: "嘗試次數過多，請 10 分鐘後再試", loginFail: "登入失敗", netErr: "網路錯誤",
-               title: " - 登入", btnLang: "🌐", tipLang: "切換語言" },
+               title: " - 登入", btnLang: "🌐", tipLang: "切換語言", tagline: "集中查看裝置簡訊，快速處理未讀訊息", loginLabel: "管理密碼" },
     en: { loginPw: "Admin password", loginBtn: "Sign in", wrongPw: "Wrong password",
           tooMany: "Too many attempts. Try again in 10 minutes.", loginFail: "Sign-in failed", netErr: "Network error",
-          title: " - Sign in", btnLang: "🌐", tipLang: "Switch language" },
+          title: " - Sign in", btnLang: "🌐", tipLang: "Switch language", tagline: "All device messages in one place", loginLabel: "Admin password" },
     ja: { loginPw: "管理パスワード", loginBtn: "ログイン", wrongPw: "パスワードが違います",
           tooMany: "試行回数が多すぎます。10 分後に再試行してください", loginFail: "ログインに失敗しました", netErr: "ネットワークエラー",
-          title: " - ログイン", btnLang: "🌐", tipLang: "言語切替" },
+          title: " - ログイン", btnLang: "🌐", tipLang: "言語切替", tagline: "端末の SMS をまとめて確認", loginLabel: "管理パスワード" },
     ko: { loginPw: "관리자 비밀번호", loginBtn: "로그인", wrongPw: "비밀번호가 틀렸습니다",
           tooMany: "시도 횟수가 너무 많습니다. 10분 후 다시 시도해 주세요", loginFail: "로그인 실패", netErr: "네트워크 오류",
-          title: " - 로그인", btnLang: "🌐", tipLang: "언어 전환" },
+          title: " - 로그인", btnLang: "🌐", tipLang: "언어 전환", tagline: "기기 문자를 한곳에서 확인", loginLabel: "관리자 비밀번호" },
     es: { loginPw: "Contraseña de administrador", loginBtn: "Iniciar sesión", wrongPw: "Contraseña incorrecta",
           tooMany: "Demasiados intentos. Reinténtalo en 10 minutos.", loginFail: "Error al iniciar sesión", netErr: "Error de red",
-          title: " - Iniciar sesión", btnLang: "🌐", tipLang: "Cambiar idioma" },
+          title: " - Iniciar sesión", btnLang: "🌐", tipLang: "Cambiar idioma", tagline: "Todos los mensajes en un solo lugar", loginLabel: "Contraseña de administrador" },
     fr: { loginPw: "Mot de passe administrateur", loginBtn: "Se connecter", wrongPw: "Mot de passe incorrect",
           tooMany: "Trop de tentatives. Réessayez dans 10 minutes.", loginFail: "Échec de la connexion", netErr: "Erreur réseau",
-          title: " - Connexion", btnLang: "🌐", tipLang: "Changer de langue" },
+          title: " - Connexion", btnLang: "🌐", tipLang: "Changer de langue", tagline: "Tous les messages au même endroit", loginLabel: "Mot de passe administrateur" },
     de: { loginPw: "Admin-Passwort", loginBtn: "Anmelden", wrongPw: "Falsches Passwort",
           tooMany: "Zu viele Versuche. Bitte in 10 Minuten erneut versuchen.", loginFail: "Anmeldung fehlgeschlagen", netErr: "Netzwerkfehler",
-          title: " - Anmelden", btnLang: "🌐", tipLang: "Sprache wechseln" },
+          title: " - Anmelden", btnLang: "🌐", tipLang: "Sprache wechseln", tagline: "Alle Gerätenachrichten an einem Ort", loginLabel: "Administratorpasswort" },
     "pt-BR": { loginPw: "Senha de administrador", loginBtn: "Entrar", wrongPw: "Senha incorreta",
                tooMany: "Muitas tentativas. Tente novamente em 10 minutos.", loginFail: "Falha ao entrar", netErr: "Erro de rede",
-               title: " - Entrar", btnLang: "🌐", tipLang: "Mudar idioma" }
+               title: " - Entrar", btnLang: "🌐", tipLang: "Mudar idioma", tagline: "Todas as mensagens em um só lugar", loginLabel: "Senha de administrador" }
   };
   function T(k) { return (D[LANG] && D[LANG][k]) || D.en[k] || k; }
   function apply() {
@@ -9146,6 +11339,44 @@ function notifyTargetView(t) {
   };
 }
 /* 多目标校验/规范化：敏感字段留空 = 沿用同 id 旧值（编辑时不回传明文）；无 id 的新目标自动生成 */
+/* 敏感字段三态操作白名单：keep 保留原值 / set 覆盖（必须带值）/ clear 明确删除。
+   只有渠道 schema 里标注 sensitive 的字段才允许出现，未知字段与普通字段一律拒绝。 */
+const NOTIFY_SENSITIVE_OPS = ["keep", "set", "clear"];
+
+function normalizeNotifySensitiveOps(channel, raw, spec) {
+  if (raw === undefined) return { ok: true, ops: null };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ok: false, reason: "SENSITIVE_NOT_OBJECT" };
+  const ops = {};
+  for (const k of Object.keys(raw)) {
+    if (!Object.prototype.hasOwnProperty.call(spec.fields, k)) {
+      return { ok: false, reason: "SENSITIVE_UNKNOWN_FIELD", field: String(k).slice(0, 32) };
+    }
+    if (!spec.fields[k].sensitive) {
+      /* 把普通字段伪装成敏感操作：拒绝，防止绕过普通字段校验 */
+      return { ok: false, reason: "SENSITIVE_NOT_SENSITIVE", field: String(k).slice(0, 32) };
+    }
+    const o = raw[k];
+    if (!o || typeof o !== "object" || Array.isArray(o)) {
+      return { ok: false, reason: "SENSITIVE_BAD_OP", field: k };
+    }
+    const op = String(o.op === undefined || o.op === null ? "" : o.op);
+    if (NOTIFY_SENSITIVE_OPS.indexOf(op) === -1) {
+      return { ok: false, reason: "SENSITIVE_BAD_OP", field: k };
+    }
+    if (op === "set") {
+      const v = String(o.value === undefined || o.value === null ? "" : o.value);
+      if (!v.trim()) {
+        /* 想清空请显式用 clear：空值 set 视为非法，避免「以为清掉了其实保留」 */
+        return { ok: false, reason: "SENSITIVE_EMPTY_SET", field: k };
+      }
+      ops[k] = { op: "set", value: v };
+    } else {
+      ops[k] = { op: op };
+    }
+  }
+  return { ok: true, ops: ops };
+}
+
 function normalizeNotifyTargets(raw, existing) {
   if (!Array.isArray(raw)) return { ok: false };
   if (raw.length > 50) return { ok: false };
@@ -9173,13 +11404,26 @@ function normalizeNotifyTargets(raw, existing) {
     const prev = old[id] || {};
     /* 敏感字段沿用旧值必须同时满足「同一 id + 同一渠道」，禁止跨渠道复用凭据 */
     if (prev.channel && prev.channel !== channel) return { ok: false };
+    /* 普通字段必须是对象；字符串/数组一律拒绝，避免 [object Object] 之类的脏值落库 */
+    if (t.fields !== undefined && (!t.fields || typeof t.fields !== "object" || Array.isArray(t.fields))) {
+      return { ok: false, reason: "FIELDS_NOT_OBJECT" };
+    }
+    const sensRes = normalizeNotifySensitiveOps(channel, t.sensitive, spec);
+    if (!sensRes.ok) return sensRes;
+    const sensOps = sensRes.ops;
     const fields = {};
     for (const f of Object.keys(spec.fields)) {
-      let v = String((t.fields && t.fields[f]) === undefined || (t.fields && t.fields[f]) === null ? "" : t.fields[f]).trim();
-      if (!v && spec.fields[f].sensitive) v = String((prev.fields && prev.fields[f]) || "");
+      const meta = spec.fields[f];
+      const op = meta.sensitive && sensOps && sensOps[f] ? sensOps[f].op : "";
+      if (op === "clear") { fields[f] = ""; continue; }
+      let v;
+      if (op === "set") v = String(sensOps[f].value).trim();
+      else v = String((t.fields && t.fields[f]) === undefined || (t.fields && t.fields[f]) === null ? "" : t.fields[f]).trim();
+      /* 敏感字段留空 = 保留原值（keep 的默认语义，兼容未使用 sensitive 的旧客户端） */
+      if (!v && meta.sensitive) v = String((prev.fields && prev.fields[f]) || "");
       if (v === "") { fields[f] = ""; continue; }
       const r = normalizeSettingValue(notifyFieldKey(channel, f), v);
-      if (!r.ok) return { ok: false };
+      if (!r.ok) return { ok: false, reason: "INVALID_FIELD_VALUE", field: f };
       fields[f] = r.value;
     }
     out.push({ id: id, channel: channel, name: name, enabled: t.enabled !== false, types: types, fields: fields });
@@ -9378,7 +11622,11 @@ async function handlePutSettings(request, env) {
       let old = [];
       try { old = JSON.parse(cur["notify.targets"] || "[]"); } catch (e) { old = []; }
       const r = normalizeNotifyTargets(n.targets, Array.isArray(old) ? old : []);
-      if (!r.ok) return json({ success: false, error: "INVALID_TARGETS" }, 400);
+      /* 只回传错误类别与字段名（如 webhook / secret），绝不回传字段值与请求原文 */
+      if (!r.ok) {
+        return json({ success: false, error: "INVALID_TARGETS",
+          reason: r.reason || "", field: r.field || "" }, 400);
+      }
       writes["notify.targets"] = r.value;
     }
     if (n.channels && typeof n.channels === "object" && !Array.isArray(n.channels)) {
@@ -9527,9 +11775,8 @@ export async function fetchApp(request, env, ctx) {
         path === "/api/auth-state" || path === "/api/cron" || path === "/manifest.webmanifest" || path === "/sw.js";
       if (!isPublicApi && !(await isAuthed(request, env))) {
         if (isPage && request.method === "GET") {
-          return new Response(renderHtml(LOGIN_HTML, env), {
-            headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", ...SECURITY_HEADERS },
-          });
+          /* ENG-01 OPT-1：登录页同样走 no-cache + ETag（内容不同 → ETag 不同 → 认证态天然隔离） */
+          return await serveHtml(LOGIN_HTML, env, request);
         }
         return json({ success: false, error: "unauthorized" }, 401);
       }
@@ -9655,9 +11902,8 @@ export async function fetchApp(request, env, ctx) {
         return await handlePhoneArea(request, url, env);
       }
       if ((path === "/" || path === "/index.html") && request.method === "GET") {
-        return new Response(renderHtml(PAGE_HTML, env), {
-          headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", ...SECURITY_HEADERS },
-        });
+        /* ENG-01 OPT-1：主页面 no-cache + 稳定 ETag；带 If-None-Match 回源验证，命中即 304 */
+        return await serveHtml(PAGE_HTML, env, request);
       }
       return json({ success: false, error: "not found" }, 404);
     } catch (err) {

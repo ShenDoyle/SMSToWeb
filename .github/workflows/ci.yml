@@ -37,3 +37,41 @@ jobs:
 
       - name: 测试（Node 22.13+ 零依赖）
         run: node tests/run.mjs
+
+      - name: 结构/契约/安全套件
+        run: |
+          node tests/p1-auth.mjs
+          node tests/settings-i18n.mjs
+          node tests/ux02-layout.mjs
+          node tests/ux03-settings.mjs
+          node tests/notify-sensitive-fields.mjs
+
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: 生成六平台产物（浏览器测试跑 Node 平台产物）
+        run: python platforms/gen_app.py
+
+      - name: 安装固定版本 Playwright 与 Chromium
+        # 版本由 package.json 的 devDependencies 精确固定；Chromium 构建号随 Playwright 版本走，
+        # CI 不会随机升级浏览器
+        run: |
+          npm install --no-audit --no-fund
+          npx playwright install --with-deps chromium
+
+      - name: UX-04 Dialog 可访问性与焦点管理
+        run: node tests/browser/ux04-dialog.mjs
+
+      - name: UX-03 设置中心浏览器回归
+        run: node tests/browser/ux03-browser.mjs
+
+      - name: SEC-01 敏感字段三态浏览器回归
+        run: node tests/browser/sec01-browser.mjs

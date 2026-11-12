@@ -811,14 +811,16 @@ async function main() {
     rl = await call("POST", "/api/tokens", eL, { headers: XLG, body: { name: "up-exp", note: "旧库带备注", expires_in_days: 30 }, cookie: "sms_auth=" + ((rl.setCookie.match(/sms_auth=([^;]*)/) || [])[1] || "") });
     check(rl.status === 200 && rl.data.success && typeof rl.data.expires_at === "string", "旧库补列后创建带备注+有效期令牌 → 200");
 
-    /* 7) 页脚版本号：管理页与登录页底部均展示 v1.1.1 */
+    /* 7) 页脚版本号：管理页与登录页底部均展示 APP_VERSION（动态读取，随版本号自动更新） */
+    const APP_VER = (readFileSync(new URL("../src/worker.js", import.meta.url), "utf8").match(/const APP_VERSION = "([^"]+)"/) || [])[1] || "";
+    check(APP_VER !== "", "APP_VERSION 常量可从源码解析");
     const pg = await fetchApp(R("GET", "/", { cookie: ckE }), eE);
     const pgHtml = await pg.text();
-    check(pg.status === 200 && pgHtml.includes('<span class="ver">v1.1.1</span>'), "管理页页脚含版本号 v1.1.1");
+    check(pg.status === 200 && pgHtml.includes('<span class="ver">' + APP_VER + "</span>"), "管理页页脚含版本号 " + APP_VER);
     const lg = await fetchApp(R("GET", "/", {}), eE);
     const lgHtml = await lg.text();
-    check(lg.status === 200 && lgHtml.includes('<span class="ver">v1.1.1</span>'), "登录页页脚含版本号 v1.1.1");
-    check(pgHtml.includes('id="setbtn"') && pgHtml.includes('openSettingsCenter("session")') && pgHtml.includes("登录有效期（本浏览器）"), "设置入口直连设置中心（登录有效期等分组在设置中心内）");
+    check(lg.status === 200 && lgHtml.includes('<span class="ver">' + APP_VER + "</span>"), "登录页页脚含版本号 " + APP_VER);
+    check(pgHtml.includes('id="setbtn"') && pgHtml.includes('openSettingsCenter("display")') && pgHtml.includes("登录有效期（本浏览器）"), "设置入口直连设置中心（默认落在界面与显示，登录有效期等分组在设置中心内）");
     check(pgHtml.includes("sms_ttl_min") && pgHtml.includes("登录有效期（本浏览器）"), "设置中心登录有效期分组为本浏览器独立配置（localStorage 键 sms_ttl_min）");
     check(pgHtml.includes("登录有效期（全局默认）") && pgHtml.includes("ds-scope--global") && pgHtml.includes("ds-scope--browser"), "设置中心区分全局与本浏览器作用域（作用域徽章）");
     check(lgHtml.includes("sms_ttl_min"), "登录页随请求声明本地会话时长（localStorage 键 sms_ttl_min）");
@@ -853,11 +855,14 @@ async function main() {
       "弹层与下拉菜单有视口上限（窄屏不溢出）");
     check(pgHtml.includes("@media (max-width: 560px)") && pgHtml.includes("border-radius: 18px 18px 0 0"),
       "窄屏弹窗转为底部抽屉");
-    check(pgHtml.includes(".ds-tabs { display: flex; gap: 8px; overflow-x: auto;"),
-      "设置分组标签行可横向滚动（不挤压换行溢出）");
-    check(pgHtml.includes(".ds-tabs { display: flex; flex-wrap: nowrap; gap: 8px; overflow-x: auto;")
-      && pgHtml.includes(".modal-foot .foot-left, .modal-foot .foot-right") && pgHtml.includes(".pushcard-acts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));"),
-      "窄屏设置标签单行横滑、详情按钮单行横滑、推送按钮一行四等宽（触屏可滑动）");
+    check(pgHtml.includes(".ds-tabs { display: flex; flex-wrap: wrap; gap: 6px;")
+      && !/\.ds-tabs \{[^}]*overflow-x: auto/.test(pgHtml) && pgHtml.includes(".sc-tab {"),
+      "设置分区标签自动换行（不再依赖横向滑动，任何语言都不溢出）");
+    check(pgHtml.includes(".ds-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));")
+      && pgHtml.includes(".modal-foot .foot-left, .modal-foot .foot-right")
+      && pgHtml.includes(".sc-target-acts { flex: 1 1 100%; justify-content: flex-start; }")
+      && pgHtml.includes(".sc-chgrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }"),
+      "窄屏分区导航为三列网格、目标操作与渠道一览自适应（无横滑、无溢出）");
     /* 设置中心文案九语种覆盖：抽样键在 SC_I18N 中应各有 9 处定义 */
     const scSample = ["scTitle", "scSessionBrowser", "scSessionGlobal", "scHelpLocal", "scHelpGlobal",
       "scCloseConfirm", "scSensitivePhCfg", "scResetConfirm", "scTtlRange", "scImportEnv", "nfHeaders", "scScopeBrowser"];
@@ -885,11 +890,14 @@ async function main() {
     check(pgHtml.includes('classList.remove("unread")') && pgHtml.includes('id="dstate"') && pgHtml.includes('id="dunread"') && !pgHtml.includes('id="dread"'), "打开未读详情后自动切为已读，详情仅提供标记未读按钮");
     check(!pgHtml.includes("全部来源") && !pgHtml.includes("全部时间") && pgHtml.includes('allSources: "来源"') && pgHtml.includes('allTime: "时间"'), "来源/时间筛选按钮不再显示「全部」字样");
     check(!pgHtml.includes("class=\"rbtn\"") && !pgHtml.includes("function readOne") && !pgHtml.includes("function toggleRead"), "列表不再显示手动标记已读按钮");
-    check(pgHtml.includes('id="scodecopy"') && pgHtml.includes("state.codeCopy") && (pgHtml.match(/codeCopyBtn:/g) || []).length >= 9, "验证码复制按钮可在设置中开关（九语种）");
+    check(pgHtml.includes('scSwitch("scodecopy"') && pgHtml.includes("state.codeCopy") && (pgHtml.match(/codeCopyBtn:/g) || []).length >= 9, "验证码复制按钮可在设置中开关（九语种）");
     check(pgHtml.includes("code-chip") && pgHtml.includes('data-code="') && pgHtml.includes("copyBtn"), "卡片含验证码复制入口（data-code + 复制分支）");
-    check(pgHtml.indexOf('class="code-chip') < pgHtml.indexOf('class="msg-time" title="'), "验证码位于时间之前，时间固定在卡片尾部");
+    check(pgHtml.indexOf('class="msg-time" title="') < pgHtml.indexOf('class="content summary"')
+      && pgHtml.indexOf('class="content summary"') < pgHtml.indexOf('class="code-chip'),
+      "卡片层次为「发件人与时间 → 正文 → 验证码」，验证码不再挤占首行");
     check(pgHtml.includes("code-chip.tapcopy") && pgHtml.includes("function copyCodeChip") && pgHtml.includes("ev.pointerType"), "关闭复制按钮后验证码可触屏点按/鼠标双击复制并短暂提示已复制");
-    check(/\.msg-actions \.del \{[^}]*display: none/.test(pgHtml) && /body\.selecting \.msg-actions \.del \{ display: inline-flex/.test(pgHtml), "卡片删除按钮默认隐藏，仅多选时显示（详情删除不受影响）");
+    check(/\.msg-actions \.del \{ color: var\(--muted\); \}/.test(pgHtml) && !/\.msg-actions \.del \{[^}]*display: none/.test(pgHtml),
+      "卡片删除/收藏常驻可见（不依赖长按·右键），删除仍走既有撤销保护");
     check(pgHtml.includes('data-i18n="exportHint"') && (pgHtml.match(/exportHint:/g) || []).length >= 9, "多选栏可见提示“导出当前筛选结果”（九语种）");
     const exportFn = pgHtml.slice(pgHtml.indexOf("function exportUrl"), pgHtml.indexOf("function download"));
     check(exportFn.length > 0 && !/state\.selected/.test(exportFn), "导出范围是当前筛选结果，不含已选 ID");
@@ -1748,7 +1756,7 @@ async function main() {
 
   const home = await fetchApp(R("GET", "/", {}), e0);
   const homeHtml = await home.text();
-  check(home.status === 200 && /id="scautocopy"/.test(homeHtml) && /自动复制验证码/.test(homeHtml), "管理页渲染且含新开关 UI");
+  check(home.status === 200 && /scSwitch\("scautocopy"/.test(homeHtml) && /自动复制验证码/.test(homeHtml), "管理页渲染且含新开关 UI");
 
   /* ===== 基线组（第 0 步前既有）：定时清理 ===== */
   group("定时清理 runCron / cron HTTP 鉴权");
@@ -2091,8 +2099,8 @@ async function main() {
   check(/function applyI18n/.test(pageHtml) && /function T\(key, vars\)/.test(pageHtml), "i18n 运行时（T / applyI18n）已注入");
   check(/r\.status === 401/.test(pageHtml) && /location\.reload/.test(pageHtml),
     "登录过期 401 → 整页重载到登录页（不停在加载失败）");
-  check(/setAttribute\("data-dev"/.test(pageHtml) && /function markActiveTabs/.test(pageHtml) && !/renderTabs/.test(pageHtml),
-    "设备 tab 切换仅更新激活态（不再重复拉 /api/devices）");
+  check(/id="dev"/.test(pageHtml) && /function syncDevSelect/.test(pageHtml) && /function openDevices/.test(pageHtml) && !/renderTabs/.test(pageHtml),
+    "设备筛选迁到筛选区下拉，设备管理改为独立弹层（不再重复拉 /api/devices）");
   check(/viewport-fit=cover/.test(pageHtml) && /apple-mobile-web-app-capable/.test(pageHtml),
     "移动端 viewport 安全区 / PWA meta 就位");
   check(/format-detection" content="telephone=no/.test(pageHtml), "禁用 iOS 号码自动识别，避免吞掉发件号");

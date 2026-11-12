@@ -1,0 +1,17 @@
+{
+  "audit": "FEAD-ENG-02",
+  "generatedAt": "2026-11-12T20:40:00+08:00",
+  "baseline": { "head": "ea19433", "branch": "main", "version": "v1.1.1", "workspaceItems": 32 },
+  "evidence": [
+    { "id": "EV-01", "desc": "Node 平台 serveHtml ETag/304/认证隔离 19 断言", "file": "D:/OpenClaw/_eng01/d1-opt1-verify.mjs", "level": "E2", "sha256": "see-report-eng01d", "date": "2026-11-12" },
+    { "id": "EV-02", "desc": "markClipped 新旧算法 4 视口 40 卡对照 mismatch=0", "file": "D:/OpenClaw/_eng01/d2-opt2-verify.mjs", "level": "E2", "sha256": "see-report-eng01d", "date": "2026-11-12" },
+    { "id": "EV-03", "desc": "A1-A4 性能基线（首屏/列表/详情/连续操作）", "file": "D:/OpenClaw/_eng01/a1..a4", "level": "E2", "date": "2026-11-12" },
+    { "id": "EV-04", "desc": "结构套件 11 个全绿（含 ENG-01-D 后）", "file": "tests/*.mjs", "level": "E2", "date": "2026-11-12" },
+    { "id": "EV-05", "desc": "浏览器套件 10 个全绿（含 ENG-01-D 后）", "file": "tests/browser/*.mjs", "level": "E2", "date": "2026-11-12" },
+    { "id": "EV-06", "desc": "六平台产物逐字节一致（gen_app --check）", "file": "platforms/", "level": "E0", "date": "2026-11-12" },
+    { "id": "EV-07", "desc": "Playwright Chromium 缓存行为隔离实验（4 头组合）", "file": "D:/OpenClaw/_eng01/dbg-b2e.mjs", "level": "E2", "date": "2026-11-12" },
+    { "id": "EV-08", "desc": "登出旧 Token 重放复现（既有语义）", "file": "D:/OpenClaw/_eng01/dbg-b2.mjs 流程", "level": "E2", "date": "2026-11-12" }
+  ],
+  "unverifiedPlatforms": ["cloudflare", "vercel", "netlify", "deno", "edgeone"],
+  "note": "五平台当前仅 E0 静态证据；真实部署验证计划见 09-test-plan.md"
+}

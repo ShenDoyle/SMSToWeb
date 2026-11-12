@@ -1,0 +1,17 @@
+{
+  "name": "smstoweb-dev",
+  "private": true,
+  "description": "SMSToWeb 本地开发与测试入口。应用本身零 npm 运行时依赖；这里的 devDependency 只服务于浏览器回归测试。",
+  "scripts": {
+    "test": "node tests/run.mjs",
+    "test:node": "node tests/run.mjs && node tests/p1-auth.mjs && node tests/settings-i18n.mjs && node tests/ux02-layout.mjs && node tests/ux03-settings.mjs && node tests/notify-sensitive-fields.mjs",
+    "test:browser": "node tests/browser/ux04-dialog.mjs && node tests/browser/ux03-browser.mjs && node tests/browser/sec01-browser.mjs",
+    "test:all": "npm run test:node && npm run test:browser",
+    "pw:install": "playwright install chromium",
+    "gen": "python platforms/gen_app.py",
+    "gen:check": "python platforms/gen_app.py --check"
+  },
+  "devDependencies": {
+    "playwright": "1.65.0"
+  }
+}
