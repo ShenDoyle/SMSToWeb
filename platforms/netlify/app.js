@@ -69,7 +69,7 @@ function escAttr(s) {
 function jsStr(s) {
   return JSON.stringify(s).replace(/</g, "\\u003c");
 }
-const APP_VERSION = "v1.1.7";
+const APP_VERSION = "v1.1.8";
 
 /* 把页面模板中的占位标记替换为实际配置值（用函数替换器，避免值里含 $& 等特殊序列被误解释） */
 function renderHtml(html, env) {
@@ -2491,6 +2491,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .bulkbar .bulkmeta { color: var(--ds-color-text-secondary); font-size: 12px; }
   /* 详情弹窗：正文为主体（UX-07B：14.5px → 15px，内边距与最大高度上调，长短信更适合连续阅读） */
   .detail-body { white-space: pre-wrap; word-break: break-word; line-height: var(--ds-line-height-relaxed); font-size: 15px;
+                 -webkit-user-select: text; user-select: text; cursor: text;
                  color: var(--ds-color-text); background: var(--ds-color-bg-subtle);
                  border: 1px solid var(--ds-color-border-subtle); border-radius: var(--ds-radius-lg);
                  padding: 16px 18px; margin: 12px 0 4px; max-height: 48vh; overflow: auto; }
@@ -3247,8 +3248,9 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
                    color: var(--ds-color-primary); }
   .dpill--star::before { content: "\2605"; color: var(--ds-color-warning); }
   .dpill--pin::before { content: "\1F4CC"; font-size: 9px; }
-  /* 底部操作统一单行：不换行，空间不足时横向滚动（触屏滑动 / 鼠标滚轮） */
-  .modal-foot { display: flex; align-items: center; justify-content: flex-start; gap: 8px; flex-wrap: nowrap;
+  /* 底部操作两级结构：必须允许换行 —— .foot-bottom 是 flex:0 0 100%，
+     父级一旦 nowrap，它会把 .foot-rail 挤成 0 宽，图标条退化成 7 行竖排（1366 桌面实测 footer 305px 高） */
+  .modal-foot { display: flex; align-items: center; justify-content: flex-start; gap: 8px; flex-wrap: wrap;
                 overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch;
                 padding: 12px 18px 16px; border-top: 1px solid var(--row-border); }
   .modal-foot::-webkit-scrollbar { display: none; }
@@ -3267,6 +3269,15 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .tbtn--ic .ico { width: 15px; height: 15px; flex: none; fill: none; stroke: currentColor;
                    stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
   .tbtn--ic .lbl { font-size: 12px; }
+  /* UX-23：复制验证码在图标条内，行尾最后一格；实心主色 + 码值，与其它次要操作一眼分开 */
+  .tbtn.tbtn--code { gap: 5px; padding: 0 12px; font-weight: 600;
+                     color: var(--ds-color-on-primary); border-color: var(--ds-color-primary-fill);
+                     background: var(--ds-color-primary-fill); }
+  .tbtn.tbtn--code:hover { border-color: var(--ds-color-primary-fill-hover);
+                           background: var(--ds-color-primary-fill-hover); color: var(--ds-color-on-primary); }
+  .tbtn.tbtn--code .ico { stroke-width: 1.8; }
+  .tbtn--code .cc-val { font-size: 12.5px; font-variant-numeric: tabular-nums; letter-spacing: .04em;
+                        white-space: nowrap; }
   .dp-foot { flex-wrap: wrap; }
   @media (max-width: 660px) {
     .wrap { padding: 14px 12px 30px; }
@@ -3316,10 +3327,16 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     .modal-foot { flex-direction: column; flex-wrap: wrap; align-items: stretch; gap: 0;
                   overflow: visible; scroll-snap-type: none;
                   padding: 8px 12px calc(10px + env(safe-area-inset-bottom, 0px)); }
-    .modal-foot .foot-rail { width: 100%; flex: 0 0 auto; flex-wrap: nowrap; gap: 4px; overflow-x: auto;
-                             scrollbar-width: none; }
-    .modal-foot .foot-rail::-webkit-scrollbar { display: none; }
-    .modal-foot .tbtn--ic { width: 44px; min-width: 44px; height: 44px; min-height: 44px; padding: 0; }
+    /* UX-23：图标条 7 格等分（含复制验证码最后一格），不再横滑。
+       390 下可用 321px：7 格 × 45.8px（gap 0）= 321，正好排满且保住 44px 命中高度；
+       若把码值印进格子就只剩 35px/格，触控区掉一半，所以码值只在宽屏（pane / 桌面）显示。 */
+    .modal-foot .foot-rail { width: 100%; flex: 0 0 auto; flex-wrap: nowrap; gap: 0; overflow: visible;
+                             justify-content: space-between; }
+    .modal-foot .tbtn--ic { flex: 1 1 0; width: auto; min-width: 0; max-width: 52px;
+                            height: 44px; min-height: 44px; padding: 0; }
+    .modal-foot .tbtn--ic + .tbtn--ic { margin-left: 0; }
+    .modal-foot .tbtn--code { padding: 0; margin-left: 0; }
+    .modal-foot .tbtn--code .cc-val { display: none; }
     .modal-foot .tbtn--ic .lbl { display: none; }
     .modal-foot .tbtn--ic:active { background: var(--ds-color-surface-hover); }
     .modal-foot .foot-bottom { flex-wrap: nowrap; gap: 6px; padding-top: 8px; margin-top: 8px; }
@@ -3635,11 +3652,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
                         box-shadow: inset 0 0 0 1px var(--ds-color-primary); pointer-events: none; }
     .card.dsel .sender { color: var(--ds-color-primary); }
   }
-  /* UX-14 R2：详情恢复 v1.1.3 单栏正文（按 EditHere 标注去掉右侧独立验证码卡片）；
-     复制验证码改为详情底部按钮，与 modal-foot / dp-foot 的 actsEnd 共用一份渲染。 */
-  .tbtn--code { color: var(--ds-code-text); border-color: var(--ds-code-border);
-                background: var(--ds-code-bg); font-weight: 600; }
-  .tbtn--code:hover { border-color: var(--ds-color-primary); color: var(--ds-color-primary); }
+  /* UX-23：复制验证码不再独占一行（标注 ②：放图标条里），正文与标题区保持原样（标注 ①）。 */
   @media (min-width: 1920px) {
     .layout { grid-template-columns: minmax(0, 54fr) minmax(0, 46fr); }
   }
@@ -8306,6 +8319,50 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   /* ===== UX-07C：详情渲染复用层 =====
      弹层（<1600）与宽屏右侧面板（≥1600）共用同一份内容生成与操作绑定：
      两处不能各写一套渲染，否则会出现"弹层有运营商、面板没有"这类信息不一致。 */
+  /* UX-25：正文全选 —— 鼠标双击 / 触屏长按 500ms（与多选长按同一阈值）。
+     替代已取消的「复制全文」按钮：要复制整条短信，双击或长按正文，再走系统复制。
+     长按期间手指移动超过 8px 视为滚动，计时取消，不会误触发。 */
+  function selectBodyText(node) {
+    try {
+      var sel = window.getSelection && window.getSelection();
+      if (!sel) return;
+      var r = document.createRange();
+      r.selectNodeContents(node);
+      sel.removeAllRanges();
+      sel.addRange(r);
+    } catch (e) { /* 选区失败不该影响阅读 */ }
+  }
+  function bindBodySelectAll(node) {
+    if (!node || node.__selAllBound) return;
+    node.__selAllBound = true;
+    node.addEventListener("dblclick", function (ev) {
+      /* 双击默认是选词，这里升级成整段；点在链接上放行，别挡链接 */
+      if (ev.target && ev.target.closest && ev.target.closest("a")) return;
+      ev.preventDefault();
+      selectBodyText(node);
+    });
+    var t = null, sx = 0, sy = 0;
+    function stop() { if (t) { clearTimeout(t); t = null; } }
+    node.addEventListener("touchstart", function (ev) {
+      if (ev.target && ev.target.closest && ev.target.closest("a")) return;
+      var p = ev.touches && ev.touches[0];
+      if (!p) return;
+      sx = p.clientX; sy = p.clientY;
+      stop();
+      t = setTimeout(function () {
+        t = null;
+        selectBodyText(node);
+        try { if (navigator.vibrate) navigator.vibrate(8); } catch (e) {}
+      }, 500);
+    }, { passive: true });
+    node.addEventListener("touchmove", function (ev) {
+      var p = ev.touches && ev.touches[0];
+      if (!p || !t) return;
+      if (Math.abs(p.clientX - sx) > 8 || Math.abs(p.clientY - sy) > 8) stop();
+    }, { passive: true });
+    node.addEventListener("touchend", stop, { passive: true });
+    node.addEventListener("touchcancel", stop, { passive: true });
+  }
   function detailHTML(m, mode) {
     var isSms = (m.source || "sms") === "sms";
     var code = extractCode(m.content);
@@ -8348,16 +8405,24 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         ' title="' + esc(text) + '" aria-label="' + esc(text) + '">';
       return open + icon + '<span class="lbl" aria-hidden="true">' + esc(text) + '</span></' + tag + '>';
     }
-    var bCopy = icBtn('button', ' id="dcopy" type="button"', IC.copy, T("copyBody"), '');
+    /* UX-25（标注 ①）：取消「复制全文」按钮 —— 改由双击正文 / 触屏长按正文全选。 */
     var bStar = icBtn('button', ' id="dstar" type="button"', IC.star, m.starred ? T("unstar") : T("star"), '');
     var bPin = icBtn('button', ' id="dpin" type="button"', IC.pin, m.pinned ? T("unpin") : T("pin"), '');
     var bCall = isSms && snum ? icBtn('a', ' href="tel:' + esc(snum) + '"', IC.phone, T("call"), '') : '';
     var bLabel = isSms && snum ? icBtn('button', ' id="dlabel" type="button"', IC.tag, T("setLabel"), '') : '';
     var bUnread = icBtn('button', ' id="dunread" type="button"', IC.unread, T("markUnread"), 'tbtn--accent');
-    /* UX-16（标注 ③）：复制验证码只在有验证码时渲染，且钉在操作条最右（右下角）。 */
-    var bCode = code ? icBtn('button', ' id="dccopy" type="button"', IC.code, T("copyCode"), 'tbtn--code rail-code') : '';
+    /* UX-23（按标注 ②：复制验证码放图标条这个位置；标注 ①：标题/徽章/正文不动）：
+       仍在图标条内、作为最后一格（行尾），但不再靠 margin-left:auto 硬顶到右边 ——
+       改成 7 格等分（.foot-rail 用 flex:1 1 0 + space-between），任何宽度都排得下、不溢出、不横滑。
+       复制验证码格比其它格宽 1.8 倍并印上码值，主色底区分：一眼看见、一按即复制。 */
+    var bCode = code ? ('<button class="tbtn tbtn--ic tbtn--code rail-code" id="dccopy" type="button"'
+      + ' title="' + esc(T("copyCode")) + '" aria-label="' + esc(T("copyCode")) + ' ' + esc(code) + '">'
+      + IC.copy + '<span class="cc-val" aria-hidden="true">' + esc(code) + '</span></button>') : '';
     var bDel = '<button class="tbtn tbtn--danger" id="ddel" type="button">' + esc(T("del")) + '</button>';
-    var rail = bCopy + bStar + bPin + bCall + bLabel + bUnread + bCode;
+    /* UX-25（按标注②）：左→右 = 标签 · 打电话 · 标为未读 · 收藏 · 置顶 · 复制验证码。
+       右撇子右手拇指最先够到的右端留给最高频的复制验证码；左端是最难够到的位置，放最少用的标签。
+       复制验证码只在有验证码时才渲染，没有码时图标条就 5 格。 */
+    var rail = bLabel + bCall + bUnread + bStar + bPin + bCode;
     var foot = '<div class="' + (mode === "pane" ? "dp-foot" : "modal-foot") + '">' +
       '<div class="foot-rail">' + rail + '</div>' +
       '<div class="foot-bottom">' + footMeta + bDel +
@@ -8433,8 +8498,9 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         } else closeModal();
       });
     };
-    var cp = q("#dcopy");
-    if (cp) cp.onclick = function () { doCopy(m.content, cp); };
+    /* UX-25：双击正文（鼠标）/ 长按正文（触屏）→ 全选正文，替代原来的「复制全文」按钮 */
+    var db = q(".detail-body");
+    if (db) bindBodySelectAll(db);
     var ccb = q("#dccopy");
     if (ccb) ccb.onclick = function () { doCopy(extractCode(m.content || ""), ccb); };
     var del = q("#ddel");

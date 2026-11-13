@@ -2170,8 +2170,8 @@ async function main() {
     && /suppressClickId = null;\n?/.test(pageHtml)
     && !/setTimeout\(function \(\) \{ suppressClick = false; \}, 400\)/.test(pageHtml),
     "UX-21：长按后的补发 click 按卡片 data-id 屏蔽（不再用 400ms 时间窗），慢抬手不会反选");
-  /* UX-15 后复制验证码并入次要操作格（仍在最前两位），删除与关闭独占一行；语义断言随之更新 */
-  check(/id="dunread"/.test(pageHtml) && /code \? icBtn\('button', ' id="dccopy"/.test(pageHtml)
+  /* UX-23：复制验证码按标注放回图标条（行尾最后一格），码值印在按钮上，7 格等分不横滑 */
+  check(/id="dunread"/.test(pageHtml) && /class="tbtn tbtn--ic tbtn--code rail-code" id="dccopy"/.test(pageHtml)
     && /doCopy\(extractCode\(m\.content/.test(pageHtml)
     && /'<div class="foot-bottom">' \+ footMeta \+ bDel/.test(pageHtml),
     "R2-3/4/5：标为未读在图标操作条内，删除在关闭左侧，复制验证码仅含码时出现（不受设置开关影响）");
@@ -2212,11 +2212,27 @@ async function main() {
     && /var metaRow = '<div class="detail-metarow"><span class="m-time">/.test(uxSrc)
     && !/var extra = \[\]/.test(uxSrc),
     "UX-16-④⑤⑥：类型/已读/收藏/置顶为标题行胶囊，日期时间独占第二行，号码不再重复");
-  check(/class="foot-rail">' \+ rail/.test(uxSrc) && /var bCode = code \? icBtn/.test(uxSrc)
-    && /tbtn--code rail-code/.test(uxSrc) && /\.foot-rail \.rail-code \{ margin-left: auto; \}/.test(uxSrc)
+  check(/class="foot-rail">' \+ rail/.test(uxSrc) && /var bCode = code \? \('<button class="tbtn tbtn--ic tbtn--code rail-code"/.test(uxSrc)
+    && /var rail = bLabel \+ bCall \+ bUnread \+ bStar \+ bPin \+ bCode;/.test(uxSrc)
+    && !/id="dcopy"/.test(uxSrc) && !/copyBody"\), ''\)/.test(uxSrc)
+    && /return head \+ metaRow \+ detailBody \+ foot;/.test(uxSrc)
     && /\.modal-foot \.tbtn--ic \.lbl \{ display: none; \}/.test(uxSrc)
+    && /\.modal-foot \.tbtn--code \{ padding: 0; margin-left: 0; \}/.test(uxSrc)
+    && /\.modal-foot \.tbtn--code \.cc-val \{ display: none; \}/.test(uxSrc)
+    && /\.modal-foot \.foot-rail \{[^}]*justify-content: space-between/.test(uxSrc)
+    && !/\.modal-foot \.foot-rail[^}]*overflow-x: auto/.test(uxSrc)
     && /icBtn\('button', ' id="dunread" type="button"', IC\.unread/.test(uxSrc),
-    "UX-16-②③：次要操作图标化单行排布（窄屏隐藏文字标签），复制验证码钉在操作条最右");
+    "UX-16-②③ / UX-25：次要操作图标化单行；左→右 标签·打电话·未读·收藏·置顶·复制验证码（最右），复制全文按钮已取消");
+
+  /* UX-25：取消复制全文，改双击 / 触屏长按正文全选；复制验证码只在有码时出现 */
+  check(/function selectBodyText\(node\)/.test(uxSrc) && /function bindBodySelectAll\(node\)/.test(uxSrc)
+    && /addEventListener\("dblclick", function \(ev\)/.test(uxSrc)
+    && /addEventListener\("touchstart", function \(ev\)/.test(uxSrc)
+    && /r\.selectNodeContents\(node\)/.test(uxSrc)
+    && /var db = q\("\.detail-body"\);/.test(uxSrc) && /if \(db\) bindBodySelectAll\(db\);/.test(uxSrc)
+    && /-webkit-user-select: text; user-select: text/.test(uxSrc)
+    && /var bCode = code \?/.test(uxSrc),
+    "UX-25：正文双击 / 长按 500ms 全选；复制全文按钮取消；复制验证码仅含码时渲染");
   check(/var srcBits = \[\]/.test(uxSrc) && /class="foot-meta"/.test(uxSrc)
     && /'<div class="foot-bottom">' \+ footMeta \+ bDel/.test(uxSrc),
     "UX-16-①：设备·SIM 来源下移到弹层底部左侧，与删除/关闭同行");
