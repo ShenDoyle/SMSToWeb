@@ -369,3 +369,29 @@ de/es/fr/pt/ko 标签 11.5px / 内边距 8px，德语再收一档（11px / 6px /
 
 **踩坑**：给九语种字典插 key 时，用「从块起点向后找 `selectHint:`」定位插入点，结果 9 条全落进了 zh-CN 块
 （重复 key 后者覆盖前者，zh-CN 会显示葡语文案）。改为按语种块起始位置直接插入，问题消失。
+
+---
+
+## 十五、UX-21：长按后的补发 click 把选中状态反选回去（v1.1.7 验收发现，已修）
+
+**怎么发现的**：v1.1.7 部署验收用 ego lite（真实 Chromium + 真实 `touchstart`）跑长按链路，
+分时采样发现 t=600ms 已是 `1 selected`，抬手 +500ms 变回 `0 selected`，多选态却还在。
+
+**病因**：`touchstart` 的 500ms 长按计时器里用 `suppressClick = true` + `setTimeout(400)` 复位，
+靠一个 400ms 时间窗吞掉抬手后浏览器补发的 `click`。移动端触摸→点击最多还有约 300ms 延迟，
+慢抬手（>900ms）时窗口已过，补发的 `click` 落在同一张卡上，`toggleSelCard` 把刚选中的那条又切掉。
+时间窗方案的缺陷与设备、抬手快慢强相关，桌面浏览器测不出来。
+
+**修复**：按「哪张卡」屏蔽，而不是按时间窗。
+
+| 位置 | 改动 |
+| --- | --- |
+| `touchstart` | 新手势开始先 `suppressClickId = null`（避免误吞用户这一次真实点击） |
+| 长按计时器 | `suppressClickId = card.getAttribute("data-id")`，删掉 400ms 复位定时器 |
+| `click` 处理器 | 命中 `data-id` 相同的卡片才吞一次并清标记；命中别的卡片则放行并清标记 |
+
+**复验**（390×844，真实触摸 750ms）：t=600 / t=900 / 抬手 +500ms 三处均 `1 selected`；
+补选 2 条 → `3 selected`；`Esc` → 退出且归零。结构断言 `UX-21` 已加入 `tests/run.mjs`（874 项）。
+
+**版本处理**：线上两域名已在跑 v1.1.7，按用户决定**保持同号**，修复随下一次部署生效；
+完整验收记录见 `docs/releases/v1.1.7-acceptance.md`。
