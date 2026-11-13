@@ -2161,6 +2161,15 @@ async function main() {
     "UX-20：窄屏首次进入显示一次多选引导（长按/⋯ 菜单），关闭或进入多选后写入 sms_selhint 不再出现");
   check((uxSrc.match(/longPressHint:/g) || []).length === 9 && (uxSrc.match(/gotIt:/g) || []).length === 9,
     "UX-20：九语种都补了 longPressHint / gotIt 文案");
+  /* UX-21：长按抬手后的补发 click 必须按「哪张卡」吞掉，不能只靠 400ms 时间窗。
+     实测：长按 500ms 后抬手，触摸→点击还带最多 300ms 延迟，窗口一过就把刚选中的卡反选回去，
+     表现为「长按进入多选但 0 选中」。改为记录 data-id，新手势 touchstart 时清标记。 */
+  check(/suppressClickId = card\.getAttribute\("data-id"\)/.test(pageHtml)
+    && /if \(suppressClickId\)/.test(pageHtml)
+    && /sCard\.getAttribute\("data-id"\) === suppressClickId/.test(pageHtml)
+    && /suppressClickId = null;\n?/.test(pageHtml)
+    && !/setTimeout\(function \(\) \{ suppressClick = false; \}, 400\)/.test(pageHtml),
+    "UX-21：长按后的补发 click 按卡片 data-id 屏蔽（不再用 400ms 时间窗），慢抬手不会反选");
   /* UX-15 后复制验证码并入次要操作格（仍在最前两位），删除与关闭独占一行；语义断言随之更新 */
   check(/id="dunread"/.test(pageHtml) && /code \? icBtn\('button', ' id="dccopy"/.test(pageHtml)
     && /doCopy\(extractCode\(m\.content/.test(pageHtml)

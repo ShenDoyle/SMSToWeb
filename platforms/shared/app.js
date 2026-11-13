@@ -10218,7 +10218,15 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     }
   });
   $("list").addEventListener("click", function (ev) {
-    if (suppressClick) { suppressClick = false; ev.preventDefault(); return; }
+    /* 长按抬手后浏览器还会补一次 click（触摸→点击最多再延迟 300ms），
+       按下标了「刚长按过」的卡片时只吞这一次 click；用 400ms 时间窗会在
+       慢抬手 / 有延迟的设备上失效，把刚选中的卡片又反选回去。 */
+    if (suppressClickId) {
+      var sCard = ev.target.closest ? ev.target.closest(".card") : null;
+      var sSame = sCard && sCard.getAttribute("data-id") === suppressClickId;
+      suppressClickId = null;
+      if (sSame) { ev.preventDefault(); return; }
+    }
     /* 多选态：点击卡片空白区域切换选中；按钮/复选框保持原有行为 */
     if (state.selectMode) {
       var card = ev.target.closest ? ev.target.closest(".card") : null;
@@ -10399,7 +10407,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (!state.selected[id]) toggleSelCard(card);
     return true;
   }
-  var pressTimer = null, pressCard = null, pressX = 0, pressY = 0, suppressClick = false;
+  var pressTimer = null, pressCard = null, pressX = 0, pressY = 0, suppressClickId = null;
   function cancelPress() {
     if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
     if (pressCard) { pressCard.classList.remove("pressing"); pressCard = null; }
@@ -10426,6 +10434,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var card = ev.target.closest ? ev.target.closest(".card") : null;
     if (!card) return;
     cancelPress();
+    /* 新手势开始：上一轮长按留下的屏蔽标记作废，避免误吞用户这一次真正的点击 */
+    suppressClickId = null;
     var t = ev.touches[0];
     pressX = t.clientX; pressY = t.clientY;
     pressCard = card;
@@ -10434,8 +10444,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       pressTimer = null;
       pressCard = null;
       card.classList.remove("pressing");
-      suppressClick = true;
-      setTimeout(function () { suppressClick = false; }, 400);
+      suppressClickId = card.getAttribute("data-id");
       /* U9-19：与右键走同一条语义（进入多选 + 选中当前卡），不各写一套 */
       beginSelectWith(card);
       if (navigator.vibrate) navigator.vibrate(10);
