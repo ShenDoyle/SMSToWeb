@@ -2127,12 +2127,17 @@ async function main() {
     && /id="fstar"/.test(pageHtml) && /id="dstar"/.test(pageHtml)
     && /handlePinMessage/.test(uxSrc) && /pinned DESC, received_at DESC, id DESC/.test(uxSrc),
     "需求 1：收藏与置顶各自独立入口/状态/接口，排序只由 pinned 决定");
-  check(/detail-code/.test(pageHtml) && /id="dccopy"/.test(pageHtml) && /\.dc-value/.test(pageHtml)
-    && /var codeCard = code/.test(pageHtml) && /doCopy\(cv\.textContent/.test(pageHtml)
-    && /font-family: var\(--ds-font-mono\)/.test(pageHtml),
-    "需求 5：详情卡片右侧验证码（代码加重样式）+ 所有含码详情均有复制按钮");
-  check((pageHtml.match(/\bcopyCode:/g) || []).length === 9 && (pageHtml.match(/\bdetailCode:/g) || []).length === 9,
-    "需求 5：验证码卡片文案九语种全覆盖");
+  check(/rail-code/.test(pageHtml) && /align-self: stretch/.test(pageHtml)
+    && /card:has\(\.rail-code\)/.test(pageHtml) && /class="msg-rail"/.test(pageHtml),
+    "R2-1：列表卡片验证码胶囊移到卡片右侧（右手操作区），窄屏为右下角预留高度");
+  check(!/detail-code/.test(pageHtml) && !/detail-main/.test(pageHtml) && !/dc-value/.test(pageHtml),
+    "R2-2：详情恢复 v1.1.3 单栏正文，去掉右侧独立验证码卡片");
+  check(/id="dunread"[\s\S]{0,200}id="ddel"[\s\S]{0,260}id="dccopy"/.test(pageHtml)
+    && /\(code \? '<button class="tbtn tbtn--code" id="dccopy"/.test(pageHtml)
+    && /doCopy\(extractCode\(m\.content/.test(pageHtml),
+    "R2-3/4/5：标为未读在删除左边，有码时最右追加复制验证码按钮（不受设置开关影响）");
+  check((pageHtml.match(/\bcopyCode:/g) || []).length === 9,
+    "R2：复制验证码按钮文案九语种全覆盖");
   check(/viewport-fit=cover/.test(pageHtml) && /apple-mobile-web-app-capable/.test(pageHtml),
     "移动端 viewport 安全区 / PWA meta 就位");
   check(/format-detection" content="telephone=no/.test(pageHtml), "禁用 iOS 号码自动识别，避免吞掉发件号");

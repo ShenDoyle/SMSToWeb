@@ -108,3 +108,22 @@ Content-Type: text/plain; charset=utf-8
 
 - U1–U10 六平台统一验收用例（`09-test-plan.md`）按用户指示推迟到 **2.0.0 正式版**再做；本轮线上是真实在用的生产部署，不做大范围真实评测。
 - 若 2.0.0 前决定恢复 CF 省流，只在 CF 控制台侧处理：Cache Rules → `Respect Strong ETags`、Transform Rules 响应头排查、`Vary` 配置；顺序见 `11-etag-f1-rootcause.md` 第五节。**该动作需控制台权限，由用户侧执行，不进应用代码。**
+
+
+---
+
+## 七、v1.1.5 · 按 EditHere 标注修正 UX-14（R2）
+
+用户在 EditHere 对当前样式图（A 列表卡片 / B 信息详情）提交 5 条批注，判定 v1.1.4 把「信息详情卡片」误读成了详情弹层。本轮按批注重做，其余功能与界面不变。
+
+| 批注 | 标注内容 | 落地 |
+| --- | --- | --- |
+| ① | 「验证码是为了方便，大部分人是右手操作，放右边。这里的复制按钮受设置里的影响」；组件从左下 `(58,178)-(132,207)` 移到右侧 `(920,182)-(994,211)` | `cardHtml()` 把 `.code-chip` 从 `.msg-foot` 移入 `.msg-rail` 下方的 `.rail-code`；`.msg-rail` 改为 column + `align-self:stretch` + `space-between`，操作按钮在上、验证码在卡片右下。胶囊自带复制按钮**仍由 `state.codeCopy` 控制**，行为不变；窄屏仍绝对定位右下并按 `:has(.rail-code)` 预留脚注高度。 |
+| ② | 「去掉这个东西，恢复到上个版本」（指向详情右侧 24px 大号验证码） | 删除 `.detail-code` / `.detail-main` 及全部相关 CSS 与窄屏规则，`detailHTML()` 恢复 v1.1.3 的单栏 `.detail-body`。 |
+| ③ | 「没有验证码的时候，删除键在最右边，有验证码的时候，删除键被验证码复制键往左边挤一个位置」 | `actsEnd` 改为 `dunread → ddel → [dccopy if code]`：无码时删除仍在最右；有码时最右多一个复制按钮，删除左移一位。 |
+| ④ | 「标记未读放删除键左边」 | `actsEnd` 顺序由 `ddel, dunread` 调整为 `dunread, ddel`。 |
+| ⑤ | 「这里放复制验证码按钮，不受设置里的影响」 | `#dccopy` 仅由 `code` 是否存在决定，**不读取 `state.codeCopy`**；点击直接复制 `extractCode(m.content)`。弹层与宽屏面板共用同一 `actsEnd`，所有含码详情都有该按钮。 |
+
+**说明**：反馈 JSON 的 `image.sha256` 与本地 PNG 不同（EditHere 重新编码），但尺寸 1060×640、文件名与全部批注坐标均与预览图一致，按同一画面处理。详情弹层原有的「关闭」按钮保留在按钮组最后（预览图用右上角 × 表示，未标注该项）。
+
+**验证**：`gen_app.py` 零漂移、全量 Node 回归全绿；`APP_VERSION` → `v1.1.5`。

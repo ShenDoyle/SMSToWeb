@@ -69,7 +69,7 @@ function escAttr(s) {
 function jsStr(s) {
   return JSON.stringify(s).replace(/</g, "\\u003c");
 }
-const APP_VERSION = "v1.1.4";
+const APP_VERSION = "v1.1.5";
 
 /* 把页面模板中的占位标记替换为实际配置值（用函数替换器，避免值里含 $& 等特殊序列被误解释） */
 function renderHtml(html, env) {
@@ -3065,8 +3065,12 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   /* 未读：左侧 2px 主色标线贴齐面板左边缘（原先固定 -20px，窄屏 --list-pad 变 14px 时会戳出面板外） */
   .card.unread::before { content: ""; position: absolute; left: calc(8px - var(--list-pad, 16px)); top: 12px; bottom: 12px; width: 2px;
                          border-radius: 0 2px 2px 0; background: var(--ds-color-unread); }
-  .msg-rail { display: flex; align-items: center; justify-content: flex-end; flex: none; margin-top: -1px; }
+  /* UX-14 R2：验证码胶囊移到卡片右侧（右手操作区），操作按钮在上、验证码在下 */
+  .msg-rail { display: flex; flex-direction: column; align-items: flex-end; justify-content: space-between;
+              align-self: stretch; flex: none; gap: 6px; margin-top: -1px; }
   .msg-rail .msg-actions { margin-left: 0; }
+  .msg-rail .rail-code { display: flex; align-items: center; justify-content: flex-end; }
+  .msg-rail .rail-code .code-chip { flex: none; }
   .card:last-child { border-bottom: 0; }
   .card.selected { background: var(--ds-color-primary-subtle); }
   .card.pressing { background: var(--ds-color-surface-active); }
@@ -3305,7 +3309,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .msg-top .sender { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .msg-top .phone { flex: none; }
   .msg-foot { display: flex; align-items: center; gap: 8px; min-width: 0; }
-  .msg-foot .code-chip { flex: none; }
+  /* 验证码胶囊已移至 .rail-code（卡片右侧），脚注行仅保留设备标记 */
   .msg-foot .devchip { font-size: 11px; color: var(--ds-color-text-secondary); white-space: nowrap;
                        overflow: hidden; text-overflow: ellipsis; min-width: 0; }
   .msg-foot .devchip::before { content: "·"; margin-right: 5px; opacity: .7; }
@@ -3376,10 +3380,10 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     .card { grid-template-columns: minmax(0, 1fr); padding: 12px 8px; }
     /* 未读标线的位置统一由 calc(8px - var(--list-pad)) 决定，窄屏不再单独覆盖 */
     .msg-foot { gap: 6px; }
-    /* 操作列绝对定位到卡片右下角；有验证码时与它同行，没有时为操作留出 34px 高度，正文不被压住 */
+    /* 操作列与验证码胶囊同处卡片右下角（右手操作区）；脚注行按是否含码预留高度，正文不被压住 */
     .msg-rail { position: absolute; right: 4px; bottom: 4px; }
-    /* 没有验证码胶囊时，脚注行仍为右下角操作列预留命中高度（44 命中区 + 4px 边距），正文不被按钮压住 */
-    .msg-foot:not(:has(.code-chip)) { min-height: 48px; }
+    .msg-foot { min-height: 48px; }
+    .card:has(.rail-code) .msg-foot { min-height: 84px; }
     .msg-actions :is(.star, .pin), .msg-actions .del, .msg-actions .more { min-width: 44px; min-height: 44px; padding: 4px 6px; }
   }
   /* 平板区间（661–900）：一行放不下「视图标签 + 搜索 + 三个下拉 + 刷新」，
@@ -3478,30 +3482,11 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
                         box-shadow: inset 0 0 0 1px var(--ds-color-primary); pointer-events: none; }
     .card.dsel .sender { color: var(--ds-color-primary); }
   }
-  /* ===== UX-14：详情卡片内右侧验证码（代码加重强调 + 一键复制） =====
-     有验证码时才出现右侧卡片；无验证码的消息仍是原来的单栏正文。 */
-  .detail-main { display: flex; align-items: stretch; gap: 12px; }
-  .detail-main .detail-body { flex: 1 1 auto; min-width: 0; }
-  .detail-code { flex: 0 0 168px; display: flex; flex-direction: column; justify-content: center;
-                 gap: 10px; margin: 12px 0 4px; padding: 14px 12px; text-align: center;
-                 background: var(--ds-code-bg); border: 1px solid var(--ds-code-border);
-                 border-radius: var(--ds-radius-lg); }
-  .detail-code .dc-label { font-size: var(--ds-font-size-xs); color: var(--ds-color-text-secondary); }
-  .detail-code .dc-value { font-family: var(--ds-font-mono); font-size: 24px; font-weight: 700;
-                 letter-spacing: 2px; line-height: 1.3; font-variant-numeric: tabular-nums;
-                 word-break: break-all; color: var(--ds-code-text); }
-  .detail-code .dc-copy { min-height: 32px; padding: 5px 10px; cursor: pointer;
-                 border: 1px solid var(--ds-code-border); border-radius: var(--ds-radius-sm);
-                 background: var(--ds-color-bg-surface); color: var(--ds-code-text);
-                 font-size: 12.5px; font-weight: 600; }
-  .detail-code .dc-copy:hover { border-color: var(--ds-color-primary); color: var(--ds-color-primary); }
-  .detail-code .dc-copy:focus-visible { outline: 2px solid var(--ds-color-focus); outline-offset: 2px; }
-  @media (max-width: 660px) {
-    .detail-main { flex-direction: column; gap: 0; }
-    .detail-code { flex: 0 0 auto; flex-direction: row; align-items: center; justify-content: space-between;
-                   gap: 10px; text-align: left; padding: 10px 12px; margin: 0 0 4px; }
-    .detail-code .dc-value { font-size: 20px; }
-  }
+  /* UX-14 R2：详情恢复 v1.1.3 单栏正文（按 EditHere 标注去掉右侧独立验证码卡片）；
+     复制验证码改为详情底部按钮，与 modal-foot / dp-foot 的 actsEnd 共用一份渲染。 */
+  .tbtn--code { color: var(--ds-code-text); border-color: var(--ds-code-border);
+                background: var(--ds-code-bg); font-weight: 600; }
+  .tbtn--code:hover { border-color: var(--ds-color-primary); color: var(--ds-color-primary); }
   @media (min-width: 1920px) {
     .layout { grid-template-columns: minmax(0, 54fr) minmax(0, 46fr); }
   }
@@ -7530,7 +7515,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         '</div>' +
         '<p class="content summary" data-id="' + m.id + '" title="' + esc(T("detailTip")) + '">' + linkify(highlight(esc(text), state.q)) + '</p>' +
         '<div class="msg-foot">' +
-          (code ? '<span class="code-chip' + (state.codeCopy ? '' : ' tapcopy') + '"><span class="code-val">' + esc(code) + '</span>' + (state.codeCopy ? '<button class="copy" type="button" data-code="' + esc(code) + '">' + esc(T("copy")) + '</button>' : '') + '</span>' : '') +
           devChip +
         '</div>' +
       '</div>' +
@@ -7542,6 +7526,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
           '<button class="pin' + (m.pinned ? " on" : "") + '" data-id="' + m.id + '" title="' + esc(T("pinItemTip")) + '" aria-label="' + esc(T("pinItemTip")) + '">' + (m.pinned ? "📌" : "📍") + '</button>' +
           '<button class="del" data-id="' + m.id + '" title="' + esc(T("del")) + '">' + esc(T("del")) + '</button>' +
         '</div>' +
+        (code ? '<div class="rail-code"><span class="code-chip' + (state.codeCopy ? '' : ' tapcopy') + '"><span class="code-val">' + esc(code) + '</span>' + (state.codeCopy ? '<button class="copy" type="button" data-code="' + esc(code) + '">' + esc(T("copy")) + '</button>' : '') + '</span></div>' : '') +
       '</div>' +
     '</div>';
   }
@@ -8162,22 +8147,17 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       '<button class="tbtn" id="dpin">' + esc(m.pinned ? T("unpin") : T("pin")) + '</button>' +
       (isSms && snum ? '<a class="tbtn" href="tel:' + esc(snum) + '">' + esc(T("call")) + '</a>' : '') +
       (isSms && snum ? '<button class="tbtn" id="dlabel">' + esc(T("setLabel")) + '</button>' : '');
+    /* UX-14 R2（EditHere 标注）：标为未读移到删除左边；有验证码时在最右侧追加
+       「复制验证码」按钮——详情页始终可直接复制，不受设置里的验证码复制开关影响。
+       无验证码时按钮组维持原顺序，删除键仍在最右。弹层与宽屏面板共用本渲染层。 */
     var actsEnd =
+      '<button class="tbtn tbtn--accent" id="dunread">' + esc(T("markUnread")) + '</button>' +
       '<button class="tbtn tbtn--danger" id="ddel">' + esc(T("del")) + '</button>' +
-      '<button class="tbtn tbtn--accent" id="dunread">' + esc(T("markUnread")) + '</button>';
-    /* UX-14：验证码在详情卡片内右侧独立展示（代码加重强调 + 一键复制）。
-       弹层与宽屏面板共用本渲染层，所以所有含验证码的详情都有同一个复制入口；
-       无验证码的消息仍是原来的单栏正文，布局完全不变。 */
-    var codeCard = code
-      ? '<aside class="detail-code" aria-label="' + esc(T("detailCode")) + '">'
-        + '<div class="dc-label">' + esc(T("detailCode")) + '</div>'
-        + '<div class="dc-value">' + esc(code) + '</div>'
-        + '<button class="dc-copy" id="dccopy" type="button">' + esc(T("copyCode")) + '</button>'
-        + '</aside>'
-      : '';
-    var detailMain = '<div class="detail-main' + (code ? ' has-code' : '') + '">'
-      + '<div class="detail-body">' + (body ? linkify(esc(body)) : '<span class="empty-text">' + esc(T("emptyBody")) + '</span>') + '</div>'
-      + codeCard + '</div>';
+      (code ? '<button class="tbtn tbtn--code" id="dccopy" type="button">' + esc(T("copyCode")) + '</button>' : '');
+    /* UX-14 R2：详情恢复 v1.1.3 的单栏正文，不再有右侧独立验证码卡片。 */
+    var detailBody = '<div class="detail-body">'
+      + (body ? linkify(esc(body)) : '<span class="empty-text">' + esc(T("emptyBody")) + '</span>')
+      + '</div>';
     var foot;
     if (mode === "pane") {
       foot = '<div class="dp-foot">' + acts + '<span class="grow"></span>' + actsEnd + '</div>';
@@ -8191,7 +8171,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       : '<h3>' + esc(who) + '</h3>';
     return head +
       '<div class="detail-metarow">' + parts.join('<span class="sep">·</span>') + '</div>' +
-      detailMain +
+      detailBody +
       foot;
   }
   /* 打开详情即标记已读；失败回滚本地状态并提示，不做"假成功" */
@@ -8256,10 +8236,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var cp = q("#dcopy");
     if (cp) cp.onclick = function () { doCopy(m.content, cp); };
     var ccb = q("#dccopy");
-    if (ccb) ccb.onclick = function () {
-      var cv = q(".detail-code .dc-value");
-      if (cv) doCopy(cv.textContent || "", ccb);
-    };
+    if (ccb) ccb.onclick = function () { doCopy(extractCode(m.content || ""), ccb); };
     var del = q("#ddel");
     if (del) del.onclick = function () {
       /* UX-09 U9-02：先确认再关闭详情，避免"点了就没了"且无法追问 */
