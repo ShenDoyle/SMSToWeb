@@ -22,7 +22,8 @@ console.log("\n===== UX-07B 结构与回归 =====");
 
 /* A. 首页工具栏：一行结构，去掉重复标题行 */
 t("A1 首页不再有独立标题行 .toolbar-top", !has('class="toolbar-top"') && !/\.toolbar-top \{/.test(SRC));
-t("A2 刷新按钮与筛选区同属一个工具栏", /<div class="toolbar">[\s\S]{0,2400}?id="refreshbtn"/.test(SRC));
+/* 距离上限按结构而非行数给：UX-18 给收藏/置顶标签补了图标与 aria 属性，工具栏源码变长但结构未变 */
+t("A2 刷新按钮与筛选区同属一个工具栏", /<div class="toolbar">[\s\S]{0,3600}?id="refreshbtn"/.test(SRC));
 t("A3 「短信列表」文案降为读屏专用", /<span class="sr-only" data-i18n="listTitle">/.test(SRC));
 t("A4 条数紧贴视图标签", /<span class="toolbar-title">[\s\S]{0,160}?<span id="stat"><\/span>/.test(SRC));
 t("A5 桌面端工具栏单行 flex", /\.toolbar \{ display: flex; align-items: center; gap: 10px; padding: 11px 20px;/.test(SRC));

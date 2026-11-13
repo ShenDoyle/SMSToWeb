@@ -2132,7 +2132,7 @@ async function main() {
      桌面端仍保持右侧列（align-self: stretch）。 */
   check(/rail-code/.test(pageHtml) && /align-self: stretch/.test(pageHtml)
     && /class="msg-rail"/.test(pageHtml) && /\.msg-rail \{ display: contents; \}/.test(pageHtml)
-    && !/card:has\(\.rail-code\)/.test(pageHtml),
+    && !/card:has\(\.rail-code\) \.msg-foot \{ min-height/.test(pageHtml),
     "R2-1/UX-17：桌面端验证码胶囊在右侧操作列，窄屏操作列回归文档流、与设备脚注同行");
   check(!/detail-code/.test(pageHtml) && !/detail-main/.test(pageHtml) && !/dc-value/.test(pageHtml),
     "R2-2：详情恢复 v1.1.3 单栏正文，去掉右侧独立验证码卡片");
@@ -2141,10 +2141,11 @@ async function main() {
     && !/m\.starred \? "★" : "☆"/.test(pageHtml) && !/m\.pinned \? "📌" : "📍"/.test(pageHtml),
     "UX-17：卡片操作统一为 16px 线性图标（星/钉/垃圾桶），不再混用字符与 emoji");
   check(/\.msg-main > \.msg-foot \{ order: 30; flex: 1 1 0;/.test(pageHtml)
-    && /\.msg-rail > \.msg-actions \{ order: 50;/.test(pageHtml)
+    && /\.msg-rail > \.msg-actions \{ order: 40;/.test(pageHtml)
+    && /\.msg-rail > \.rail-code \{ order: 50;/.test(pageHtml)
     && /\.msg-actions \.more \{ display: none; \}/.test(pageHtml)
     && /body\.selecting \.msg-main > \.msg-foot \{ display: none; \}/.test(pageHtml),
-    "UX-17：窄屏设备 · 验证码 · 图标同处卡片底部一行，多选态让位勾选框");
+    "UX-17/UX-18：窄屏设备 · 图标 · 验证码同处卡片底部一行，验证码排最右（复制是最高频动作）");
   /* UX-15 后复制验证码并入次要操作格（仍在最前两位），删除与关闭独占一行；语义断言随之更新 */
   check(/id="dunread"/.test(pageHtml) && /code \? icBtn\('button', ' id="dccopy"/.test(pageHtml)
     && /doCopy\(extractCode\(m\.content/.test(pageHtml)
@@ -2153,14 +2154,19 @@ async function main() {
   check((pageHtml.match(/\bcopyCode:/g) || []).length === 9,
     "R2：复制验证码按钮文案九语种全覆盖");
   const mobileCss = (uxSrc.match(/@media \(max-width: 660px\) \{([\s\S]*?)\/\* 平板区间/) || [])[1] || "";
-  check(/display: grid; grid-template-columns: minmax\(0, 1fr\) auto/.test(mobileCss)
+  check(/\.toolbar \{ position: relative; display: grid; grid-template-columns: minmax\(0, 1fr\);/.test(mobileCss)
     && /\.filters \{ display: contents; \}/.test(mobileCss)
-    && /\.filter-tabs \{ grid-column: 1; grid-row: 1; min-width: 0; \}/.test(mobileCss)
-    && /#selmodebtn \{ grid-column: 2; grid-row: 1;/.test(mobileCss)
-    && /\.toolbar-title \{ position: relative; \}/.test(mobileCss)
-    && !/#selmodebtn[^}]*position: absolute/.test(mobileCss)
+    && /\.filter-tabs \{ grid-column: 1; grid-row: 1; min-width: 0; flex-wrap: wrap; overflow: visible/.test(mobileCss)
+    && /#selmodebtn \{ display: none; \}/.test(mobileCss)
+    && /id="mnusel"/.test(pageHtml) && /b\.id === "mnusel"\) setSelectMode\(true/.test(uxSrc)
+    && !/\.filter-tabs \{ flex: 0 0 auto; flex-wrap: nowrap[^}]*overflow-x: auto/.test(mobileCss)
     && !/padding-right: 58px/.test(mobileCss),
-    "R3：移动端多选按钮按真实宽度占网格列、标签可横滑，不再用固定 58px 留白造成长文案遮挡");
+    "UX-18：窄屏工具栏不再横滑 —— 多选改由长按/右键进入（⋯ 菜单留键盘入口），标签行换行不截断");
+  /* UX-18：收藏/置顶标签拆成「图标 + 文案」，窄屏只留图标，五个标签才排得进 390 的一行 */
+  check(/class="chip-ico"/.test(pageHtml) && /class="chip-lbl" data-i18n="starOnly"/.test(pageHtml)
+    && /#fstar \.chip-lbl, \.filter-tabs #fpin \.chip-lbl \{ display: none; \}/.test(pageHtml)
+    && !/starOnly: "★ /.test(uxSrc) && !/pinOnly: "📌 /.test(uxSrc),
+    "UX-18：收藏/置顶视图标签改用线性图标，窄屏只留图标（文案进 title / aria-label）");
   /* UX-16（EditHere 第 3 轮标注）：标题行 = 身份 + 状态胶囊；时间下移第二行；第二行不再重复号码 */
   check(/class="detail-tags"/.test(pageHtml) && /class="dpill dpill--type"/.test(pageHtml)
     && /dpill--star/.test(pageHtml) && /dpill--pin/.test(pageHtml)

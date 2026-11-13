@@ -69,7 +69,7 @@ function escAttr(s) {
 function jsStr(s) {
   return JSON.stringify(s).replace(/</g, "\\u003c");
 }
-const APP_VERSION = "v1.1.7";
+const APP_VERSION = "v1.1.8";
 
 /* 把页面模板中的占位标记替换为实际配置值（用函数替换器，避免值里含 $& 等特殊序列被误解释） */
 function renderHtml(html, env) {
@@ -3030,8 +3030,14 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .filter-row { display: flex; align-items: center; gap: 6px; flex: 1 1 320px; min-width: 0; flex-wrap: wrap; }
   .chip { border: 1px solid var(--ds-color-border); background: var(--ds-color-bg-surface); border-radius: 7px;
           padding: 5px 11px; color: var(--ds-color-text-secondary); font-size: 12px; min-height: 30px; cursor: pointer;
+          display: inline-flex; align-items: center; gap: 5px;
           transition: background var(--ds-duration-fast) var(--ds-ease), border-color var(--ds-duration-fast) var(--ds-ease),
                       color var(--ds-duration-fast) var(--ds-ease); }
+  /* 图标型视图标签（收藏/置顶）：窄屏只留图标，桌面保留「图标 + 文字」 */
+  .chip-ico { display: inline-flex; align-items: center; }
+  .chip-ico svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.5;
+                  stroke-linecap: round; stroke-linejoin: round; }
+  #fstar.active .chip-ico svg { fill: currentColor; }
   @media (hover: hover) { .chip:hover { border-color: var(--ds-color-primary); color: var(--ds-color-primary); } }
   .chip.active { background: var(--ds-color-primary-subtle); border-color: var(--ds-color-primary);
           color: var(--ds-color-primary); font-weight: 600; box-shadow: inset 0 0 0 1px var(--ds-color-primary); }
@@ -3272,10 +3278,15 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     /* 窄屏纵向堆叠时，桌面端用于横向占位的 flex-basis 会变成「高度」，必须复位 */
     .toolbar-refresh { display: none; }   /* 窄屏刷新走 ⋯ 菜单，避免再占一行 */
     .filters { flex: 1 1 auto; flex-direction: column; align-items: stretch; flex-wrap: nowrap; gap: 8px; }
-    .filter-tabs { flex: 0 0 auto; flex-wrap: nowrap; gap: 6px; overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch; }
-    .filter-tabs::-webkit-scrollbar { display: none; }
+    /* UX-18：标签行不再横滑（横滑等于把后面的 chip 藏起来），改为换行 + 收窄内边距，
+       390 下五种视图仍能排进一行，德语/西语等长文案最多换到第二行 */
+    .filter-tabs { flex: 0 0 auto; flex-wrap: wrap; gap: 5px; overflow: visible; }
     /* UX-07B：主要触控入口统一 44×44 命中区（视觉仍紧凑，靠内边距撑开热区） */
-    .filter-tabs .chip { flex: 0 0 auto; min-height: 44px; padding: 0 12px; }
+    .filter-tabs .chip { flex: 0 0 auto; min-height: 44px; padding: 0 10px; }
+    /* UX-18：收藏/置顶两个视图标签在窄屏只留图标（文字由 title / aria-label 提供），
+       五个标签因此能排进 390 的一行；纯文字的三态标签不受影响 */
+    .filter-tabs #fstar, .filter-tabs #fpin { padding: 0; min-width: 44px; justify-content: center; }
+    .filter-tabs #fstar .chip-lbl, .filter-tabs #fpin .chip-lbl { display: none; }
     .toolbar-title { align-self: center; margin-left: auto; padding-left: 6px; }
     .filter-row { flex: 0 0 auto; flex-wrap: nowrap; width: 100%; }
     .filter-row .searchwrap { flex: 1 1 auto; width: auto; min-width: 0; margin-left: 0; }
@@ -3398,20 +3409,22 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     .nav-mobile { display: inline-flex !important; }
     .topbar { align-items: center; }
     /* 搜索独占一行 + 「筛选」按钮；设备/来源/时间默认折叠，点开即展开一行三等分下拉 */
-    /* UX-14-R3：多选按钮回到文档流，用两列网格把「视图标签 | 多选」固定在第一行。
-       旧实现把按钮绝对定位到标签行右端，再用 .filter-tabs 固定 padding-right:58px 留白；
-       58px 是按中文「多选」宽度写死的，英文 Multi-select / 西语 Multiselección /
-       德语 Mehrfachauswahl 明显更宽，会盖住末尾 chip（Starred / Pinned）。
-       现在按钮占 auto 列、标签占 minmax(0,1fr) 列且保留横向滚动，任何语言都不重叠；
-       刷新按钮在窄屏本就隐藏（走 ⋯ 菜单），第二行仍是搜索与筛选，首屏高度不变。 */
-    /* 保留顶栏原有的定位上下文；标签行内 .sr-only 的裁剪另见下方 .toolbar-title */
-    .toolbar { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; }
+    /* UX-18：窄屏不再横滑标签行。
+       手机上「长按卡片 / 右键」才是既有多选习惯（U9-19 已实现同一语义），工具栏那个
+       文字入口在这里让位：它曾经需要的 58px→auto 列把标签行挤成横向滚动条，
+       390 下 Starred / Pinned 被推到视口外，只能拖着找（本轮用户截图红框处）。
+       按钮隐藏后标签行拿回整行宽度，改回 flex-wrap 自然换行：任何语言都不会被裁掉，
+       也不需要横向拖动。键盘用户的入口保留在 ⋯ 菜单（#mnusel）。
+       视图标签自身仍是 min-width:0 的网格列，.sr-only 的裁剪诉求一并保留。 */
+    .toolbar { position: relative; display: grid; grid-template-columns: minmax(0, 1fr); align-items: center; gap: 8px; }
     .filters { display: contents; }
-    .filter-tabs { grid-column: 1; grid-row: 1; min-width: 0; }
-    /* .toolbar-title 里的 .sr-only 是绝对定位且未指定 left/top；包含块若落在滚动容器之外，
-       它会停在 x≈409 并给 document 撑出 20px 横向滚动。就近设为包含块即可被 .filter-tabs 裁剪。 */
+    .filter-tabs { grid-column: 1; grid-row: 1; min-width: 0; flex-wrap: wrap; overflow: visible; gap: 5px; }
+    /* .toolbar-title 里的 .sr-only 是绝对定位且未指定 left/top；包含块若落在别处，
+       它会停在视口外并给 document 撑出横向滚动。就近设为包含块。 */
     .toolbar-title { position: relative; }
-    #selmodebtn { grid-column: 2; grid-row: 1; justify-self: end; min-height: 44px; min-width: 44px; padding: 0 8px; }
+    /* 「总计 N」在首屏标签行里既抢宽度又和 statbar 重复，窄屏不显示（读屏标签 sr-only 保留） */
+    .toolbar-title #stat { display: none; }
+    #selmodebtn { display: none; }
     .filter-row { grid-column: 1 / -1; grid-row: 2; display: flex; flex-wrap: wrap; gap: 6px; width: 100%; }
     .filter-row .searchwrap { flex: 1 1 auto; min-width: 0; }
     .filter-row .filterbtn { display: inline-flex; align-items: center; min-height: 44px; flex: 0 0 auto; }
@@ -3430,12 +3443,14 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     .msg-main { display: contents; }
     .msg-main > .msg-top { order: 10; flex: 1 0 100%; }
     .msg-main > .content.summary { order: 20; flex: 1 0 100%; margin-top: 4px; }
-    /* 操作列本身也拆开，两块落到同一行：设备脚注（左）· 验证码胶囊 · 图标组（右） */
+    /* 操作列本身也拆开，两块落到同一行：设备脚注（左）· 图标组 · 验证码胶囊（最右，UX-18） */
     .msg-rail { display: contents; }
     /* basis 取 0：设备名再长也不会把图标组挤到下一行（超出部分走 ellipsis） */
     .msg-main > .msg-foot { order: 30; flex: 1 1 0; min-width: 0; margin-top: 8px; min-height: 0; }
-    .msg-rail > .rail-code { order: 40; flex: 0 0 auto; justify-content: flex-start; margin: 8px 0 0 6px; }
-    .msg-rail > .msg-actions { order: 50; flex: 0 0 auto; margin: 8px 0 0 auto; gap: 0; flex-wrap: nowrap; }
+    /* UX-18：验证码是「收到就复制」的高频动作，必须落在右手拇指最顺的右边缘；
+       图标组（收藏/置顶/删除）属于低频整理动作，让到它左侧。 */
+    .msg-rail > .msg-actions { order: 40; flex: 0 0 auto; margin: 8px 0 0 auto; gap: 0; flex-wrap: nowrap; }
+    .msg-rail > .rail-code { order: 50; flex: 0 0 auto; justify-content: flex-end; margin: 8px 0 0 8px; }
     .msg-rail > .msg-actions .ico { width: 17px; height: 17px; }
     /* 胶囊高度与图标格对齐成 40px，否则底部一行会一半 46 一半 40，视觉上仍是「不齐」 */
     .msg-rail > .rail-code .code-chip { height: 40px; }
@@ -3452,6 +3467,19 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     /* 多选态宽度被勾选框吃掉 20px，设备名会缩成「Pixe…」，选择过程中它是无用信息，直接让位 */
     body.selecting .msg-main > .msg-foot { display: none; }
     body.selecting .selwrap { display: block; flex: 0 0 20px; align-self: flex-start; }
+  }
+  /* ===== UX-18：超窄屏（≤360）=====
+     320 上「设备名 + 三个图标 + 验证码胶囊」排不进一行（266px 可用），胶囊会被顶到第二行，
+     卡片高度 147→195，并把 document 撑出 4px 横向滚动。有码时让设备名退场
+     （详情弹层里仍有完整来源），图标组与胶囊留在同一行；无码卡片保持原样。 */
+  @media (max-width: 360px) {
+    .card:has(.rail-code) .msg-main > .msg-foot { display: none; }
+    .msg-rail > .rail-code .code-chip .code-val { padding: 0 8px; font-size: 12.5px; }
+    .msg-rail > .rail-code .code-chip .copy { padding: 0 10px; }
+    /* 带类型徽章（Notification）的卡片在 320 上把标题行撑出 4px 横向滚动：
+       收紧行内间距，并允许号码在极端情况下省略（完整号码在详情弹层） */
+    .msg-top { gap: 5px; }
+    .msg-top .phone { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   }
   /* 平板区间（661–900）：一行放不下「视图标签 + 搜索 + 三个下拉 + 刷新」，
      用网格固定为「标签 | 刷新」/「搜索与筛选」两行，避免刷新被挤到单独第三行 */
@@ -3583,6 +3611,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   </header>
   <div class="navmenu" id="navmenu" role="menu" hidden>
     <button type="button" role="menuitem" id="mnurefresh" data-i18n="refresh">刷新</button>
+    <button type="button" role="menuitem" id="mnusel" data-i18n="selModeBtn">多选</button>
     <button type="button" role="menuitem" id="mnustats" data-i18n="viewStats">统计</button>
     <button type="button" role="menuitem" id="mnuset" data-i18n="settings">设置</button>
     <button type="button" role="menuitem" id="mnulogout" class="danger" data-i18n="scLogout">退出登录</button>
@@ -3596,8 +3625,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
             <button class="chip active" id="fall" type="button" data-i18n="tabAll">全部</button>
             <button class="chip" id="funread" type="button"><span data-i18n="unread">未读</span><span class="chipcount" id="unreadcount" hidden>0</span></button>
             <button class="chip" id="fread" type="button" data-i18n="read">已读</button>
-            <button class="chip" id="fstar" type="button"><span data-i18n="starOnly">★ 收藏</span></button>
-            <button class="chip" id="fpin" type="button"><span data-i18n="pinOnly">📌 置顶</span></button>
+            <button class="chip" id="fstar" type="button" data-i18n-title="starTip" data-i18n-aria="starOnly" title="只看收藏" aria-label="收藏"><span class="chip-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M8 2.7l1.7 3.5 3.8.5-2.8 2.7.7 3.8L8 11.4l-3.4 1.8.7-3.8L2.5 6.7l3.8-.5z"/></svg></span><span class="chip-lbl" data-i18n="starOnly">收藏</span></button>
+            <button class="chip" id="fpin" type="button" data-i18n-title="pinTip" data-i18n-aria="pinOnly" title="只看置顶" aria-label="置顶"><span class="chip-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M6.1 2.7h3.8"/><path d="M6.7 2.7v3.1L5.2 8.3h5.6L9.3 5.8V2.7"/><path d="M8 8.3v5"/></svg></span><span class="chip-lbl" data-i18n="pinOnly">置顶</span></button>
             <span class="toolbar-title"><span class="sr-only" data-i18n="listTitle">短信列表</span><span id="stat"></span></span>
           </div>
           <div class="filter-row">
@@ -3803,7 +3832,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       srcTip: "按来源筛选", allSources: "来源", srcSms: "短信", srcNotify: "通知",
       rangeTip: "按时间筛选", allTime: "时间", d7: "近 7 天", d30: "近 30 天",
       autoCopy: "自动复制验证码", codeCopyBtn: "验证码复制按钮", notifyOn: "后台通知", soundOn: "提示音",
-      starOnly: "★ 收藏", unreadOnly: "● 未读", starTip: "只看收藏", unreadTip: "只看未读",
+      starOnly: "收藏", unreadOnly: "● 未读", starTip: "只看收藏", unreadTip: "只看未读",
       select: "选择", selectTip: "进入批量选择", done: "完成",
       clear: "清空", clearTip: "清空当前筛选结果（软删除）",
       exportCsv: "导出 CSV", exportJson: "导出 JSON",
@@ -3823,7 +3852,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       selCount: "已选 {n} 条", selAll: "全选本页", cancel: "取消", ok: "确定",
       dSource: "来源", dDevice: "设备标签", dRecv: "收件号", dTime: "时间", dLabel: "号码标签", dStatus: "状态",
       notSet: "（未设置）", read: "已读", starredPrefix: "★ 收藏 · ",
-      pin: "置顶", unpin: "取消置顶", pinOnly: "📌 置顶", pinTip: "只看置顶", pinItemTip: "置顶", pinFail: "置顶失败，请重试", tagStarred: "已收藏", tagPinned: "已置顶",
+      pin: "置顶", unpin: "取消置顶", pinOnly: "置顶", pinTip: "只看置顶", pinItemTip: "置顶", pinFail: "置顶失败，请重试", tagStarred: "已收藏", tagPinned: "已置顶",
       star: "收藏", unstar: "取消收藏", markUnread: "标为未读", copyAll: "复制全文",
       call: "拨号", setLabel: "号码标签",
       labelPrompt: "给 {n} 设置标签（留空清除）",
@@ -3872,7 +3901,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       srcTip: "Filter by source", allSources: "Source", srcSms: "SMS", srcNotify: "Notification",
       rangeTip: "Filter by time", allTime: "Time", d7: "Last 7 days", d30: "Last 30 days",
       autoCopy: "Auto-copy codes", codeCopyBtn: "Code copy button", notifyOn: "Background alerts", soundOn: "Sound",
-      starOnly: "★ Starred", unreadOnly: "● Unread", starTip: "Starred only", unreadTip: "Unread only",
+      starOnly: "Starred", unreadOnly: "● Unread", starTip: "Starred only", unreadTip: "Unread only",
       select: "Select", selectTip: "Enter multi-select", done: "Done",
       clear: "Clear", clearTip: "Clear current filter (soft delete)",
       exportCsv: "Export CSV", exportJson: "Export JSON",
@@ -3892,7 +3921,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       selCount: "{n} selected", selAll: "Select page", cancel: "Cancel", ok: "OK",
       dSource: "Source", dDevice: "Device", dRecv: "Recipient", dTime: "Time", dLabel: "Number label", dStatus: "Status",
       notSet: "(not set)", read: "Read", starredPrefix: "★ Starred · ",
-      pin: "Pin", unpin: "Unpin", pinOnly: "📌 Pinned", pinTip: "Pinned only", pinItemTip: "Pin", pinFail: "Pin failed, please retry", tagStarred: "Starred", tagPinned: "Pinned",
+      pin: "Pin", unpin: "Unpin", pinOnly: "Pinned", pinTip: "Pinned only", pinItemTip: "Pin", pinFail: "Pin failed, please retry", tagStarred: "Starred", tagPinned: "Pinned",
       star: "Star", unstar: "Unstar", markUnread: "Mark unread", copyAll: "Copy text",
       call: "Call", setLabel: "Number label",
       labelPrompt: "Label for {n} (leave empty to clear)",
@@ -3941,7 +3970,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       srcTip: "依來源篩選", allSources: "來源", srcSms: "簡訊", srcNotify: "通知",
       rangeTip: "依時間篩選", allTime: "時間", d7: "近 7 天", d30: "近 30 天",
       autoCopy: "自動複製驗證碼", codeCopyBtn: "驗證碼複製按鈕", notifyOn: "背景通知", soundOn: "提示音",
-      starOnly: "★ 收藏", unreadOnly: "● 未讀", starTip: "只看收藏", unreadTip: "只看未讀",
+      starOnly: "收藏", unreadOnly: "● 未讀", starTip: "只看收藏", unreadTip: "只看未讀",
       select: "選擇", selectTip: "進入批次選擇", done: "完成",
       clear: "清空", clearTip: "清空目前篩選結果（軟刪除）",
       exportCsv: "匯出 CSV", exportJson: "匯出 JSON",
@@ -3961,7 +3990,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       selCount: "已選 {n} 則", selAll: "全選本頁", cancel: "取消", ok: "確定",
       dSource: "來源", dDevice: "裝置標籤", dRecv: "收件號", dTime: "時間", dLabel: "號碼標籤", dStatus: "狀態",
       notSet: "（未設定）", read: "已讀", starredPrefix: "★ 收藏 · ",
-      pin: "置頂", unpin: "取消置頂", pinOnly: "📌 置頂", pinTip: "只看置頂", pinItemTip: "置頂", pinFail: "置頂失敗，請重試", tagStarred: "已收藏", tagPinned: "已置頂",
+      pin: "置頂", unpin: "取消置頂", pinOnly: "置頂", pinTip: "只看置頂", pinItemTip: "置頂", pinFail: "置頂失敗，請重試", tagStarred: "已收藏", tagPinned: "已置頂",
       star: "收藏", unstar: "取消收藏", markUnread: "標為未讀", copyAll: "複製全文",
       call: "撥號", setLabel: "號碼標籤",
       labelPrompt: "為 {n} 設定標籤（留空清除）",
@@ -4010,7 +4039,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       srcTip: "送信元で絞り込み", allSources: "送信元", srcSms: "SMS", srcNotify: "通知",
       rangeTip: "期間で絞り込み", allTime: "期間", d7: "過去 7 日", d30: "過去 30 日",
       autoCopy: "認証コード自動コピー", codeCopyBtn: "コードのコピーボタン", notifyOn: "バックグラウンド通知", soundOn: "通知音",
-      starOnly: "★ スター", unreadOnly: "● 未読", starTip: "スターのみ表示", unreadTip: "未読のみ表示",
+      starOnly: "スター", unreadOnly: "● 未読", starTip: "スターのみ表示", unreadTip: "未読のみ表示",
       select: "選択", selectTip: "一括選択を開始", done: "完了",
       clear: "消去", clearTip: "現在の絞り込み結果を消去（ソフト削除）",
       exportCsv: "CSV をエクスポート", exportJson: "JSON をエクスポート",
@@ -4030,7 +4059,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       selCount: "{n} 件選択中", selAll: "このページを全選択", cancel: "キャンセル", ok: "OK",
       dSource: "送信元", dDevice: "デバイスラベル", dRecv: "宛先番号", dTime: "日時", dLabel: "番号ラベル", dStatus: "状態",
       notSet: "（未設定）", read: "既読", starredPrefix: "★ スター · ",
-      pin: "固定", unpin: "固定解除", pinOnly: "📌 固定", pinTip: "固定のみ表示", pinItemTip: "固定", pinFail: "固定に失敗しました", tagStarred: "スター付き", tagPinned: "固定中",
+      pin: "固定", unpin: "固定解除", pinOnly: "固定", pinTip: "固定のみ表示", pinItemTip: "固定", pinFail: "固定に失敗しました", tagStarred: "スター付き", tagPinned: "固定中",
       star: "スター", unstar: "スター解除", markUnread: "未読にする", copyAll: "全文をコピー",
       call: "発信", setLabel: "番号ラベル",
       labelPrompt: "{n} のラベルを設定（空欄で解除）",
@@ -4079,7 +4108,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       srcTip: "발신원별 필터", allSources: "발신원", srcSms: "SMS", srcNotify: "알림",
       rangeTip: "기간별 필터", allTime: "기간", d7: "최근 7일", d30: "최근 30일",
       autoCopy: "인증번호 자동 복사", codeCopyBtn: "인증번호 복사 버튼", notifyOn: "백그라운드 알림", soundOn: "알림음",
-      starOnly: "★ 즐겨찾기", unreadOnly: "● 읽지 않음", starTip: "즐겨찾기만 보기", unreadTip: "읽지 않은 것만 보기",
+      starOnly: "즐겨찾기", unreadOnly: "● 읽지 않음", starTip: "즐겨찾기만 보기", unreadTip: "읽지 않은 것만 보기",
       select: "선택", selectTip: "일괄 선택 시작", done: "완료",
       clear: "비우기", clearTip: "현재 필터 결과 비우기(소프트 삭제)",
       exportCsv: "CSV 내보내기", exportJson: "JSON 내보내기",
@@ -4099,7 +4128,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       selCount: "{n}건 선택됨", selAll: "이 페이지 전체 선택", cancel: "취소", ok: "확인",
       dSource: "발신원", dDevice: "기기 라벨", dRecv: "수신번호", dTime: "시간", dLabel: "번호 라벨", dStatus: "상태",
       notSet: "(설정 안 됨)", read: "읽음", starredPrefix: "★ 즐겨찾기 · ",
-      pin: "고정", unpin: "고정 해제", pinOnly: "📌 고정", pinTip: "고정만 보기", pinItemTip: "고정", pinFail: "고정에 실패했습니다", tagStarred: "즐겨찾기됨", tagPinned: "고정됨",
+      pin: "고정", unpin: "고정 해제", pinOnly: "고정", pinTip: "고정만 보기", pinItemTip: "고정", pinFail: "고정에 실패했습니다", tagStarred: "즐겨찾기됨", tagPinned: "고정됨",
       star: "즐겨찾기", unstar: "즐겨찾기 해제", markUnread: "읽지 않음으로 표시", copyAll: "전문 복사",
       call: "전화", setLabel: "번호 라벨",
       labelPrompt: "{n} 의 라벨 설정(비우면 해제)",
@@ -4148,7 +4177,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       srcTip: "Filtrar por origen", allSources: "Origen", srcSms: "SMS", srcNotify: "Notificación",
       rangeTip: "Filtrar por fecha", allTime: "Fecha", d7: "Últimos 7 días", d30: "Últimos 30 días",
       autoCopy: "Copiar códigos automáticamente", codeCopyBtn: "Botón copiar código", notifyOn: "Alertas en segundo plano", soundOn: "Sonido",
-      starOnly: "★ Favoritos", unreadOnly: "● No leídos", starTip: "Solo favoritos", unreadTip: "Solo no leídos",
+      starOnly: "Favoritos", unreadOnly: "● No leídos", starTip: "Solo favoritos", unreadTip: "Solo no leídos",
       select: "Seleccionar", selectTip: "Entrar en selección múltiple", done: "Listo",
       clear: "Vaciar", clearTip: "Vaciar el filtro actual (borrado suave)",
       exportCsv: "Exportar CSV", exportJson: "Exportar JSON",
@@ -4168,7 +4197,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       selCount: "{n} seleccionados", selAll: "Seleccionar página", cancel: "Cancelar", ok: "Aceptar",
       dSource: "Origen", dDevice: "Dispositivo", dRecv: "Destinatario", dTime: "Hora", dLabel: "Etiqueta del número", dStatus: "Estado",
       notSet: "(sin configurar)", read: "Leído", starredPrefix: "★ Favorito · ",
-      pin: "Fijar", unpin: "Quitar fijación", pinOnly: "📌 Fijados", pinTip: "Solo fijados", pinItemTip: "Fijar", pinFail: "Error al fijar", tagStarred: "Destacado", tagPinned: "Fijado",
+      pin: "Fijar", unpin: "Quitar fijación", pinOnly: "Fijados", pinTip: "Solo fijados", pinItemTip: "Fijar", pinFail: "Error al fijar", tagStarred: "Destacado", tagPinned: "Fijado",
       star: "Marcar", unstar: "Quitar marca", markUnread: "Marcar como no leído", copyAll: "Copiar texto",
       call: "Llamar", setLabel: "Etiqueta del número",
       labelPrompt: "Etiqueta para {n} (dejar vacío para borrar)",
@@ -4217,7 +4246,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       srcTip: "Filtrer par source", allSources: "Source", srcSms: "SMS", srcNotify: "Notification",
       rangeTip: "Filtrer par période", allTime: "Période", d7: "7 derniers jours", d30: "30 derniers jours",
       autoCopy: "Copie auto des codes", codeCopyBtn: "Bouton copier le code", notifyOn: "Alertes en arrière-plan", soundOn: "Son",
-      starOnly: "★ Favoris", unreadOnly: "● Non lus", starTip: "Favoris uniquement", unreadTip: "Non lus uniquement",
+      starOnly: "Favoris", unreadOnly: "● Non lus", starTip: "Favoris uniquement", unreadTip: "Non lus uniquement",
       select: "Sélectionner", selectTip: "Activer la sélection multiple", done: "Terminé",
       clear: "Vider", clearTip: "Vider le filtre actuel (suppression logique)",
       exportCsv: "Exporter CSV", exportJson: "Exporter JSON",
@@ -4237,7 +4266,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       selCount: "{n} sélectionnés", selAll: "Tout sélectionner (page)", cancel: "Annuler", ok: "OK",
       dSource: "Source", dDevice: "Appareil", dRecv: "Destinataire", dTime: "Heure", dLabel: "Étiquette du numéro", dStatus: "Statut",
       notSet: "(non défini)", read: "Lu", starredPrefix: "★ Favori · ",
-      pin: "Épingler", unpin: "Désépingler", pinOnly: "📌 Épinglés", pinTip: "Épinglés uniquement", pinItemTip: "Épingler", pinFail: "Échec de l'épinglage", tagStarred: "Favori", tagPinned: "Épinglé",
+      pin: "Épingler", unpin: "Désépingler", pinOnly: "Épinglés", pinTip: "Épinglés uniquement", pinItemTip: "Épingler", pinFail: "Échec de l'épinglage", tagStarred: "Favori", tagPinned: "Épinglé",
       star: "Favori", unstar: "Retirer le favori", markUnread: "Marquer non lu", copyAll: "Copier le texte",
       call: "Appeler", setLabel: "Étiquette du numéro",
       labelPrompt: "Étiquette pour {n} (laisser vide pour effacer)",
@@ -4286,7 +4315,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       srcTip: "Nach Quelle filtern", allSources: "Quelle", srcSms: "SMS", srcNotify: "Benachrichtigung",
       rangeTip: "Nach Zeit filtern", allTime: "Zeitraum", d7: "Letzte 7 Tage", d30: "Letzte 30 Tage",
       autoCopy: "Codes automatisch kopieren", codeCopyBtn: "Code kopieren", notifyOn: "Hintergrund-Benachrichtigungen", soundOn: "Ton",
-      starOnly: "★ Favoriten", unreadOnly: "● Ungelesen", starTip: "Nur Favoriten", unreadTip: "Nur Ungelesene",
+      starOnly: "Favoriten", unreadOnly: "● Ungelesen", starTip: "Nur Favoriten", unreadTip: "Nur Ungelesene",
       select: "Auswählen", selectTip: "Mehrfachauswahl starten", done: "Fertig",
       clear: "Leeren", clearTip: "Aktuellen Filter leeren (Soft-Delete)",
       exportCsv: "CSV exportieren", exportJson: "JSON exportieren",
@@ -4306,7 +4335,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       selCount: "{n} ausgewählt", selAll: "Seite auswählen", cancel: "Abbrechen", ok: "OK",
       dSource: "Quelle", dDevice: "Gerät", dRecv: "Empfänger", dTime: "Zeit", dLabel: "Nummern-Label", dStatus: "Status",
       notSet: "(nicht gesetzt)", read: "Gelesen", starredPrefix: "★ Favorit · ",
-      pin: "Anheften", unpin: "Loslösen", pinOnly: "📌 Angeheftet", pinTip: "Nur angeheftete", pinItemTip: "Anheften", pinFail: "Anheften fehlgeschlagen", tagStarred: "Markiert", tagPinned: "Angeheftet",
+      pin: "Anheften", unpin: "Loslösen", pinOnly: "Angeheftet", pinTip: "Nur angeheftete", pinItemTip: "Anheften", pinFail: "Anheften fehlgeschlagen", tagStarred: "Markiert", tagPinned: "Angeheftet",
       star: "Favorit", unstar: "Favorit entfernen", markUnread: "Als ungelesen markieren", copyAll: "Text kopieren",
       call: "Anrufen", setLabel: "Nummern-Label",
       labelPrompt: "Label für {n} (leer lassen zum Entfernen)",
@@ -4355,7 +4384,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       srcTip: "Filtrar por origem", allSources: "Origem", srcSms: "SMS", srcNotify: "Notificação",
       rangeTip: "Filtrar por período", allTime: "Período", d7: "Últimos 7 dias", d30: "Últimos 30 dias",
       autoCopy: "Copiar códigos automaticamente", codeCopyBtn: "Botão copiar código", notifyOn: "Alertas em segundo plano", soundOn: "Som",
-      starOnly: "★ Favoritos", unreadOnly: "● Não lidas", starTip: "Somente favoritas", unreadTip: "Somente não lidas",
+      starOnly: "Favoritos", unreadOnly: "● Não lidas", starTip: "Somente favoritas", unreadTip: "Somente não lidas",
       select: "Selecionar", selectTip: "Entrar na seleção múltipla", done: "Concluído",
       clear: "Limpar", clearTip: "Limpar o filtro atual (exclusão suave)",
       exportCsv: "Exportar CSV", exportJson: "Exportar JSON",
@@ -4375,7 +4404,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       selCount: "{n} selecionadas", selAll: "Selecionar página", cancel: "Cancelar", ok: "OK",
       dSource: "Origem", dDevice: "Dispositivo", dRecv: "Destinatário", dTime: "Hora", dLabel: "Etiqueta do número", dStatus: "Status",
       notSet: "(não definido)", read: "Lida", starredPrefix: "★ Favorita · ",
-      pin: "Fixar", unpin: "Desafixar", pinOnly: "📌 Fixadas", pinTip: "Somente fixadas", pinItemTip: "Fixar", pinFail: "Falha ao fixar", tagStarred: "Favoritado", tagPinned: "Fixado",
+      pin: "Fixar", unpin: "Desafixar", pinOnly: "Fixadas", pinTip: "Somente fixadas", pinItemTip: "Fixar", pinFail: "Falha ao fixar", tagStarred: "Favoritado", tagPinned: "Fixado",
       star: "Favoritar", unstar: "Remover favorito", markUnread: "Marcar como não lida", copyAll: "Copiar texto",
       call: "Ligar", setLabel: "Etiqueta do número",
       labelPrompt: "Etiqueta para {n} (deixe vazio para limpar)",
@@ -8926,6 +8955,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       if (!b) return;
       close();
       if (b.id === "mnurefresh") refreshAll();
+      else if (b.id === "mnusel") setSelectMode(true, { moveFocus: true });
       else if (b.id === "mnustats") openStats();
       else if (b.id === "mnuset") openSettingsCenter("display");
       else if (b.id === "mnulogout") doLogoutConfirm();
@@ -10258,13 +10288,16 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     }
     syncSelBoxes();
     updateSelBar();
-    /* UX-09 U9-03：操作条出现/消失会让焦点失去落点，键盘用户必须能被带到可操作处 */
+    /* UX-09 U9-03：操作条出现/消失会让焦点失去落点，键盘用户必须能被带到可操作处。
+       UX-18：窄屏工具栏上的 #selmodebtn 已隐藏（改走长按/⋯ 菜单），对 display:none 的元素
+       调 focus() 只会静默失败、焦点掉回 body —— 此时退到列表首张卡片（tabindex=0）。 */
     var back = opts && opts.focusFrom;
     if (state.selectMode && opts && opts.moveFocus) {
       var all = $("selall");
       if (all) { try { all.focus(); } catch (e) {} }
     } else if (!state.selectMode && back) {
-      try { back.focus(); } catch (e) {}
+      var target = (back.offsetParent !== null) ? back : $("list").querySelector(".card");
+      if (target) { try { target.focus(); } catch (e) {} }
     }
   }
   function toggleSelCard(card) {
