@@ -69,7 +69,7 @@ function escAttr(s) {
 function jsStr(s) {
   return JSON.stringify(s).replace(/</g, "\\u003c");
 }
-const APP_VERSION = "v1.1.8";
+const APP_VERSION = "v1.1.9";
 
 /* 把页面模板中的占位标记替换为实际配置值（用函数替换器，避免值里含 $& 等特殊序列被误解释） */
 function renderHtml(html, env) {
@@ -3030,14 +3030,9 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .filter-row { display: flex; align-items: center; gap: 6px; flex: 1 1 320px; min-width: 0; flex-wrap: wrap; }
   .chip { border: 1px solid var(--ds-color-border); background: var(--ds-color-bg-surface); border-radius: 7px;
           padding: 5px 11px; color: var(--ds-color-text-secondary); font-size: 12px; min-height: 30px; cursor: pointer;
-          display: inline-flex; align-items: center; gap: 5px;
+          display: inline-flex; align-items: center;
           transition: background var(--ds-duration-fast) var(--ds-ease), border-color var(--ds-duration-fast) var(--ds-ease),
                       color var(--ds-duration-fast) var(--ds-ease); }
-  /* 图标型视图标签（收藏/置顶）：窄屏只留图标，桌面保留「图标 + 文字」 */
-  .chip-ico { display: inline-flex; align-items: center; }
-  .chip-ico svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.5;
-                  stroke-linecap: round; stroke-linejoin: round; }
-  #fstar.active .chip-ico svg { fill: currentColor; }
   @media (hover: hover) { .chip:hover { border-color: var(--ds-color-primary); color: var(--ds-color-primary); } }
   .chip.active { background: var(--ds-color-primary-subtle); border-color: var(--ds-color-primary);
           color: var(--ds-color-primary); font-weight: 600; box-shadow: inset 0 0 0 1px var(--ds-color-primary); }
@@ -3283,10 +3278,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     .filter-tabs { flex: 0 0 auto; flex-wrap: wrap; gap: 5px; overflow: visible; }
     /* UX-07B：主要触控入口统一 44×44 命中区（视觉仍紧凑，靠内边距撑开热区） */
     .filter-tabs .chip { flex: 0 0 auto; min-height: 44px; padding: 0 10px; }
-    /* UX-18：收藏/置顶两个视图标签在窄屏只留图标（文字由 title / aria-label 提供），
-       五个标签因此能排进 390 的一行；纯文字的三态标签不受影响 */
-    .filter-tabs #fstar, .filter-tabs #fpin { padding: 0; min-width: 44px; justify-content: center; }
-    .filter-tabs #fstar .chip-lbl, .filter-tabs #fpin .chip-lbl { display: none; }
     .toolbar-title { align-self: center; margin-left: auto; padding-left: 6px; }
     .filter-row { flex: 0 0 auto; flex-wrap: nowrap; width: 100%; }
     .filter-row .searchwrap { flex: 1 1 auto; width: auto; min-width: 0; margin-left: 0; }
@@ -3499,6 +3490,32 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     .filter-row { grid-column: 1 / -1; grid-row: 2; }
     .filter-row .searchwrap { flex: 1 1 auto; }
   }
+  /* ===== UX-19：桌面工具栏单行（≥901）=====
+     旧版唯一一条 .toolbar/.pager 的 flex-wrap:wrap 让工具栏在 1366 下把「多选 + 刷新」
+     挤到第二行；而工具栏里的「9 条」计数与「全部 (9)」下拉、分页行完全重复。
+     现在：计数在桌面让位，三个下拉限宽，搜索框成为唯一伸缩项 —— 所有语言都保持一行。 */
+  @media (min-width: 901px) {
+    .toolbar, .filters, .filter-tabs, .filter-row { flex-wrap: nowrap; }
+    .filter-row { flex: 1 1 0; min-width: 0; }
+    .filter-row .searchwrap { flex: 1 1 120px; min-width: 88px; }
+    .toolbar-title #stat { display: none; }
+    .filter-row select { flex: 0 0 auto; max-width: 84px; padding: 5px 6px; }
+    .filter-row #dev { max-width: 108px; }
+    /* 长文案语种：de「Ungelesen / Angeheftet / Quelle」、es/fr/pt 的「Favoritos / Épinglés…」
+       比中英日长 30–50%，收紧字号与内边距，把宽度还给搜索框，保证一行不换行 */
+    :root:is([lang="de"], [lang="es"], [lang="fr"], [lang="pt-BR"]) .filter-tabs .chip { padding: 5px 8px; font-size: 11.5px; }
+    :root:is([lang="de"], [lang="es"], [lang="fr"], [lang="pt-BR"]) .filter-row select { max-width: 80px; }
+    :root[lang="de"] .filter-row select { max-width: 76px; }
+    /* 韩语标签为多音节长词（즐겨찾기 / 읽지 않음），同样收一档 */
+    :root[lang="ko"] .filter-tabs .chip { padding: 5px 9px; }
+    /* 1024 及以下，长文案语种的「刷新」文字让位给搜索框（图标 + title/aria-label 仍可达，
+       ≥1600 双栏下本来就是图标形态） */
+    @media (max-width: 1100px) {
+      :root:is([lang="de"], [lang="es"], [lang="fr"], [lang="pt-BR"]) .toolbar-refresh { width: 34px; padding: 0;
+        display: inline-flex; align-items: center; justify-content: center; }
+      :root:is([lang="de"], [lang="es"], [lang="fr"], [lang="pt-BR"]) .toolbar-refresh .rf-txt { display: none; }
+    }
+  }
   /* ===== UX-09 U9-04：平板 / 手机的多选操作条 =====
      旧实现把 8 个控件塞进一条 nowrap + overflow-x 的胶囊里：390、768 下「取消」被推到视口之外，
      只能横向滑动才找得到，等于取消入口在这些宽度上不可见。现改为两行网格：
@@ -3631,8 +3648,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
             <button class="chip active" id="fall" type="button" data-i18n="tabAll">全部</button>
             <button class="chip" id="funread" type="button"><span data-i18n="unread">未读</span><span class="chipcount" id="unreadcount" hidden>0</span></button>
             <button class="chip" id="fread" type="button" data-i18n="read">已读</button>
-            <button class="chip" id="fstar" type="button" data-i18n-title="starTip" data-i18n-aria="starOnly" title="只看收藏" aria-label="收藏"><span class="chip-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M8 2.7l1.7 3.5 3.8.5-2.8 2.7.7 3.8L8 11.4l-3.4 1.8.7-3.8L2.5 6.7l3.8-.5z"/></svg></span><span class="chip-lbl" data-i18n="starOnly">收藏</span></button>
-            <button class="chip" id="fpin" type="button" data-i18n-title="pinTip" data-i18n-aria="pinOnly" title="只看置顶" aria-label="置顶"><span class="chip-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M6.1 2.7h3.8"/><path d="M6.7 2.7v3.1L5.2 8.3h5.6L9.3 5.8V2.7"/><path d="M8 8.3v5"/></svg></span><span class="chip-lbl" data-i18n="pinOnly">置顶</span></button>
+            <button class="chip" id="fstar" type="button" data-i18n-title="starTip" data-i18n-aria="starOnly" title="只看收藏" aria-label="收藏"><span class="chip-lbl" data-i18n="starOnly">收藏</span></button>
+            <button class="chip" id="fpin" type="button" data-i18n-title="pinTip" data-i18n-aria="pinOnly" title="只看置顶" aria-label="置顶"><span class="chip-lbl" data-i18n="pinOnly">置顶</span></button>
             <span class="toolbar-title"><span class="sr-only" data-i18n="listTitle">短信列表</span><span id="stat"></span></span>
           </div>
           <div class="filter-row">
@@ -3657,7 +3674,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
           </div>
         </div>
         <button class="tbtn toolbar-sel" id="selmodebtn" type="button" aria-pressed="false" data-i18n="selModeBtn" data-i18n-title="selModeTip" data-i18n-aria="selModeTip" title="多选消息（也可右键或长按消息）" aria-label="多选消息（也可右键或长按消息）">多选</button>
-        <button class="tbtn toolbar-refresh" id="refreshbtn" type="button" data-i18n-title="refresh" title="刷新"><span class="rf-ico" aria-hidden="true">↻</span><span class="rf-txt" data-i18n="refresh">刷新</span></button>
+        <button class="tbtn toolbar-refresh" id="refreshbtn" type="button" data-i18n-title="refresh" data-i18n-aria="refresh" title="刷新" aria-label="刷新"><span class="rf-ico" aria-hidden="true">↻</span><span class="rf-txt" data-i18n="refresh">刷新</span></button>
       </div>
 
       <div class="statbar" id="statbar" hidden>
@@ -5961,7 +5978,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     en: {
       pageSub: "From post to post, like shooting stars.",
       listTitle: "Messages", refresh: "Refresh", settingsOverview: "Settings overview", openSettings: "Open settings",
-      quickOverview: "Quick overview", viewStats: "Stats", selectHint: "Use Multi-select in the toolbar, or right-click / long-press a message", selModeBtn: "Multi-select", selModeTip: "Enter or exit multi-select", selBarAria: "Batch actions",
+      quickOverview: "Quick overview", viewStats: "Stats", selectHint: "Use Select in the toolbar, or right-click / long-press a message", selModeBtn: "Select", selModeTip: "Enter or exit multi-select", selBarAria: "Batch actions",
       selAllList: "Select current list", tagVerify: "Verification code", allDevices: "All devices",
       scLanguage: "Language", scLang: "Language", scLangHelp: "",
       scPageSize: "Pagination", scPerPage: "Items per page", scPageSizeHelp: "",
@@ -5987,7 +6004,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     ja: {
       pageSub: "駅から駅へ、星のように駆け流れる",
       listTitle: "メッセージ一覧", refresh: "更新", settingsOverview: "設定の概要", openSettings: "設定センターを開く",
-      quickOverview: "クイック概要", viewStats: "統計", selectHint: "ツールバーの「複数選択」、右クリックまたは長押しで複数選択", selModeBtn: "複数選択", selModeTip: "複数選択モードの開始／終了", selBarAria: "一括操作",
+      quickOverview: "クイック概要", viewStats: "統計", selectHint: "ツールバーの「選択」、右クリックまたは長押しで複数選択", selModeBtn: "選択", selModeTip: "複数選択モードの開始／終了", selBarAria: "一括操作",
       selAllList: "現在の一覧を選択", tagVerify: "認証コード", allDevices: "すべての端末",
       scLanguage: "表示言語", scLang: "言語", scLangHelp: "",
       scPageSize: "ページ設定", scPerPage: "1ページの件数", scPageSizeHelp: "",
@@ -6013,7 +6030,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     ko: {
       pageSub: "역에서 역으로, 별처럼 흐르는 발걸음",
       listTitle: "메시지 목록", refresh: "새로고침", settingsOverview: "설정 개요", openSettings: "설정 센터 열기",
-      quickOverview: "빠른 개요", viewStats: "통계", selectHint: "도구 모음의 '다중 선택'을 누르거나 마우스 오른쪽 버튼·길게 눌러 여러 개 선택", selModeBtn: "다중 선택", selModeTip: "다중 선택 모드 시작/종료", selBarAria: "일괄 작업",
+      quickOverview: "빠른 개요", viewStats: "통계", selectHint: "도구 모음의 '선택'을 누르거나 마우스 오른쪽 버튼·길게 눌러 여러 개 선택", selModeBtn: "선택", selModeTip: "다중 선택 모드 시작/종료", selBarAria: "일괄 작업",
       selAllList: "현재 목록 선택", tagVerify: "인증 코드", allDevices: "모든 기기",
       scLanguage: "표시 언어", scLang: "언어", scLangHelp: "",
       scPageSize: "페이지 설정", scPerPage: "페이지당 항목 수", scPageSizeHelp: "",
@@ -6039,7 +6056,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     es: {
       pageSub: "De posta en posta, como estrellas fugaces.",
       listTitle: "Mensajes", refresh: "Actualizar", settingsOverview: "Resumen de ajustes", openSettings: "Abrir ajustes",
-      quickOverview: "Resumen rápido", viewStats: "Estadísticas", selectHint: "Usa «Multiselección» en la barra, o clic derecho / pulsación larga", selModeBtn: "Multiselección", selModeTip: "Entrar o salir del modo multiselección", selBarAria: "Acciones en lote",
+      quickOverview: "Resumen rápido", viewStats: "Estadísticas", selectHint: "Usa «Selección» en la barra, o clic derecho / pulsación larga", selModeBtn: "Selección", selModeTip: "Entrar o salir del modo multiselección", selBarAria: "Acciones en lote",
       selAllList: "Seleccionar lista actual", tagVerify: "Código de verificación", allDevices: "Todos los dispositivos",
       scLanguage: "Idioma", scLang: "Idioma", scLangHelp: "",
       scPageSize: "Paginación", scPerPage: "Elementos por página", scPageSizeHelp: "",
@@ -6065,7 +6082,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     fr: {
       pageSub: "De relais en relais, comme un torrent d'étoiles.",
       listTitle: "Messages", refresh: "Actualiser", settingsOverview: "Aperçu des réglages", openSettings: "Ouvrir les réglages",
-      quickOverview: "Aperçu rapide", viewStats: "Statistiques", selectHint: "Utilisez « Sélection multiple » dans la barre, ou clic droit / appui long", selModeBtn: "Sélection multiple", selModeTip: "Entrer ou quitter la sélection multiple", selBarAria: "Actions groupées",
+      quickOverview: "Aperçu rapide", viewStats: "Statistiques", selectHint: "Utilisez « Sélection » dans la barre, ou clic droit / appui long", selModeBtn: "Sélection", selModeTip: "Entrer ou quitter la sélection multiple", selBarAria: "Actions groupées",
       selAllList: "Sélectionner la liste actuelle", tagVerify: "Code de vérification", allDevices: "Tous les appareils",
       scLanguage: "Langue", scLang: "Langue", scLangHelp: "",
       scPageSize: "Pagination", scPerPage: "Éléments par page", scPageSizeHelp: "",
@@ -6091,7 +6108,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     de: {
       pageSub: "Von Station zu Station, wie ein Sternenstrom.",
       listTitle: "Nachrichten", refresh: "Aktualisieren", settingsOverview: "Einstellungsübersicht", openSettings: "Einstellungen öffnen",
-      quickOverview: "Kurzübersicht", viewStats: "Statistik", selectHint: "„Mehrfachauswahl“ in der Werkzeugleiste oder Rechtsklick / langes Drücken", selModeBtn: "Mehrfachauswahl", selModeTip: "Mehrfachauswahl starten oder beenden", selBarAria: "Sammelaktionen",
+      quickOverview: "Kurzübersicht", viewStats: "Statistik", selectHint: "„Auswahl“ in der Werkzeugleiste oder Rechtsklick / langes Drücken", selModeBtn: "Auswahl", selModeTip: "Mehrfachauswahl starten oder beenden", selBarAria: "Sammelaktionen",
       selAllList: "Aktuelle Liste auswählen", tagVerify: "Bestätigungscode", allDevices: "Alle Geräte",
       scLanguage: "Sprache", scLang: "Sprache", scLangHelp: "",
       scPageSize: "Seitengröße", scPerPage: "Einträge pro Seite", scPageSizeHelp: "",
@@ -6117,7 +6134,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     "pt-BR": {
       pageSub: "De estação em estação, como estrelas cadentes.",
       listTitle: "Mensagens", refresh: "Atualizar", settingsOverview: "Visão dos ajustes", openSettings: "Abrir ajustes",
-      quickOverview: "Visão rápida", viewStats: "Estatísticas", selectHint: "Use «Seleção múltipla» na barra, ou clique direito / toque e segure", selModeBtn: "Seleção múltipla", selModeTip: "Entrar ou sair da seleção múltipla", selBarAria: "Ações em lote",
+      quickOverview: "Visão rápida", viewStats: "Estatísticas", selectHint: "Use «Seleção» na barra, ou clique direito / toque e segure", selModeBtn: "Seleção", selModeTip: "Entrar ou sair da seleção múltipla", selBarAria: "Ações em lote",
       selAllList: "Selecionar lista atual", tagVerify: "Código de verificação", allDevices: "Todos os dispositivos",
       scLanguage: "Idioma", scLang: "Idioma", scLangHelp: "",
       scPageSize: "Paginação", scPerPage: "Itens por página", scPageSizeHelp: "",

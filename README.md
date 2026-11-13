@@ -24,7 +24,7 @@ SMSToWeb collects messages from any channel — SMS forwarders, app notification
 
 ## Screenshots
 
-> Screenshots show the **English UI with sample data** (v1.1.8). Change the interface language under **Settings → Display → Language**. The mobile shot is a 390px viewport.
+> Screenshots show the **English UI with sample data** (v1.1.9). Change the interface language under **Settings → Display → Language**. The mobile shot is a 390px viewport.
 
 **Message center overview**
 

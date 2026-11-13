@@ -2162,11 +2162,25 @@ async function main() {
     && !/\.filter-tabs \{ flex: 0 0 auto; flex-wrap: nowrap[^}]*overflow-x: auto/.test(mobileCss)
     && !/padding-right: 58px/.test(mobileCss),
     "UX-18：窄屏工具栏不再横滑 —— 多选改由长按/右键进入（⋯ 菜单留键盘入口），标签行换行不截断");
-  /* UX-18：收藏/置顶标签拆成「图标 + 文案」，窄屏只留图标，五个标签才排得进 390 的一行 */
-  check(/class="chip-ico"/.test(pageHtml) && /class="chip-lbl" data-i18n="starOnly"/.test(pageHtml)
-    && /#fstar \.chip-lbl, \.filter-tabs #fpin \.chip-lbl \{ display: none; \}/.test(pageHtml)
+  /* UX-19（用户标注）：收藏/置顶标签回到纯文字；桌面工具栏压成一行 */
+  check(/<span class="chip-lbl" data-i18n="starOnly">收藏<\/span>/.test(pageHtml)
+    && /<span class="chip-lbl" data-i18n="pinOnly">置顶<\/span>/.test(pageHtml)
+    && !/class="chip-ico"/.test(pageHtml)
+    && !/chip-lbl \{ display: none/.test(pageHtml)
     && !/starOnly: "★ /.test(uxSrc) && !/pinOnly: "📌 /.test(uxSrc),
-    "UX-18：收藏/置顶视图标签改用线性图标，窄屏只留图标（文案进 title / aria-label）");
+    "UX-19-①：收藏/置顶视图标签只留文字，不再挂图标（字符图标也不会随语言混回来）");
+  check(/@media \(min-width: 901px\) \{[\s\S]{0,1200}\.toolbar, \.filters, \.filter-tabs, \.filter-row \{ flex-wrap: nowrap; \}/.test(pageHtml)
+    && /\.filter-row \{ flex: 1 1 0; min-width: 0; \}/.test(pageHtml)
+    && /\.filter-row select \{ flex: 0 0 auto; max-width: 84px; padding: 5px 6px; \}/.test(pageHtml)
+    && /\.filter-row #dev \{ max-width: 108px; \}/.test(pageHtml)
+    && /\.toolbar-title #stat \{ display: none; \}/.test(pageHtml)
+    && /:root:is\(\[lang="de"\], \[lang="es"\], \[lang="fr"\], \[lang="pt-BR"\]\) \.filter-tabs \.chip/.test(pageHtml)
+    && /:root\[lang="de"\] \.filter-row select \{ max-width: 76px; \}/.test(pageHtml)
+    && /:root\[lang="ko"\] \.filter-tabs \.chip/.test(pageHtml),
+    "UX-19-②③：桌面工具栏单行（计数让位、下拉限宽），长文案语种按语言单独收紧");
+  check((pageHtml.match(/\bselModeBtn: "/g) || []).length === 9
+    && !/selModeBtn: "Mehrfachauswahl"/.test(uxSrc) && !/selModeBtn: "Multi-select"/.test(uxSrc),
+    "UX-19-③：九语种「多选」按钮文案统一缩短为单词式（Auswahl / Select / Sélection…），给搜索框留宽度");
   /* UX-16（EditHere 第 3 轮标注）：标题行 = 身份 + 状态胶囊；时间下移第二行；第二行不再重复号码 */
   check(/class="detail-tags"/.test(pageHtml) && /class="dpill dpill--type"/.test(pageHtml)
     && /dpill--star/.test(pageHtml) && /dpill--pin/.test(pageHtml)
