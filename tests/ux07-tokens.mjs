@@ -244,9 +244,18 @@ t("F6 未定义变量 --danger 的历史 bug 已修",
 /* ================= G. 硬编码色值预算 ================= */
 /* 允许保留的例外：邮件通知 HTML（自包含，不能依赖页面变量）、PWA manifest、meta theme-color 初始值 */
 const lines = SRC.split("\n");
-/* ENG-01 OPT-1 在 renderHtml 后新增 serveHtml（+36 行），邮件模板/manifest 行号整体后移；
-   白名单口径不变：邮件模板 + manifest 的硬编码色值（meta 初始值由 stray≤2 兜底） */
-const OUT_OK_RANGES = [[1210, 1245], [1800, 1830]]; /* 邮件模板 + manifest */
+/* 白名单口径不变：邮件模板（自包含 HTML，不能依赖页面变量）+ PWA manifest 的硬编码色值；
+   meta theme-color 初始值由 stray≤2 兜底。
+   用内容锚点算区间而不是写死行号——上方每加几行 CSS，写死的行号就会把邮件模板挤出白名单，
+   表现为「明明没动邮件模板却 G1 失败」的假阳性。 */
+const anchorLine = (needle, fallback) => {
+  const i = lines.findIndex((l) => l.indexOf(needle) !== -1);
+  return i === -1 ? fallback : i + 1;
+};
+const MAIL_FROM = anchorLine("max-width:560px;margin:0 auto;padding:24px;", 1210) - 20;
+const MAIL_TO = anchorLine("由 SMSToWeb 自动发送", 1245) + 2;
+const MANIFEST = anchorLine('background_color: "#', 1800);
+const OUT_OK_RANGES = [[MAIL_FROM, MAIL_TO], [MANIFEST - 6, MANIFEST + 6]];
 let stray = [];
 lines.forEach((l, i) => {
   const n = i + 1;

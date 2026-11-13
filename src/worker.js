@@ -69,7 +69,7 @@ function escAttr(s) {
 function jsStr(s) {
   return JSON.stringify(s).replace(/</g, "\\u003c");
 }
-const APP_VERSION = "v1.1.6";
+const APP_VERSION = "v1.1.7";
 
 /* 把页面模板中的占位标记替换为实际配置值（用函数替换器，避免值里含 $& 等特殊序列被误解释） */
 function renderHtml(html, env) {
@@ -3104,14 +3104,19 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   /* 未读正文加粗加深，已读保持当前浅色，便于一眼区分 */
   .card.unread .content.summary { font-weight: 600; color: var(--ds-color-text); }
   .card.unread .sender { font-weight: 700; }
-  .msg-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; flex-wrap: wrap; }
-  /* UX-02B：收藏 / 查看全文 / 删除常驻可见（不再只靠长按·右键），删除保留既有「撤销」保护 */
+  .msg-actions { display: flex; align-items: center; gap: 2px; flex-shrink: 0; flex-wrap: wrap; }
+  /* UX-02B：收藏 / 查看全文 / 删除常驻可见（不再只靠长按·右键），删除保留既有「撤销」保护。
+     UX-17：四个操作统一为 16px 线性图标方块按钮（原来星号/图钉是字符与 emoji、删除是文字，
+     一行里三种视觉重量），尺寸一致、间距一致，一眼就能扫完。 */
   .msg-actions :is(.star, .pin), .msg-actions .del, .msg-actions .more { border: 0; background: none;
                                           color: var(--ds-color-text-tertiary); cursor: pointer;
-                                          font-size: 12px; padding: 2px 8px; border-radius: 6px; margin: 0;
-                                          min-height: 30px; display: inline-flex; align-items: center;
+                                          width: 30px; height: 30px; padding: 0; border-radius: 8px; margin: 0;
+                                          display: inline-flex; align-items: center; justify-content: center;
                                           transition: background var(--ds-duration-fast) var(--ds-ease), color var(--ds-duration-fast) var(--ds-ease); }
+  .msg-actions .ico { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor;
+                      stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
   .msg-actions :is(.star, .pin).on { color: var(--ds-color-warning); }
+  .msg-actions .star.on .ico { fill: currentColor; }
   .msg-actions :is(.star, .pin):hover, .msg-actions .del:hover, .msg-actions .more:hover { background: var(--ds-color-surface-hover); }
   .msg-actions .pin.on { color: var(--ds-color-primary); }
   .msg-actions .del { color: var(--muted); }
@@ -3209,16 +3214,46 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .detail-metarow { display: flex; flex-wrap: wrap; align-items: center; gap: 0 6px; font-size: 12px;
                     color: var(--ds-color-text-secondary); line-height: 1.6; margin-bottom: 2px; }
   .detail-metarow .sep { color: var(--ds-color-border); }
+  /* 归属地异步回填：只有真的查到内容才带分隔点，未命中时不留悬空的「·」 */
+  .detail-metarow .m-area:not(:empty)::before { content: "· "; color: var(--ds-color-border); }
   .detail-metarow .m-strong { color: var(--text); font-weight: 600; }
   .detail-metarow .m-num { font-variant-numeric: tabular-nums; }
   .detail-metarow .m-star { color: var(--ds-color-warning); font-weight: 700; }
+  /* UX-16（EditHere 标注 ④⑤）：标题行 = 身份 + 状态胶囊（类型 / 已读 / 收藏 / 置顶），
+     日期时间下移到第二行；胶囊用统一小圆角，状态一眼可读。 */
+  .detail-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; }
+  .detail-head h3 { margin: 0; min-width: 0; }
+  .detail-tags { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+  .dpill { display: inline-flex; align-items: center; gap: 3px; height: 18px; padding: 0 7px;
+           border: 1px solid var(--ds-color-border-subtle); border-radius: 999px;
+           background: var(--ds-color-bg-subtle); color: var(--ds-color-text-secondary);
+           font-size: 10.5px; font-weight: 600; line-height: 1; white-space: nowrap; }
+  .dpill--type { border-color: var(--ds-code-border); background: var(--ds-code-bg); color: var(--ds-code-text); }
+  .dpill--unread { border-color: var(--ds-color-primary); background: var(--ds-color-primary-subtle);
+                   color: var(--ds-color-primary); }
+  .dpill--star::before { content: "\2605"; color: var(--ds-color-warning); }
+  .dpill--pin::before { content: "\1F4CC"; font-size: 9px; }
   /* 底部操作统一单行：不换行，空间不足时横向滚动（触屏滑动 / 鼠标滚轮） */
   .modal-foot { display: flex; align-items: center; justify-content: flex-start; gap: 8px; flex-wrap: nowrap;
                 overflow-x: auto; scrollbar-width: none; -webkit-overflow-scrolling: touch;
                 padding: 12px 18px 16px; border-top: 1px solid var(--row-border); }
   .modal-foot::-webkit-scrollbar { display: none; }
-  .modal-foot .foot-left, .modal-foot .foot-right { display: flex; gap: 6px; align-items: center; flex-wrap: nowrap; flex: 0 0 auto; }
-  .modal-foot .foot-right { margin-left: auto; }
+  /* UX-16（标注 ①②③）：底部两级结构——
+     第一级图标操作条（次要操作图标化，高度 36-44px），复制验证码只在其最右出现；
+     第二级底部行：设备·SIM 来源在左，删除 / 关闭在右。 */
+  .foot-rail { display: flex; align-items: center; gap: 4px; flex: 1 1 auto; min-width: 0; flex-wrap: wrap; }
+  .foot-rail .rail-code { margin-left: auto; }
+  .foot-bottom { display: flex; align-items: center; gap: 8px; flex: 0 0 100%; width: 100%;
+                 margin-top: 6px; padding-top: 8px; border-top: 1px solid var(--row-border); }
+  .foot-meta { min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+               font-size: 11px; color: var(--ds-color-text-secondary);
+               font-variant-numeric: tabular-nums; }
+  .tbtn--ic { display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+              height: 36px; min-height: 36px; padding: 0 10px; white-space: nowrap; }
+  .tbtn--ic .ico { width: 15px; height: 15px; flex: none; fill: none; stroke: currentColor;
+                   stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+  .tbtn--ic .lbl { font-size: 12px; }
+  .dp-foot { flex-wrap: wrap; }
   @media (max-width: 660px) {
     .wrap { padding: 14px 12px 30px; }
     .topbar { gap: 8px; margin-bottom: 8px; }
@@ -3260,20 +3295,21 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
               text-align: center; line-height: 1.25; border-radius: var(--ds-radius-md); }
     .modal { align-items: flex-end; padding: 0; }
     .sheet { border-radius: 18px 18px 0 0; max-height: 88dvh; }
-    /* 详情弹窗按钮（UX-08 重评）：次要操作由「单行横滑」改为「自动换行的均分按钮」——
-       横滑在真机上可发现性差、易与页面纵向滚动冲突，且会把操作藏在视口外；
-       现在 390px 下 4 个次要操作一行放得下（每个 ≥44px 高），放不下时换行而不是隐藏。
-       主操作（删除/标为未读/关闭）仍在最下一行靠右常驻。 */
-    .modal-foot { flex-direction: column; flex-wrap: nowrap; align-items: stretch; gap: 8px;
+    /* 详情弹窗底部（UX-16 重设计）：次要操作图标化排成一行（标注 ②：原 4 列文字格占高太多），
+       图标保 44px 命中区、文字标签隐藏（title / aria-label / sr-only 仍可读）；
+       底部行左为设备·SIM 来源（标注 ①），右为删除与关闭。整体由三行 ~200px 压到两行 ~104px。 */
+    .modal-foot { flex-direction: column; flex-wrap: wrap; align-items: stretch; gap: 0;
                   overflow: visible; scroll-snap-type: none;
-                  padding: 10px 14px calc(12px + env(safe-area-inset-bottom, 0px)); }
-    .modal-foot .foot-left { width: 100%; flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 8px; }
-    .modal-foot .foot-right { width: 100%; margin-left: 0; flex: 0 0 auto; display: flex; flex-wrap: nowrap;
-                  gap: 8px; justify-content: flex-end; }
-    .modal-foot .foot-left .tbtn { flex: 1 1 auto; min-width: 72px; }
-    .modal-foot .tbtn { width: auto; min-width: 72px; min-height: 44px;
-                        padding: 0 12px; display: inline-flex;
-                        align-items: center; justify-content: center; text-align: center; }
+                  padding: 8px 12px calc(10px + env(safe-area-inset-bottom, 0px)); }
+    .modal-foot .foot-rail { width: 100%; flex: 0 0 auto; flex-wrap: nowrap; gap: 4px; overflow-x: auto;
+                             scrollbar-width: none; }
+    .modal-foot .foot-rail::-webkit-scrollbar { display: none; }
+    .modal-foot .tbtn--ic { width: 44px; min-width: 44px; height: 44px; min-height: 44px; padding: 0; }
+    .modal-foot .tbtn--ic .lbl { display: none; }
+    .modal-foot .tbtn--ic:active { background: var(--ds-color-surface-hover); }
+    .modal-foot .foot-bottom { flex-wrap: nowrap; gap: 6px; padding-top: 8px; margin-top: 8px; }
+    .modal-foot .foot-bottom .tbtn { width: auto; min-width: 0; padding: 0 14px; min-height: 40px; }
+    .modal-foot .tbtn { display: inline-flex; align-items: center; justify-content: center; text-align: center; }
     /* 设置底部操作：状态条独占一行，保存主按钮整行，恢复默认/取消并排 */
     .sc-foot { gap: 8px; margin-top: 14px; }
     .sc-foot .sc-status { flex: 1 1 100%; order: -1; min-height: 16px; }
@@ -3312,7 +3348,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   /* 验证码胶囊已移至 .rail-code（卡片右侧），脚注行仅保留设备标记 */
   .msg-foot .devchip { font-size: 11px; color: var(--ds-color-text-secondary); white-space: nowrap;
                        overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-  .msg-foot .devchip::before { content: "·"; margin-right: 5px; opacity: .7; }
   .msg-rail :is(.star, .pin), .msg-rail .del { font-size: 12px; }
   .undot { width: 7px; height: 7px; border-radius: 50%; background: var(--ds-color-unread); flex: none; }
   .tag.srctag { background: var(--ds-color-bg-subtle); color: var(--muted); }
@@ -3384,14 +3419,39 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     .filters.adv .filter-row select { display: block; }
     .statbar { padding: 8px 12px; gap: 12px; }
     .statbar b { font-size: 14px; }
-    .card { grid-template-columns: minmax(0, 1fr); padding: 12px 8px; }
+    .card { padding: 12px 8px; }
     /* 未读标线的位置统一由 calc(8px - var(--list-pad)) 决定，窄屏不再单独覆盖 */
     .msg-foot { gap: 6px; }
-    /* 操作列与验证码胶囊同处卡片右下角（右手操作区）；脚注行按是否含码预留高度，正文不被压住 */
-    .msg-rail { position: absolute; right: 4px; bottom: 4px; }
-    .msg-foot { min-height: 48px; }
-    .card:has(.rail-code) .msg-foot { min-height: 84px; }
-    .msg-actions :is(.star, .pin), .msg-actions .del, .msg-actions .more { min-width: 44px; min-height: 44px; padding: 4px 6px; }
+    /* UX-17：窄屏把操作列从「绝对定位悬浮在右下角」改回文档流，与验证码胶囊、设备脚注
+       并成卡片底部同一行。卡片高度由内容决定，不再为了给验证码让位固定留 84px 空白
+       （旧做法会让正文下方出现一大片空白、验证码胶囊孤零零吊在卡片底边）。 */
+    .card { display: flex; flex-wrap: wrap; align-items: center; }
+    /* 让 .msg-top / .content / .msg-foot 直接成为卡片这一行的成员，才能和设备脚注排在同一行 */
+    .msg-main { display: contents; }
+    .msg-main > .msg-top { order: 10; flex: 1 0 100%; }
+    .msg-main > .content.summary { order: 20; flex: 1 0 100%; margin-top: 4px; }
+    /* 操作列本身也拆开，两块落到同一行：设备脚注（左）· 验证码胶囊 · 图标组（右） */
+    .msg-rail { display: contents; }
+    /* basis 取 0：设备名再长也不会把图标组挤到下一行（超出部分走 ellipsis） */
+    .msg-main > .msg-foot { order: 30; flex: 1 1 0; min-width: 0; margin-top: 8px; min-height: 0; }
+    .msg-rail > .rail-code { order: 40; flex: 0 0 auto; justify-content: flex-start; margin: 8px 0 0 6px; }
+    .msg-rail > .msg-actions { order: 50; flex: 0 0 auto; margin: 8px 0 0 auto; gap: 0; flex-wrap: nowrap; }
+    .msg-rail > .msg-actions .ico { width: 17px; height: 17px; }
+    /* 胶囊高度与图标格对齐成 40px，否则底部一行会一半 46 一半 40，视觉上仍是「不齐」 */
+    .msg-rail > .rail-code .code-chip { height: 40px; }
+    .msg-rail > .rail-code .code-chip .code-val { padding: 0 10px; font-size: 13px; }
+    .msg-rail > .rail-code .code-chip .copy { min-height: 0; height: 40px; padding: 0 12px; }
+    .msg-actions :is(.star, .pin), .msg-actions .del, .msg-actions .more { width: 40px; height: 40px; min-width: 40px; min-height: 40px; padding: 0; }
+    /* 窄屏点正文即可打开详情，「查看详情」图标是冗余入口，留在图标组里只会多一个含义不明的箭头 */
+    .msg-actions .more { display: none; }
+    /* 多选模式沿用同一套底部行：勾选框占最左 20px，发件人行不再独占一行，
+       验证码与图标组保持在原位，切换选中状态时卡片不会跳变 */
+    body.selecting .card { display: flex; }
+    body.selecting .msg-main { display: contents; }
+    body.selecting .msg-main > .msg-top { flex: 1 1 0; }
+    /* 多选态宽度被勾选框吃掉 20px，设备名会缩成「Pixe…」，选择过程中它是无用信息，直接让位 */
+    body.selecting .msg-main > .msg-foot { display: none; }
+    body.selecting .selwrap { display: block; flex: 0 0 20px; align-self: flex-start; }
   }
   /* 平板区间（661–900）：一行放不下「视图标签 + 搜索 + 三个下拉 + 刷新」，
      用网格固定为「标签 | 刷新」/「搜索与筛选」两行，避免刷新被挤到单独第三行 */
@@ -3763,7 +3823,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       selCount: "已选 {n} 条", selAll: "全选本页", cancel: "取消", ok: "确定",
       dSource: "来源", dDevice: "设备标签", dRecv: "收件号", dTime: "时间", dLabel: "号码标签", dStatus: "状态",
       notSet: "（未设置）", read: "已读", starredPrefix: "★ 收藏 · ",
-      pin: "置顶", unpin: "取消置顶", pinOnly: "📌 置顶", pinTip: "只看置顶", pinItemTip: "置顶", pinFail: "置顶失败，请重试",
+      pin: "置顶", unpin: "取消置顶", pinOnly: "📌 置顶", pinTip: "只看置顶", pinItemTip: "置顶", pinFail: "置顶失败，请重试", tagStarred: "已收藏", tagPinned: "已置顶",
       star: "收藏", unstar: "取消收藏", markUnread: "标为未读", copyAll: "复制全文",
       call: "拨号", setLabel: "号码标签",
       labelPrompt: "给 {n} 设置标签（留空清除）",
@@ -3832,7 +3892,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       selCount: "{n} selected", selAll: "Select page", cancel: "Cancel", ok: "OK",
       dSource: "Source", dDevice: "Device", dRecv: "Recipient", dTime: "Time", dLabel: "Number label", dStatus: "Status",
       notSet: "(not set)", read: "Read", starredPrefix: "★ Starred · ",
-      pin: "Pin", unpin: "Unpin", pinOnly: "📌 Pinned", pinTip: "Pinned only", pinItemTip: "Pin", pinFail: "Pin failed, please retry",
+      pin: "Pin", unpin: "Unpin", pinOnly: "📌 Pinned", pinTip: "Pinned only", pinItemTip: "Pin", pinFail: "Pin failed, please retry", tagStarred: "Starred", tagPinned: "Pinned",
       star: "Star", unstar: "Unstar", markUnread: "Mark unread", copyAll: "Copy text",
       call: "Call", setLabel: "Number label",
       labelPrompt: "Label for {n} (leave empty to clear)",
@@ -3901,7 +3961,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       selCount: "已選 {n} 則", selAll: "全選本頁", cancel: "取消", ok: "確定",
       dSource: "來源", dDevice: "裝置標籤", dRecv: "收件號", dTime: "時間", dLabel: "號碼標籤", dStatus: "狀態",
       notSet: "（未設定）", read: "已讀", starredPrefix: "★ 收藏 · ",
-      pin: "置頂", unpin: "取消置頂", pinOnly: "📌 置頂", pinTip: "只看置頂", pinItemTip: "置頂", pinFail: "置頂失敗，請重試",
+      pin: "置頂", unpin: "取消置頂", pinOnly: "📌 置頂", pinTip: "只看置頂", pinItemTip: "置頂", pinFail: "置頂失敗，請重試", tagStarred: "已收藏", tagPinned: "已置頂",
       star: "收藏", unstar: "取消收藏", markUnread: "標為未讀", copyAll: "複製全文",
       call: "撥號", setLabel: "號碼標籤",
       labelPrompt: "為 {n} 設定標籤（留空清除）",
@@ -3970,7 +4030,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       selCount: "{n} 件選択中", selAll: "このページを全選択", cancel: "キャンセル", ok: "OK",
       dSource: "送信元", dDevice: "デバイスラベル", dRecv: "宛先番号", dTime: "日時", dLabel: "番号ラベル", dStatus: "状態",
       notSet: "（未設定）", read: "既読", starredPrefix: "★ スター · ",
-      pin: "固定", unpin: "固定解除", pinOnly: "📌 固定", pinTip: "固定のみ表示", pinItemTip: "固定", pinFail: "固定に失敗しました",
+      pin: "固定", unpin: "固定解除", pinOnly: "📌 固定", pinTip: "固定のみ表示", pinItemTip: "固定", pinFail: "固定に失敗しました", tagStarred: "スター付き", tagPinned: "固定中",
       star: "スター", unstar: "スター解除", markUnread: "未読にする", copyAll: "全文をコピー",
       call: "発信", setLabel: "番号ラベル",
       labelPrompt: "{n} のラベルを設定（空欄で解除）",
@@ -4039,7 +4099,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       selCount: "{n}건 선택됨", selAll: "이 페이지 전체 선택", cancel: "취소", ok: "확인",
       dSource: "발신원", dDevice: "기기 라벨", dRecv: "수신번호", dTime: "시간", dLabel: "번호 라벨", dStatus: "상태",
       notSet: "(설정 안 됨)", read: "읽음", starredPrefix: "★ 즐겨찾기 · ",
-      pin: "고정", unpin: "고정 해제", pinOnly: "📌 고정", pinTip: "고정만 보기", pinItemTip: "고정", pinFail: "고정에 실패했습니다",
+      pin: "고정", unpin: "고정 해제", pinOnly: "📌 고정", pinTip: "고정만 보기", pinItemTip: "고정", pinFail: "고정에 실패했습니다", tagStarred: "즐겨찾기됨", tagPinned: "고정됨",
       star: "즐겨찾기", unstar: "즐겨찾기 해제", markUnread: "읽지 않음으로 표시", copyAll: "전문 복사",
       call: "전화", setLabel: "번호 라벨",
       labelPrompt: "{n} 의 라벨 설정(비우면 해제)",
@@ -4108,7 +4168,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       selCount: "{n} seleccionados", selAll: "Seleccionar página", cancel: "Cancelar", ok: "Aceptar",
       dSource: "Origen", dDevice: "Dispositivo", dRecv: "Destinatario", dTime: "Hora", dLabel: "Etiqueta del número", dStatus: "Estado",
       notSet: "(sin configurar)", read: "Leído", starredPrefix: "★ Favorito · ",
-      pin: "Fijar", unpin: "Quitar fijación", pinOnly: "📌 Fijados", pinTip: "Solo fijados", pinItemTip: "Fijar", pinFail: "Error al fijar",
+      pin: "Fijar", unpin: "Quitar fijación", pinOnly: "📌 Fijados", pinTip: "Solo fijados", pinItemTip: "Fijar", pinFail: "Error al fijar", tagStarred: "Destacado", tagPinned: "Fijado",
       star: "Marcar", unstar: "Quitar marca", markUnread: "Marcar como no leído", copyAll: "Copiar texto",
       call: "Llamar", setLabel: "Etiqueta del número",
       labelPrompt: "Etiqueta para {n} (dejar vacío para borrar)",
@@ -4177,7 +4237,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       selCount: "{n} sélectionnés", selAll: "Tout sélectionner (page)", cancel: "Annuler", ok: "OK",
       dSource: "Source", dDevice: "Appareil", dRecv: "Destinataire", dTime: "Heure", dLabel: "Étiquette du numéro", dStatus: "Statut",
       notSet: "(non défini)", read: "Lu", starredPrefix: "★ Favori · ",
-      pin: "Épingler", unpin: "Désépingler", pinOnly: "📌 Épinglés", pinTip: "Épinglés uniquement", pinItemTip: "Épingler", pinFail: "Échec de l'épinglage",
+      pin: "Épingler", unpin: "Désépingler", pinOnly: "📌 Épinglés", pinTip: "Épinglés uniquement", pinItemTip: "Épingler", pinFail: "Échec de l'épinglage", tagStarred: "Favori", tagPinned: "Épinglé",
       star: "Favori", unstar: "Retirer le favori", markUnread: "Marquer non lu", copyAll: "Copier le texte",
       call: "Appeler", setLabel: "Étiquette du numéro",
       labelPrompt: "Étiquette pour {n} (laisser vide pour effacer)",
@@ -4246,7 +4306,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       selCount: "{n} ausgewählt", selAll: "Seite auswählen", cancel: "Abbrechen", ok: "OK",
       dSource: "Quelle", dDevice: "Gerät", dRecv: "Empfänger", dTime: "Zeit", dLabel: "Nummern-Label", dStatus: "Status",
       notSet: "(nicht gesetzt)", read: "Gelesen", starredPrefix: "★ Favorit · ",
-      pin: "Anheften", unpin: "Loslösen", pinOnly: "📌 Angeheftet", pinTip: "Nur angeheftete", pinItemTip: "Anheften", pinFail: "Anheften fehlgeschlagen",
+      pin: "Anheften", unpin: "Loslösen", pinOnly: "📌 Angeheftet", pinTip: "Nur angeheftete", pinItemTip: "Anheften", pinFail: "Anheften fehlgeschlagen", tagStarred: "Markiert", tagPinned: "Angeheftet",
       star: "Favorit", unstar: "Favorit entfernen", markUnread: "Als ungelesen markieren", copyAll: "Text kopieren",
       call: "Anrufen", setLabel: "Nummern-Label",
       labelPrompt: "Label für {n} (leer lassen zum Entfernen)",
@@ -4315,7 +4375,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       selCount: "{n} selecionadas", selAll: "Selecionar página", cancel: "Cancelar", ok: "OK",
       dSource: "Origem", dDevice: "Dispositivo", dRecv: "Destinatário", dTime: "Hora", dLabel: "Etiqueta do número", dStatus: "Status",
       notSet: "(não definido)", read: "Lida", starredPrefix: "★ Favorita · ",
-      pin: "Fixar", unpin: "Desafixar", pinOnly: "📌 Fixadas", pinTip: "Somente fixadas", pinItemTip: "Fixar", pinFail: "Falha ao fixar",
+      pin: "Fixar", unpin: "Desafixar", pinOnly: "📌 Fixadas", pinTip: "Somente fixadas", pinItemTip: "Fixar", pinFail: "Falha ao fixar", tagStarred: "Favoritado", tagPinned: "Fixado",
       star: "Favoritar", unstar: "Remover favorito", markUnread: "Marcar como não lida", copyAll: "Copiar texto",
       call: "Ligar", setLabel: "Etiqueta do número",
       labelPrompt: "Etiqueta para {n} (deixe vazio para limpar)",
@@ -6935,6 +6995,12 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (diff < 86400) return T("hourAgo", { n: Math.floor(diff / 3600) });
     return fmtShort(d, partsOf(d), partsOf(new Date()), true);
   }
+  /* 详情标题旁的紧凑时间：当天/同年省略年份，只保留「11月1日 14:41」这类短格式 */
+  function fmtMetaTime(utc) {
+    var d = parseUTC(utc);
+    if (!d) return String(utc || "");
+    return fmtShort(d, partsOf(d), partsOf(new Date()), true);
+  }
   /* 日期分组标签：今天 / 昨天 / M月D日（跨年带年份） */
   function dayLabel(utc) {
     var d = parseUTC(utc);
@@ -7487,6 +7553,16 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (s === "cron") return "s-cron";
     return "s-other";
   }
+  /* UX-17：卡片操作图标。与详情弹层同一套 16px 线性图标（currentColor + 1.6 描边），
+     替换原来的「☆ / 📍 字符 + emoji」——emoji 在不同设备上字重、配色、基线全不一样，
+     同一行里一个彩色图钉挨着一个文字星号，视觉上就是「乱」的主因。
+     收藏激活时用 fill 填实，与详情弹层的 .on 状态一致。 */
+  var MSG_IC = {
+    more: '<svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.3 4.2 10.1 8l-3.8 3.8"/></svg>',
+    star: '<svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.7l1.7 3.5 3.8.5-2.8 2.7.7 3.8L8 11.4l-3.4 1.8.7-3.8L2.5 6.7l3.8-.5z"/></svg>',
+    pin: '<svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.1 2.7h3.8"/><path d="M6.7 2.7v3.1L5.2 8.3h5.6L9.3 5.8V2.7"/><path d="M8 8.3v5"/></svg>',
+    trash: '<svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M3.4 4.6h9.2"/><path d="M6.4 4.6V3.4c0-.4.3-.7.7-.7h1.8c.4 0 .7.3.7.7v1.2"/><path d="M4.7 4.6l.6 7.6c0 .5.4.9.9.9h3.6c.5 0 .9-.4.9-.9l.6-7.6"/></svg>'
+  };
   /* UX-02B 消息卡三行结构：
      ① 发件人 · 号码 · 时间（未读用小圆点，不再堆徽章）
      ② 正文（2 行折叠，可点开详情看全文）
@@ -7525,13 +7601,14 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
           devChip +
         '</div>' +
       '</div>' +
-      /* 操作列独立于正文：桌面端固定在卡片右侧同一 x 位置，扫读时不需要横穿整行找按钮 */
+      /* 操作列独立于正文：桌面端固定在卡片右侧同一 x 位置，扫读时不需要横穿整行找按钮；
+         UX-17：窄屏由媒体查询把它收进卡片底部同一行（设备 · 验证码 · 图标组），不再绝对定位悬浮。 */
       '<div class="msg-rail">' +
         '<div class="msg-actions">' +
-          '<button class="more" type="button" data-id="' + m.id + '" hidden>' + esc(T("detailBtn")) + '</button>' +
-          '<button class="star' + (m.starred ? " on" : "") + '" data-id="' + m.id + '" title="' + esc(T("starItemTip")) + '" aria-label="' + esc(T("starItemTip")) + '">' + (m.starred ? "★" : "☆") + '</button>' +
-          '<button class="pin' + (m.pinned ? " on" : "") + '" data-id="' + m.id + '" title="' + esc(T("pinItemTip")) + '" aria-label="' + esc(T("pinItemTip")) + '">' + (m.pinned ? "📌" : "📍") + '</button>' +
-          '<button class="del" data-id="' + m.id + '" title="' + esc(T("del")) + '">' + esc(T("del")) + '</button>' +
+          '<button class="more" type="button" data-id="' + m.id + '" title="' + esc(T("detailBtn")) + '" aria-label="' + esc(T("detailBtn")) + '" hidden>' + MSG_IC.more + '</button>' +
+          '<button class="star' + (m.starred ? " on" : "") + '" data-id="' + m.id + '" title="' + esc(T("starItemTip")) + '" aria-label="' + esc(T("starItemTip")) + '">' + MSG_IC.star + '</button>' +
+          '<button class="pin' + (m.pinned ? " on" : "") + '" data-id="' + m.id + '" title="' + esc(T("pinItemTip")) + '" aria-label="' + esc(T("pinItemTip")) + '">' + MSG_IC.pin + '</button>' +
+          '<button class="del" data-id="' + m.id + '" title="' + esc(T("del")) + '" aria-label="' + esc(T("del")) + '">' + MSG_IC.trash + '</button>' +
         '</div>' +
         (code ? '<div class="rail-code"><span class="code-chip' + (state.codeCopy ? '' : ' tapcopy') + '"><span class="code-val">' + esc(code) + '</span>' + (state.codeCopy ? '<button class="copy" type="button" data-code="' + esc(code) + '">' + esc(T("copy")) + '</button>' : '') + '</span></div>' : '') +
       '</div>' +
@@ -8133,53 +8210,68 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var code = extractCode(m.content);
     var snum = normalizeNum(m.sender);
     var body = String(m.content || "");
-    /* 卡片不再重复展示设备/SIM，完整来源信息统一收敛到详情（信息不丢失） */
     var recv = m.sim_number || m.sim || "";
     var typeText = code ? T("tagVerify") : (isSms ? T("srcSms") : (m.source || T("srcNotify")));
-    /* 标题即身份：号码/名称已经在 h3，元信息行不再重复同一个值 */
+    /* 标题即身份：号码/名称已经在 h3，第二行不再重复同一个值 */
     var who = isSms ? (numLabel(m.sender) || m.sender || T("unknownNum")) : (m.sender || m.device_name || T("srcNotify"));
-    var parts = [];
-    if (isSms && String(who) !== String(m.sender || "")) parts.push('<span class="m-num">' + esc(m.sender || T("unknownNum")) + '</span>');
-    parts.push('<span class="m-strong">' + esc(typeText) + '</span>');
-    if (!isSms) parts.push('<span>' + esc(m.source || T("srcNotify")) + '</span>');
-    parts.push('<span class="m-num">' + esc(fmtTime(m.received_at)) + '</span>');
-    if (isSms && /^1[3-9]\d{9}$/.test(snum)) parts.push('<span class="area" data-num="' + snum + '"></span>');
-    if (m.device_name) parts.push('<span>' + esc(m.device_name) + (recv ? ' · ' + esc(recv) : '') + '</span>');
-    parts.push('<span id="dstate">' + esc(m.read_at ? T("read") : T("unread")) + '</span>');
-    if (m.starred) parts.push('<span class="m-star">★</span>');
-    if (m.pinned) parts.push('<span class="m-pin">📌</span>');
-    var acts =
-      '<button class="tbtn" id="dcopy">' + esc(T("copyBody")) + '</button>' +
-      '<button class="tbtn" id="dstar">' + esc(m.starred ? T("unstar") : T("star")) + '</button>' +
-      '<button class="tbtn" id="dpin">' + esc(m.pinned ? T("unpin") : T("pin")) + '</button>' +
-      (isSms && snum ? '<a class="tbtn" href="tel:' + esc(snum) + '">' + esc(T("call")) + '</a>' : '') +
-      (isSms && snum ? '<button class="tbtn" id="dlabel">' + esc(T("setLabel")) + '</button>' : '');
-    /* UX-14 R2（EditHere 标注）：标为未读移到删除左边；有验证码时在最右侧追加
-       「复制验证码」按钮——详情页始终可直接复制，不受设置里的验证码复制开关影响。
-       无验证码时按钮组维持原顺序，删除键仍在最右。弹层与宽屏面板共用本渲染层。 */
-    var actsEnd =
-      '<button class="tbtn tbtn--accent" id="dunread">' + esc(T("markUnread")) + '</button>' +
-      '<button class="tbtn tbtn--danger" id="ddel">' + esc(T("del")) + '</button>' +
-      (code ? '<button class="tbtn tbtn--code" id="dccopy" type="button">' + esc(T("copyCode")) + '</button>' : '');
+    /* UX-16（EditHere 标注 ④）：类型 / 已读 / 收藏 / 置顶收敛成标题行的小圆角胶囊。 */
+    var tags =
+      '<span class="dpill dpill--type">' + esc(typeText) + '</span>' +
+      '<span class="dpill' + (m.read_at ? '' : ' dpill--unread') + '" id="dstate">' +
+        esc(m.read_at ? T("read") : T("unread")) + '</span>' +
+      (m.starred ? '<span class="dpill dpill--star">' + esc(T("tagStarred")) + '</span>' : '') +
+      (m.pinned ? '<span class="dpill dpill--pin">' + esc(T("tagPinned")) + '</span>' : '');
+    /* UX-16（标注 ⑤⑥）：第二行只放日期时间（国内手机号追加归属地），号码不再重复。 */
+    var metaRow = '<div class="detail-metarow"><span class="m-time">' + esc(fmtMetaTime(m.received_at)) + '</span>';
+    if (isSms && /^1[3-9]\d{9}$/.test(snum)) metaRow += '<span class="area m-area" data-num="' + snum + '"></span>';
+    metaRow += '</div>';
+    /* UX-16（标注 ①）：设备 · SIM 来源下移到弹层底部左侧；没有内容就留空占位，不塌行。 */
+    var srcBits = [];
+    if (m.device_name) srcBits.push(esc(m.device_name));
+    if (recv) srcBits.push(esc(recv));
+    var footMeta = '<span class="foot-meta">' + srcBits.join('<span class="sep"> · </span>') + '</span>';
+    /* 图标：16x16 线性图标，跟随 currentColor，避免 emoji 跨平台字形差异。 */
+    var IC = {
+      copy: '<svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="5.6" y="5.6" width="7.8" height="7.8" rx="1.8"/><path d="M10.4 3.4H4.3A1.7 1.7 0 0 0 2.6 5.1v6.1"/></svg>',
+      code: '<svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M5.9 5.1 3.1 8l2.8 2.9"/><path d="M10.1 5.1 12.9 8l-2.8 2.9"/><path d="M9.1 3.7 6.9 12.3"/></svg>',
+      star: '<svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.7l1.7 3.5 3.8.5-2.8 2.7.7 3.8L8 11.4l-3.4 1.8.7-3.8L2.5 6.7l3.8-.5z"/></svg>',
+      pin: '<svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M6.1 2.7h3.8"/><path d="M6.7 2.7v3.1L5.2 8.3h5.6L9.3 5.8V2.7"/><path d="M8 8.3v5"/></svg>',
+      phone: '<svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.4 2.6h2.2l1.1 2.6-1.4 1a7.6 7.6 0 0 0 3.5 3.5l1-1.4 2.6 1.1v2.2c0 .8-.7 1.4-1.5 1.3-4.6-.5-8.3-4.2-8.8-8.8-.1-.8.5-1.5 1.3-1.5z"/></svg>',
+      tag: '<svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.7 7.4V3.5c0-.4.4-.8.8-.8h3.9c.2 0 .4.1.6.2l5.5 5.5c.3.3.3.8 0 1.1l-3.5 3.5c-.3.3-.8.3-1.1 0L3.1 8.2c-.2-.2-.4-.5-.4-.8z"/><circle cx="5.7" cy="5.7" r=".9"/></svg>',
+      unread: '<svg class="ico" viewBox="0 0 16 16" aria-hidden="true"><rect x="2.6" y="4" width="10.8" height="8" rx="1.6"/><path d="M3.2 4.9 8 8.4l4.8-3.5"/></svg>'
+    };
+    /* 图标按钮：id 保持与绑定层一致；title / aria-label 提供完整文案，
+       宽屏显示文字标签、窄屏只留图标（标注 ②）。 */
+    function icBtn(tag, attrs, icon, text, extra) {
+      var open = '<' + tag + ' class="tbtn tbtn--ic' + (extra ? ' ' + extra : '') + '"' + attrs +
+        ' title="' + esc(text) + '" aria-label="' + esc(text) + '">';
+      return open + icon + '<span class="lbl" aria-hidden="true">' + esc(text) + '</span></' + tag + '>';
+    }
+    var bCopy = icBtn('button', ' id="dcopy" type="button"', IC.copy, T("copyBody"), '');
+    var bStar = icBtn('button', ' id="dstar" type="button"', IC.star, m.starred ? T("unstar") : T("star"), '');
+    var bPin = icBtn('button', ' id="dpin" type="button"', IC.pin, m.pinned ? T("unpin") : T("pin"), '');
+    var bCall = isSms && snum ? icBtn('a', ' href="tel:' + esc(snum) + '"', IC.phone, T("call"), '') : '';
+    var bLabel = isSms && snum ? icBtn('button', ' id="dlabel" type="button"', IC.tag, T("setLabel"), '') : '';
+    var bUnread = icBtn('button', ' id="dunread" type="button"', IC.unread, T("markUnread"), 'tbtn--accent');
+    /* UX-16（标注 ③）：复制验证码只在有验证码时渲染，且钉在操作条最右（右下角）。 */
+    var bCode = code ? icBtn('button', ' id="dccopy" type="button"', IC.code, T("copyCode"), 'tbtn--code rail-code') : '';
+    var bDel = '<button class="tbtn tbtn--danger" id="ddel" type="button">' + esc(T("del")) + '</button>';
+    var rail = bCopy + bStar + bPin + bCall + bLabel + bUnread + bCode;
+    var foot = '<div class="' + (mode === "pane" ? "dp-foot" : "modal-foot") + '">' +
+      '<div class="foot-rail">' + rail + '</div>' +
+      '<div class="foot-bottom">' + footMeta + bDel +
+      (mode === "pane" ? '' : '<button class="tbtn tbtn--primary" id="dclose" type="button">' + esc(T("modalClose")) + '</button>') +
+      '</div></div>';
     /* UX-14 R2：详情恢复 v1.1.3 的单栏正文，不再有右侧独立验证码卡片。 */
     var detailBody = '<div class="detail-body">'
       + (body ? linkify(esc(body)) : '<span class="empty-text">' + esc(T("emptyBody")) + '</span>')
       + '</div>';
-    var foot;
-    if (mode === "pane") {
-      foot = '<div class="dp-foot">' + acts + '<span class="grow"></span>' + actsEnd + '</div>';
-    } else {
-      foot = '<div class="modal-foot"><div class="foot-left">' + acts + '</div>' +
-        '<div class="foot-right">' + actsEnd +
-        '<button class="tbtn tbtn--primary" id="dclose">' + esc(T("modalClose")) + '</button></div></div>';
-    }
+    var headInner = '<div class="detail-head"><h3>' + esc(who) + '</h3>' +
+      '<span class="detail-tags">' + tags + '</span></div>';
     var head = mode === "pane"
-      ? '<div class="dp-head"><h3>' + esc(who) + '</h3><button class="dp-close" id="dpclose" type="button" aria-label="' + esc(T("paneClose")) + '" data-i18n-aria="paneClose" title="' + esc(T("paneClose")) + '">×</button></div>'
-      : '<h3>' + esc(who) + '</h3>';
-    return head +
-      '<div class="detail-metarow">' + parts.join('<span class="sep">·</span>') + '</div>' +
-      detailBody +
-      foot;
+      ? '<div class="dp-head">' + headInner + '<button class="dp-close" id="dpclose" type="button" aria-label="' + esc(T("paneClose")) + '" data-i18n-aria="paneClose" title="' + esc(T("paneClose")) + '">×</button></div>'
+      : headInner;
+    return head + metaRow + detailBody + foot;
   }
   /* 打开详情即标记已读；失败回滚本地状态并提示，不做"假成功" */
   function markDetailRead(m, root) {
@@ -8199,7 +8291,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
             if (utag) utag.remove();
           }
           var st = root ? root.querySelector("#dstate") : null;
-          if (st) st.textContent = T("read");
+          if (st) { st.textContent = T("read"); st.classList.remove("dpill--unread"); }
           refreshUnreadCount();
         } else {
           m.read_at = null;

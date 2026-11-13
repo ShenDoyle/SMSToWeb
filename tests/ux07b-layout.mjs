@@ -41,7 +41,7 @@ const coarseBlock = (() => {
 })();
 t("B2 视图标签/筛选按钮 44 命中区", /\.filter-tabs \.chip, \.filter-row \.filterbtn \{ min-height: 44px; \}/.test(coarseBlock));
 t("B3 搜索框与下拉 44 命中区", /\.filters \.searchwrap input, \.filter-row select \{ min-height: 44px; \}/.test(coarseBlock));
-t("B4 收藏/删除操作 44 命中区", /\.msg-actions \.star, \.msg-actions \.del, \.msg-actions \.more \{ min-width: 44px; min-height: 44px; \}/.test(coarseBlock));
+t("B4 收藏/置顶/删除操作 44 命中区", /\.msg-actions :is\(\.star, \.pin\), \.msg-actions \.del, \.msg-actions \.more \{ min-width: 44px; min-height: 44px; \}/.test(coarseBlock));
 t("B5 分页与跳转 44 命中区", /\.pages button, \.jumpwrap input, \.jumpwrap button \{ min-height: 44px; \}/.test(coarseBlock));
 t("B6 弹层关闭按钮 44 命中区", /\.mx \{ width: 44px; height: 44px; top: 8px; right: 8px; \}/.test(coarseBlock));
 t("B7 设置控件与分区标签 44 命中区", /\.sc-ictl \.ds-select, \.sc-ictl \.ds-input \{ min-height: 44px; \}/.test(coarseBlock) && /\.sc-tab, \.sc-ch \{ min-height: 44px; \}/.test(coarseBlock));
@@ -72,8 +72,9 @@ t("F1 详情正文 15px + 令牌行高", /\.detail-body \{[^}]*line-height: var\
 t("F2 详情正文内边距与最大高度上调", /\.detail-body \{[^}]*padding: 16px 18px;[^}]*max-height: 48vh;/.test(SRC));
 /* UX-07C：详情 HTML 抽成 detailHTML(m, mode) 共用，弹层与宽屏面板不再各写一套。
    断言改为校验拼接结构而非字面顺序，语义仍是「危险操作与主操作同组右侧、关闭排最后」。 */
-t("F3 危险操作与主操作同组右侧", /var actsEnd =\s*'<button class="tbtn tbtn--danger" id="ddel">/.test(SRC) && /'<div class="foot-right">' \+ actsEnd/.test(SRC));
-t("F4 关闭仍是 foot-right 最后一个按钮", /actsEnd \+\s*'<button class="tbtn tbtn--primary" id="dclose">/.test(SRC));
+/* UX-16：底部行（foot-bottom）左为来源信息、右为删除与关闭，关闭仍排最后 */
+t("F3 危险操作与主操作同处底部行右侧", /var bDel = '<button class="tbtn tbtn--danger" id="ddel"/.test(SRC) && /'<div class="foot-bottom">' \+ footMeta \+ bDel/.test(SRC));
+t("F4 关闭仍是底部行最后一个按钮", /bDel \+\s*(\(mode === "pane" \? '' : )?'<button class="tbtn tbtn--primary" id="dclose"/.test(SRC));
 
 /* G. 统计弹层 */
 t("G1 统计分区标题不再用行内 style", !has('style="font-size:13px;margin:'));

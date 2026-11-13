@@ -168,7 +168,10 @@ t("E4 收藏 / 删除常驻可见，全文仅在截断时出现",
 t("E5 设备标签只在设备分组切换处出现一次",
   /var showDev = !state\.device && dv !== lastDev;/.test(SRC) && /var devChip = showDev && m\.device_name/.test(SRC));
 t("E6 详情保留设备 + SIM（信息不丢失）",
-  /var recv = m\.sim_number \|\| m\.sim \|\| "";/.test(SRC) && /esc\(m\.device_name\) \+ \(recv \? ' · ' \+ esc\(recv\)/.test(SRC));
+  /var recv = m\.sim_number \|\| m\.sim \|\| "";/.test(SRC) && /var srcBits = \[\];/.test(SRC)
+  && /if \(m\.device_name\) srcBits\.push\(esc\(m\.device_name\)\);/.test(SRC)
+  && /if \(recv\) srcBits\.push\(esc\(recv\)\);/.test(SRC)
+  && /class="foot-meta"/.test(SRC));
 t("E7 纯号码发件人不画头像噪声", /var showAvatar = !\(isSms && !lbl/.test(SRC));
 /* UX-09 U9-02：行内删除在原有「删除→撤销」回路外包了一层二次确认，
    断言从「紧邻调用」放宽为「同一处理链路内仍有 undoToast」，并新增确认点断言确保没有被改成静默删除 */

@@ -62,9 +62,9 @@ t("D3 切换语言后按状态重算", /if \(typeof panEmptyRender === "function
 t("D4 空态三态齐备", /paneEmptyState\("missing"\)/.test(SRC) && /paneEmptyState\("fail"\)/.test(SRC) && /paneEmptyState\(\)/.test(SRC));
 
 /* E. 移动端操作可见 */
-t("E1 手机详情次要操作改换行（不再横滑）", /\.modal-foot \.foot-left \{ width: 100%; flex: 0 0 auto; display: flex; flex-wrap: wrap; gap: 8px; \}/.test(SRC));
-t("E2 移除 foot-left 的横向滚动", !/\.modal-foot \.foot-left \{[^}]*overflow-x: auto/.test(SRC));
-t("E3 次要按钮均分且 ≥44px 高", /\.modal-foot \.foot-left \.tbtn \{ flex: 1 1 auto; min-width: 72px; \}/.test(SRC) && /\.modal-foot \.tbtn \{ width: auto; min-width: 72px; min-height: 44px;/.test(SRC));
+t("E1 手机详情次要操作图标化单行（高度收紧，仍是 44px 命中区）", /\.modal-foot \.tbtn--ic \{ width: 44px; min-width: 44px; height: 44px; min-height: 44px; padding: 0; \}/.test(SRC) && /\.modal-foot \.tbtn--ic \.lbl \{ display: none; \}/.test(SRC));
+t("E2 操作条保留横滑兜底，极端窄屏不裁切", /\.modal-foot \.foot-rail \{ width: 100%; flex: 0 0 auto; flex-wrap: nowrap; gap: 4px; overflow-x: auto;/.test(SRC));
+t("E3 底部行容纳来源信息 + 删除/关闭", /\.modal-foot \.foot-bottom \{ flex-wrap: nowrap; gap: 6px; padding-top: 8px; margin-top: 8px; \}/.test(SRC) && /\.modal-foot \.foot-bottom \.tbtn \{ width: auto; min-width: 0; padding: 0 14px; min-height: 40px; \}/.test(SRC));
 
 /* F. i18n 九语种 */
 const langs = ["zh-CN", "zh-TW", "en", "ja", "ko", "es", "fr", "de", "pt-BR"];

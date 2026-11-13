@@ -860,7 +860,7 @@ async function main() {
       && !/\.ds-tabs \{[^}]*overflow-x: auto/.test(pgHtml) && pgHtml.includes(".sc-tab {"),
       "设置分区标签自动换行（不再依赖横向滑动，任何语言都不溢出）");
     check(pgHtml.includes(".ds-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));")
-      && pgHtml.includes(".modal-foot .foot-left, .modal-foot .foot-right")
+      && pgHtml.includes(".modal-foot .foot-rail")
       && pgHtml.includes(".sc-target-acts { flex: 1 1 100%; justify-content: flex-start; }")
       && pgHtml.includes(".sc-chgrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }"),
       "窄屏分区导航为三列网格、目标操作与渠道一览自适应（无横滑、无溢出）");
@@ -2127,15 +2127,29 @@ async function main() {
     && /id="fstar"/.test(pageHtml) && /id="dstar"/.test(pageHtml)
     && /handlePinMessage/.test(uxSrc) && /pinned DESC, received_at DESC, id DESC/.test(uxSrc),
     "需求 1：收藏与置顶各自独立入口/状态/接口，排序只由 pinned 决定");
+  /* UX-17：窄屏不再给验证码固定预留 84px（.card:has(.rail-code) .msg-foot），
+     改为操作列 display:contents 后与设备脚注并成卡片底部同一行，
+     桌面端仍保持右侧列（align-self: stretch）。 */
   check(/rail-code/.test(pageHtml) && /align-self: stretch/.test(pageHtml)
-    && /card:has\(\.rail-code\)/.test(pageHtml) && /class="msg-rail"/.test(pageHtml),
-    "R2-1：列表卡片验证码胶囊移到卡片右侧（右手操作区），窄屏为右下角预留高度");
+    && /class="msg-rail"/.test(pageHtml) && /\.msg-rail \{ display: contents; \}/.test(pageHtml)
+    && !/card:has\(\.rail-code\)/.test(pageHtml),
+    "R2-1/UX-17：桌面端验证码胶囊在右侧操作列，窄屏操作列回归文档流、与设备脚注同行");
   check(!/detail-code/.test(pageHtml) && !/detail-main/.test(pageHtml) && !/dc-value/.test(pageHtml),
     "R2-2：详情恢复 v1.1.3 单栏正文，去掉右侧独立验证码卡片");
-  check(/id="dunread"[\s\S]{0,200}id="ddel"[\s\S]{0,260}id="dccopy"/.test(pageHtml)
-    && /\(code \? '<button class="tbtn tbtn--code" id="dccopy"/.test(pageHtml)
-    && /doCopy\(extractCode\(m\.content/.test(pageHtml),
-    "R2-3/4/5：标为未读在删除左边，有码时最右追加复制验证码按钮（不受设置开关影响）");
+  check(/var MSG_IC = \{/.test(pageHtml) && /MSG_IC\.star/.test(pageHtml) && /MSG_IC\.pin/.test(pageHtml)
+    && /MSG_IC\.trash/.test(pageHtml) && /\.msg-actions \.ico \{/.test(pageHtml)
+    && !/m\.starred \? "★" : "☆"/.test(pageHtml) && !/m\.pinned \? "📌" : "📍"/.test(pageHtml),
+    "UX-17：卡片操作统一为 16px 线性图标（星/钉/垃圾桶），不再混用字符与 emoji");
+  check(/\.msg-main > \.msg-foot \{ order: 30; flex: 1 1 0;/.test(pageHtml)
+    && /\.msg-rail > \.msg-actions \{ order: 50;/.test(pageHtml)
+    && /\.msg-actions \.more \{ display: none; \}/.test(pageHtml)
+    && /body\.selecting \.msg-main > \.msg-foot \{ display: none; \}/.test(pageHtml),
+    "UX-17：窄屏设备 · 验证码 · 图标同处卡片底部一行，多选态让位勾选框");
+  /* UX-15 后复制验证码并入次要操作格（仍在最前两位），删除与关闭独占一行；语义断言随之更新 */
+  check(/id="dunread"/.test(pageHtml) && /code \? icBtn\('button', ' id="dccopy"/.test(pageHtml)
+    && /doCopy\(extractCode\(m\.content/.test(pageHtml)
+    && /'<div class="foot-bottom">' \+ footMeta \+ bDel/.test(pageHtml),
+    "R2-3/4/5：标为未读在图标操作条内，删除在关闭左侧，复制验证码仅含码时出现（不受设置开关影响）");
   check((pageHtml.match(/\bcopyCode:/g) || []).length === 9,
     "R2：复制验证码按钮文案九语种全覆盖");
   const mobileCss = (uxSrc.match(/@media \(max-width: 660px\) \{([\s\S]*?)\/\* 平板区间/) || [])[1] || "";
@@ -2147,6 +2161,21 @@ async function main() {
     && !/#selmodebtn[^}]*position: absolute/.test(mobileCss)
     && !/padding-right: 58px/.test(mobileCss),
     "R3：移动端多选按钮按真实宽度占网格列、标签可横滑，不再用固定 58px 留白造成长文案遮挡");
+  /* UX-16（EditHere 第 3 轮标注）：标题行 = 身份 + 状态胶囊；时间下移第二行；第二行不再重复号码 */
+  check(/class="detail-tags"/.test(pageHtml) && /class="dpill dpill--type"/.test(pageHtml)
+    && /dpill--star/.test(pageHtml) && /dpill--pin/.test(pageHtml)
+    && /function fmtMetaTime/.test(uxSrc)
+    && /var metaRow = '<div class="detail-metarow"><span class="m-time">/.test(uxSrc)
+    && !/var extra = \[\]/.test(uxSrc),
+    "UX-16-④⑤⑥：类型/已读/收藏/置顶为标题行胶囊，日期时间独占第二行，号码不再重复");
+  check(/class="foot-rail">' \+ rail/.test(uxSrc) && /var bCode = code \? icBtn/.test(uxSrc)
+    && /tbtn--code rail-code/.test(uxSrc) && /\.foot-rail \.rail-code \{ margin-left: auto; \}/.test(uxSrc)
+    && /\.modal-foot \.tbtn--ic \.lbl \{ display: none; \}/.test(uxSrc)
+    && /icBtn\('button', ' id="dunread" type="button"', IC\.unread/.test(uxSrc),
+    "UX-16-②③：次要操作图标化单行排布（窄屏隐藏文字标签），复制验证码钉在操作条最右");
+  check(/var srcBits = \[\]/.test(uxSrc) && /class="foot-meta"/.test(uxSrc)
+    && /'<div class="foot-bottom">' \+ footMeta \+ bDel/.test(uxSrc),
+    "UX-16-①：设备·SIM 来源下移到弹层底部左侧，与删除/关闭同行");
   check(/viewport-fit=cover/.test(pageHtml) && /apple-mobile-web-app-capable/.test(pageHtml),
     "移动端 viewport 安全区 / PWA meta 就位");
   check(/format-detection" content="telephone=no/.test(pageHtml), "禁用 iOS 号码自动识别，避免吞掉发件号");
