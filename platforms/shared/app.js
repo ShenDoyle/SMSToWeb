@@ -3480,6 +3480,12 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
        收紧行内间距，并允许号码在极端情况下省略（完整号码在详情弹层） */
     .msg-top { gap: 5px; }
     .msg-top .phone { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    /* 320 下五个视图标签差 16px 才排得进一行，收紧工具栏与标签内边距（不动命中区高度） */
+    .toolbar { padding-left: 10px; padding-right: 10px; }
+    .filter-tabs { gap: 4px; }
+    .filter-tabs .chip { padding: 0 8px; }
+    /* 搜索框的最小宽度会让「筛选」按钮单独掉到下一行，这里允许搜索框继续压缩 */
+    .filter-row .searchwrap { flex: 1 1 0; min-width: 0; }
   }
   /* 平板区间（661–900）：一行放不下「视图标签 + 搜索 + 三个下拉 + 刷新」，
      用网格固定为「标签 | 刷新」/「搜索与筛选」两行，避免刷新被挤到单独第三行 */
