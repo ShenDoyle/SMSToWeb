@@ -69,7 +69,7 @@ function escAttr(s) {
 function jsStr(s) {
   return JSON.stringify(s).replace(/</g, "\\u003c");
 }
-const APP_VERSION = "v1.1.5";
+const APP_VERSION = "v1.1.6";
 
 /* 把页面模板中的占位标记替换为实际配置值（用函数替换器，避免值里含 $& 等特殊序列被误解释） */
 function renderHtml(html, env) {
@@ -3363,14 +3363,21 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     .nav-mobile { display: inline-flex !important; }
     .topbar { align-items: center; }
     /* 搜索独占一行 + 「筛选」按钮；设备/来源/时间默认折叠，点开即展开一行三等分下拉 */
-    /* UX-09-RV：390 下「多选」若留在工具栏主轴，会把 .filters 压窄 60px，
-       导致「筛选」被挤到第三行、首条消息下移 50px（首屏密度 25%→31%，跌破 30% 门槛）。
-       改为绝对定位到标签行右端空白处，既保住常驻可见入口，也不改变内容起点。 */
-    .toolbar { position: relative; }
-    #selmodebtn { position: absolute; top: 8px; right: 12px; min-height: 44px; min-width: 44px; padding: 0 8px; }
-    .filters { flex: 1 1 100%; }
-    .filter-tabs { padding-right: 58px; }
-    .filter-row { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; }
+    /* UX-14-R3：多选按钮回到文档流，用两列网格把「视图标签 | 多选」固定在第一行。
+       旧实现把按钮绝对定位到标签行右端，再用 .filter-tabs 固定 padding-right:58px 留白；
+       58px 是按中文「多选」宽度写死的，英文 Multi-select / 西语 Multiselección /
+       德语 Mehrfachauswahl 明显更宽，会盖住末尾 chip（Starred / Pinned）。
+       现在按钮占 auto 列、标签占 minmax(0,1fr) 列且保留横向滚动，任何语言都不重叠；
+       刷新按钮在窄屏本就隐藏（走 ⋯ 菜单），第二行仍是搜索与筛选，首屏高度不变。 */
+    /* 保留顶栏原有的定位上下文；标签行内 .sr-only 的裁剪另见下方 .toolbar-title */
+    .toolbar { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; }
+    .filters { display: contents; }
+    .filter-tabs { grid-column: 1; grid-row: 1; min-width: 0; }
+    /* .toolbar-title 里的 .sr-only 是绝对定位且未指定 left/top；包含块若落在滚动容器之外，
+       它会停在 x≈409 并给 document 撑出 20px 横向滚动。就近设为包含块即可被 .filter-tabs 裁剪。 */
+    .toolbar-title { position: relative; }
+    #selmodebtn { grid-column: 2; grid-row: 1; justify-self: end; min-height: 44px; min-width: 44px; padding: 0 8px; }
+    .filter-row { grid-column: 1 / -1; grid-row: 2; display: flex; flex-wrap: wrap; gap: 6px; width: 100%; }
     .filter-row .searchwrap { flex: 1 1 auto; min-width: 0; }
     .filter-row .filterbtn { display: inline-flex; align-items: center; min-height: 44px; flex: 0 0 auto; }
     .filter-row select { display: none; flex: 1 1 30%; min-width: 0; max-width: none; min-height: 44px; font-size: 14px; }

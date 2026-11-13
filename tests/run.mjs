@@ -2138,6 +2138,15 @@ async function main() {
     "R2-3/4/5：标为未读在删除左边，有码时最右追加复制验证码按钮（不受设置开关影响）");
   check((pageHtml.match(/\bcopyCode:/g) || []).length === 9,
     "R2：复制验证码按钮文案九语种全覆盖");
+  const mobileCss = (uxSrc.match(/@media \(max-width: 660px\) \{([\s\S]*?)\/\* 平板区间/) || [])[1] || "";
+  check(/display: grid; grid-template-columns: minmax\(0, 1fr\) auto/.test(mobileCss)
+    && /\.filters \{ display: contents; \}/.test(mobileCss)
+    && /\.filter-tabs \{ grid-column: 1; grid-row: 1; min-width: 0; \}/.test(mobileCss)
+    && /#selmodebtn \{ grid-column: 2; grid-row: 1;/.test(mobileCss)
+    && /\.toolbar-title \{ position: relative; \}/.test(mobileCss)
+    && !/#selmodebtn[^}]*position: absolute/.test(mobileCss)
+    && !/padding-right: 58px/.test(mobileCss),
+    "R3：移动端多选按钮按真实宽度占网格列、标签可横滑，不再用固定 58px 留白造成长文案遮挡");
   check(/viewport-fit=cover/.test(pageHtml) && /apple-mobile-web-app-capable/.test(pageHtml),
     "移动端 viewport 安全区 / PWA meta 就位");
   check(/format-detection" content="telephone=no/.test(pageHtml), "禁用 iOS 号码自动识别，避免吞掉发件号");

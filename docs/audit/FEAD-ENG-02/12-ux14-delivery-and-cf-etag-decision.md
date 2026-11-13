@@ -127,3 +127,36 @@ Content-Type: text/plain; charset=utf-8
 **说明**：反馈 JSON 的 `image.sha256` 与本地 PNG 不同（EditHere 重新编码），但尺寸 1060×640、文件名与全部批注坐标均与预览图一致，按同一画面处理。详情弹层原有的「关闭」按钮保留在按钮组最后（预览图用右上角 × 表示，未标注该项）。
 
 **验证**：`gen_app.py` 零漂移、全量 Node 回归全绿；`APP_VERSION` → `v1.1.5`。
+
+## 八、v1.1.6 · 移动端多选按钮遮挡根治（R3）
+
+**背景**：重拍 README 英文截图时发现，390px 视口下工具栏 `Multi-select` 会盖住 `Starred` chip 尾部；当时把移动端截图视口临时调到 430px 规避。用户要求根治，本轮把视口恢复为 390px。
+
+### 根因
+
+`@media (max-width: 660px)` 里为保住首屏密度，把多选按钮绝对定位到标签行右端，并给 `.filter-tabs` 写死 `padding-right: 58px` 留白。58px 只够中文「多选」；`Multi-select`(84px)、`Sélection multiple` / `Mehrfachauswahl`(120px) 明显更宽，按钮背景直接压在末尾 chip 上。
+
+### 修复
+
+- `.toolbar` 改为两列网格：`grid-template-columns: minmax(0, 1fr) auto`；`.filters { display: contents; }`；标签占第 1 列（保留 `overflow-x:auto` 横滑），按钮按**真实内容宽度**占第 2 列，`.filter-row` 跨两列占第 2 行。按钮回到文档流，任何语言都不会重叠，首屏仍是两行、高度不变。
+- 删除 `position: absolute` 与 `padding-right: 58px`；保留 `.toolbar { position: relative }` 原有定位上下文。
+- 附带修复：`.toolbar-title` 内 `.sr-only` 是未指定 `left/top` 的绝对定位元素，包含块落在滚动容器之外，停在 x≈409 并给 document 撑出 **20px 横向滚动**（`scrollWidth 410 / clientWidth 390`）。就近设 `.toolbar-title { position: relative; }` 使其被 `.filter-tabs` 裁剪，横向滚动归零。
+
+### 验证（CDP 真实渲染，390×844，九语种逐个替换按钮文案实测矩形）
+
+| 语言 | 按钮宽 | 标签右缘 / 按钮左缘 | overlap | scrollWidth / clientWidth |
+| --- | --- | --- | --- | --- |
+| zh-CN / zh-TW | 44px | 313 / 321 | 0 | 390 / 390 |
+| en | 84px | 273 / 281 | 0 | 390 / 390 |
+| ja / ko | 70 / 74px | 287 / 283 | 0 | 390 / 390 |
+| es / pt | 100 / 113px | 257 / 244 | 0 | 390 / 390 |
+| fr / de | 120px | 237 / 245 | 0 | 390 / 390 |
+
+按钮右缘恒为 365（视口 390 内），`overlap=0` 全覆盖，9/9 通过。脚本：`readme-shots/verify-r3.mjs`。
+
+- `tests/run.mjs` 新增 R3 结构断言（网格列、无绝对定位、无 58px、`.toolbar-title` 定位）。
+- `gen_app.py --check` 六平台零漂移；全量 Node 回归 **1119 通过 / 0 失败**（862+23+64+59+47+51+13）。
+- 6 张 README 截图按 v1.1.6 + 390px 重拍；README 截图说明同步为 v1.1.6 并注明 390px 视口。
+- `APP_VERSION` → `v1.1.6`。
+
+**取舍**：按钮变宽时标签可视区相应收窄，`Starred` / `Pinned` 需横向滑动查看——`.filter-tabs` 本身就是横滑容器，chip 完整可点、不被覆盖。若要求 390px 下同时看到全部 chip，需把多选入口改成图标或移到别处，属界面改动，本轮未做。
