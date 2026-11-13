@@ -3132,7 +3132,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
                      border-left: var(--ds-border-w) solid var(--ds-color-primary-fill);
                      background: var(--ds-color-primary-fill); color: var(--ds-color-on-primary);
                      font-family: var(--ds-font-family); font-size: 11px; font-weight: 600; padding: 2px 9px;
-                     min-height: 22px; min-width: 40px; cursor: pointer; transition: background .15s; }
+                     min-height: 26px; min-width: 40px; cursor: pointer; transition: background .15s; }
   .code-chip .copy:hover { background: var(--ds-color-primary-fill-hover); }
   .code-chip .copy:active { background: var(--accent-deep); filter: brightness(.94); }
   .code-chip .copy:disabled { opacity: .75; cursor: default; }
@@ -3459,12 +3459,23 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     body.selecting .msg-main > .msg-foot { display: none; }
     body.selecting .selwrap { display: block; flex: 0 0 20px; align-self: flex-start; }
   }
-  /* ===== UX-18：超窄屏（≤360）=====
-     320 上「设备名 + 三个图标 + 验证码胶囊」排不进一行（266px 可用），胶囊会被顶到第二行，
-     卡片高度 147→195，并把 document 撑出 4px 横向滚动。有码时让设备名退场
-     （详情弹层里仍有完整来源），图标组与胶囊留在同一行；无码卡片保持原样。 */
-  @media (max-width: 360px) {
+  /* ===== UX-18：窄屏有码卡片让设备名退场（≤389）=====
+     卡片底部一行是「设备名 · 三个 40px 图标 · 验证码胶囊」，前两者固定吃掉 120px + 胶囊 121–127px。
+     逐档实测可用给设备名的宽度：320→0（排不下，胶囊被顶到第二行、卡片 147→195、document 溢出 4px），
+     360→27px（「Pi…」），375→42px（「Pixel 8…」），390→57px（刚好放下「Pixel 8 Pro」）。
+     也就是说 361–389 这一段会把设备名压成两三字符的残句，比不显示更像 bug；
+     因此断点取 389：390（主流机型）起才渲染，以下整段让位，完整来源始终在详情弹层里。
+     退场时不占位、不补占位文字，脚注块直接 display:none，底部一行不会留下空槽或孤立分隔符。 */
+  @media (max-width: 389px) {
     .card:has(.rail-code) .msg-main > .msg-foot { display: none; }
+    /* 标题行原本 nowrap：德语 «Benachrichtigung»、葡语 «Notificação» 这类长来源徽章 +
+       长号码在 320 上把 document 撑出 31px / 10px 横向滚动。窄屏放开换行，
+       徽章允许省略（完整来源在详情弹层），宁可多一行也不产生横向滚动。 */
+    .msg-top { flex-wrap: wrap; row-gap: 2px; }
+    .msg-top .tag { min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+  }
+  /* ===== UX-18：超窄屏（≤360）===== */
+  @media (max-width: 360px) {
     .msg-rail > .rail-code .code-chip .code-val { padding: 0 8px; font-size: 12.5px; }
     .msg-rail > .rail-code .code-chip .copy { padding: 0 10px; }
     /* 带类型徽章（Notification）的卡片在 320 上把标题行撑出 4px 横向滚动：
@@ -3477,6 +3488,17 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     .filter-tabs .chip { padding: 0 8px; }
     /* 搜索框的最小宽度会让「筛选」按钮单独掉到下一行，这里允许搜索框继续压缩 */
     .filter-row .searchwrap { flex: 1 1 0; min-width: 0; }
+  }
+  /* 手机区间的长文案语种（de/es/fr/pt/ko）：Alle·Ungelesen·Gelesen·Favoriten·Angeheftet
+     这组标签在 390 上会折到第二行。不到 430px 时统一收字号与内边距，五个标签挤回一行；
+     命中区高度仍由 .filter-tabs .chip 的 min-height: 44px 保证。 */
+  @media (max-width: 430px) {
+    :root:is([lang="de"], [lang="es"], [lang="fr"], [lang="pt-BR"], [lang="ko"]) .filter-tabs .chip {
+      font-size: 11.5px; padding: 0 8px;
+    }
+    :root[lang="de"] .filter-tabs { gap: 4px; }
+    /* 德语标签最长（Ungelesen / Angeheftet），390 上再收一档才能五个排进一行 */
+    :root[lang="de"] .filter-tabs .chip { padding: 0 6px; font-size: 11px; }
   }
   /* 平板区间（661–900）：一行放不下「视图标签 + 搜索 + 三个下拉 + 刷新」，
      用网格固定为「标签 | 刷新」/「搜索与筛选」两行，避免刷新被挤到单独第三行 */

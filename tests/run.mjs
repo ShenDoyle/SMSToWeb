@@ -2146,6 +2146,11 @@ async function main() {
     && /\.msg-actions \.more \{ display: none; \}/.test(pageHtml)
     && /body\.selecting \.msg-main > \.msg-foot \{ display: none; \}/.test(pageHtml),
     "UX-17/UX-18：窄屏设备 · 图标 · 验证码同处卡片底部一行，验证码排最右（复制是最高频动作）");
+  /* UX-18c：≤389 有码卡片让设备名退场。断点取 389 而非 360，是因为实测 361–389 会给设备名
+     只剩 27–42px，显示成「Pi…」，比不显示更像缺陷；390 起才够 57px 放下完整设备名。 */
+  check(/@media \(max-width: 389px\) \{\s*\.card:has\(\.rail-code\) \.msg-main > \.msg-foot \{ display: none; \}/.test(pageHtml)
+    && !/@media \(max-width: 360px\) \{[^}]*\.card:has\(\.rail-code\)/.test(pageHtml),
+    "UX-18c：有码卡片在 ≤389 让设备名退场（不占位、不补占位文字），390 起恢复");
   /* UX-15 后复制验证码并入次要操作格（仍在最前两位），删除与关闭独占一行；语义断言随之更新 */
   check(/id="dunread"/.test(pageHtml) && /code \? icBtn\('button', ' id="dccopy"/.test(pageHtml)
     && /doCopy\(extractCode\(m\.content/.test(pageHtml)
