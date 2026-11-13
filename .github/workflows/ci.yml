@@ -45,6 +45,7 @@ jobs:
           node tests/ux02-layout.mjs
           node tests/ux03-settings.mjs
           node tests/notify-sensitive-fields.mjs
+          node tests/etag-fallback.mjs
 
   browser:
     runs-on: ubuntu-latest

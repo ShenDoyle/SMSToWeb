@@ -69,7 +69,7 @@ function escAttr(s) {
 function jsStr(s) {
   return JSON.stringify(s).replace(/</g, "\\u003c");
 }
-const APP_VERSION = "v1.1.2";
+const APP_VERSION = "v1.1.3";
 
 /* 把页面模板中的占位标记替换为实际配置值（用函数替换器，避免值里含 $& 等特殊序列被误解释） */
 function renderHtml(html, env) {
@@ -81,12 +81,27 @@ function renderHtml(html, env) {
     .replace(/__APP_VERSION__/g, function () { return escAttr(APP_VERSION); });
 }
 
+/* 纯 JS 内容指纹（WebCrypto 不可用时的降级路径）。
+   ETag 只用于「内容是否变化」的缓存验证，不承担安全用途，无需密码学强度；
+   双 32 位 FNV-1a 拼 64 位，纯同步、无平台运行时依赖，六平台行为一致。 */
+function jsEtag(body) {
+  let h1 = 0x811c9dc5, h2 = 0x9e3779b9;
+  for (let i = 0; i < body.length; i++) {
+    const c = body.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 0x01000193);
+    h2 = Math.imul(h2 ^ (c + i), 0x85ebca6b);
+  }
+  return '"' + (h1 >>> 0).toString(16).padStart(8, "0") + (h2 >>> 0).toString(16).padStart(8, "0") + '"';
+}
+
 /* ==== ENG-01 OPT-1：HTML 文档缓存策略（no-store → no-cache + 稳定 ETag） ====
    动机：no-store 使每次刷新都重传 ~520KB 完整页面（ENG-01-A1 实测冷热传输一致）。
    语义与安全边界：
    - no-cache ≠ 不缓存：允许共享缓存存储，但每次使用前必须回源验证（If-None-Match）。
    - ETag 对「最终渲染后的 HTML」做 SHA-256（站点名/图标/版本变化都会改变内容 → ETag 随之变化），
      不使用时间戳等不稳定值；同一内容恒定同一 ETag。
+   - WebCrypto 不可用（平台运行时差异）时降级为纯 JS 内容指纹，ETag 与 304 链路照常工作，
+     并输出一条结构化 warn 日志（etag_digest_fallback）供平台日志面板定位。
    - 认证隔离：登录页（LOGIN_HTML）与主页面（PAGE_HTML）内容不同 → ETag 不同。
      登出/过期后回源计算的是另一种 HTML，ETag 必不匹配 → 返回 200 新页面，
      共享缓存不可能把 A 的认证页喂给 B（每次使用都强制回源验证）。
@@ -100,19 +115,22 @@ async function serveHtml(rawHtml, env, request) {
     "Vary": "Cookie",
     ...SECURITY_HEADERS,
   };
+  let etag;
   try {
     const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body)));
-    let etag = '"';
-    for (let i = 0; i < 16; i++) etag += digest[i].toString(16).padStart(2, "0");
-    etag += '"';
-    headers.ETag = etag;
-    const inm = request && request.headers ? (request.headers.get("if-none-match") || "") : "";
-    if (inm.split(",").map(function (s) { return s.trim(); }).indexOf(etag) !== -1) {
-      return new Response(null, { status: 304, headers: headers });
-    }
-  } catch (e) {
-    /* WebCrypto 不可用等极端情况：退化为 no-cache 无 ETag（仍比 no-store 省传输，
-       且绝不会因缓存验证失败而返回错误内容） */
+    let s = '"';
+    for (let i = 0; i < 16; i++) s += digest[i].toString(16).padStart(2, "0");
+    etag = s + '"';
+  } catch (err) {
+    /* 降级：WebCrypto 不可用等运行时差异不再导致 ETag 消失（CF 实测 F1）。
+       no-cache 仍强制每次回源验证，降级指纹内容变化时同样会变，安全语义不变。 */
+    etag = jsEtag(body);
+    logEvent("warn", "etag_digest_fallback", "serveHtml", env, "-", { error: logErrorInfo(err) });
+  }
+  headers.ETag = etag;
+  const inm = request && request.headers ? (request.headers.get("if-none-match") || "") : "";
+  if (inm.split(",").map(function (s) { return s.trim(); }).indexOf(etag) !== -1) {
+    return new Response(null, { status: 304, headers: headers });
   }
   return new Response(body, { headers: headers });
 }
