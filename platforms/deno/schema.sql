@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
   deleted_at  TEXT,
   starred     INTEGER NOT NULL DEFAULT 0,
+  pinned      INTEGER NOT NULL DEFAULT 0,
   read_at     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_messages_device_time ON messages(device_id, received_at DESC);
@@ -29,12 +30,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_dedup
   ON messages(device_id, sender, content, received_at);
 -- 来源筛选索引
 CREATE INDEX IF NOT EXISTS idx_messages_source ON messages(source, received_at DESC);
--- 首屏列表主排序（starred DESC, received_at DESC, id DESC）：
+-- 首屏列表主排序（pinned DESC, received_at DESC, id DESC）：置顶与收藏拆分后由 pinned 控制排序
 -- 避免 5 万行以上时 SQLite 选「逐设备回表 + 临时 B 树全量排序」（实测 112ms → 0.1ms）
 -- 注意：不要改成 WHERE deleted_at IS NULL 的部分索引——统计接口聚合 read_at 时会
 -- 被迫走索引 + 随机回表，实测由 39ms 退化到 62ms；普通索引下统计仍走全表扫描
 CREATE INDEX IF NOT EXISTS idx_messages_star_time
   ON messages(starred DESC, received_at DESC, id DESC);
+-- 置顶排序索引（收藏 starred 仅作标记/筛选，不再影响排序）
+CREATE INDEX IF NOT EXISTS idx_messages_pin_time
+  ON messages(pinned DESC, received_at DESC, id DESC);
 -- 设备列表计数/最近消息时间：覆盖索引，避免逐设备回表全扫（实测 104ms → 5.8ms）
 CREATE INDEX IF NOT EXISTS idx_messages_dev_active_time
   ON messages(device_id, deleted_at, received_at);

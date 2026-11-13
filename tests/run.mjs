@@ -846,8 +846,9 @@ async function main() {
       "设置中心分组：登录与会话 / 通知 / 数据与业务 / 安全");
     check(pgHtml.includes("未保存") && pgHtml.includes("恢复默认") && pgHtml.includes("跟随全局默认"),
       "设置中心具备未保存状态、恢复默认与跟随全局默认入口");
-    check(pgHtml.includes("登录有效期（本浏览器）") && pgHtml.includes("只影响当前浏览器"),
-      "设置中心说明文案明确浏览器作用域（不描述为全局）");
+    check(pgHtml.includes("登录有效期（本浏览器）") && !pgHtml.includes("只影响当前浏览器")
+      && !pgHtml.includes("不会同步到账号或其他设备") && !pgHtml.includes("仅保存在当前浏览器"),
+      "设置中心已移除「仅保存在当前浏览器／不会同步」类说明文案（需求 v1.1.4）");
     check(pgHtml.includes("设置有未保存的修改，关闭后这些修改将丢弃"),
       "未保存时关闭弹窗会先确认（防静默丢失修改）");
     /* 响应式回归护栏：弹层限宽 + 窄屏底部抽屉 + 分组标签横向滚动（防再次引入横向溢出） */
@@ -1267,7 +1268,7 @@ async function main() {
 
     /* 3) 游标链：连续翻页无遗漏、无重复，顺序为时间倒序 + id 倒序 */
     let ids = [], seen = {}, cursor = r.data.next_cursor, pages = 1, prevKey = null, orderOk = true;
-    const tuple = (m) => [m.starred ? 1 : 0, String(m.received_at), Number(m.id)];
+    const tuple = (m) => [m.pinned ? 1 : 0, String(m.received_at), Number(m.id)];
     const cmp = (a, b) => (a[0] - b[0]) || (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0) || (a[2] - b[2]);
     r.data.list.forEach(function (m) { ids.push(m.id); seen[m.id] = true; });
     prevKey = tuple(r.data.list[0]);
@@ -1285,7 +1286,7 @@ async function main() {
       cursor = r.data.next_cursor;
     }
     check(ids.length === 25 && Object.keys(seen).length === 25, "游标翻完共 25 条且无重复");
-    check(orderOk, "严格按 (starred,received_at,id) 倒序，无乱序");
+    check(orderOk, "严格按 (pinned,received_at,id) 倒序，无乱序");
 
     /* 4) 同一时间戳的记录全部出现（不因同秒被跳过）：按 received_at 分组，最大同秒组 ≥ 3 */
     const allRows = (await call("GET", "/api/messages?limit=100", eP)).data.list;
@@ -1391,7 +1392,7 @@ async function main() {
     /* S1：首屏后取消已加载消息的星标 → 续页必须明确失效（409），而不是静默漏读 */
     let r0 = await page1();
     const c0 = r0.data.next_cursor;
-    check(!!c0 && c0.split("|").length === 4 && /^[0-9a-f]{64}$/.test(c0.split("|")[3]), "游标含 SHA-256 集合指纹（4 段：starred|time|id|sha256）");
+    check(!!c0 && c0.split("|").length === 4 && /^[0-9a-f]{64}$/.test(c0.split("|")[3]), "游标含 SHA-256 集合指纹（4 段：pinned|time|id|sha256）");
     check(r0.data.list.some((m) => m.id === 25 && m.starred === 1), "首屏包含已星标消息（id=25）");
     await star(25, false);
     let rr = await withCursor(c0);
@@ -1412,7 +1413,8 @@ async function main() {
     r0 = await page1();
     const p2 = await withCursor(r0.data.next_cursor);
     const c2 = p2.data.next_cursor;
-    const target = p2.data.list[0].id;
+    const targetRow = p2.data.list.filter(function (m) { return !m.starred; })[0] || p2.data.list[0];
+    const target = targetRow.id;
     await star(target, true);
     rr = await withCursor(c2);
     check(rr.status === 409 && rr.data.error === "CURSOR_STALE", "S3 第二页后星标已加载消息 → 409");
@@ -1543,8 +1545,8 @@ async function main() {
     for (let i = 1; i <= N; i++) {
       insProj.run(Number(devProj.lastInsertRowid), "10086", "投影用例第 " + i + " 条 验证码 " + (150000 + i), "2026-10-08 10:00:" + String(i).padStart(2, "0"), "sms", 0, null);
     }
-    /* 星标切换直接写库（与 /api/messages/star 的持久化效果等价，且不占用接口速率额度） */
-    const starP = (id, on) => rawProj.prepare("UPDATE messages SET starred = ? WHERE id = ?").run(on ? 1 : 0, id);
+    /* 星标切换直接写库；同时写 pinned，维持本组「标记行排在列表前部」的历史前提（v1.1.4 拆分后由 pinned 控制排序） */
+    const starP = (id, on) => rawProj.prepare("UPDATE messages SET starred = ?, pinned = ? WHERE id = ?").run(on ? 1 : 0, on ? 1 : 0, id);
     const listP = (qs) => call("GET", "/api/messages?slim=1&limit=10" + (qs || ""), eProj);
     const withCursorP = (c) => call("GET", "/api/messages?slim=1&limit=10&cursor=" + encodeURIComponent(c), eProj);
 
@@ -1666,7 +1668,10 @@ async function main() {
       "规范化编码无歧义：{1,4} 与 {2,3} / {14} / {1,04} 摘要均不同");
 
     /* 3) 同快照一致：一次读取得到的指纹与返回行必须来自同一状态 */
-    const starQ = (id, on) => call("POST", "/api/messages/star", eQ, { body: { id, starred: on } });
+    /* v1.1.4：收藏与置顶拆分，本组仍要求「标记行排在首屏」的历史前提，
+       故同时调用独立 pin 接口（顺带覆盖新 API），指纹依旧只取 starred 集合。 */
+    const starQ = (id, on) => call("POST", "/api/messages/star", eQ, { body: { id, starred: on } })
+      .then(() => call("POST", "/api/messages/pin", eQ, { body: { id, pinned: on } }));
     await starQ(1, true); await starQ(2, true);
     let rq = await call("GET", "/api/messages?slim=1&limit=2", eQ);
     let starIds = rq.data.list.filter((m) => m.starred === 1).map((m) => String(m.id));
@@ -2099,8 +2104,35 @@ async function main() {
   check(/function applyI18n/.test(pageHtml) && /function T\(key, vars\)/.test(pageHtml), "i18n 运行时（T / applyI18n）已注入");
   check(/r\.status === 401/.test(pageHtml) && /location\.reload/.test(pageHtml),
     "登录过期 401 → 整页重载到登录页（不停在加载失败）");
-  check(/id="dev"/.test(pageHtml) && /function syncDevSelect/.test(pageHtml) && /function openDevices/.test(pageHtml) && !/renderTabs/.test(pageHtml),
-    "设备筛选迁到筛选区下拉，设备管理改为独立弹层（不再重复拉 /api/devices）");
+  check(/id="dev"/.test(pageHtml) && /function syncDevSelect/.test(pageHtml) && !/renderTabs/.test(pageHtml),
+    "设备筛选仍在筛选区下拉（不再重复拉 /api/devices）");
+  /* ===== UX-14 / v1.1.4 六项调整：结构验收 ===== */
+  check(!/id="devbtn"/.test(pageHtml) && !/id="mnudev"/.test(pageHtml) && !/function openDevices/.test(pageHtml)
+    && /key: "devices"/.test(pageHtml) && /function deviceRowsHtml/.test(pageHtml)
+    && /function scBodyDevices/.test(pageHtml) && /SC\.section === "devices"/.test(pageHtml),
+    "需求 3：设备独立入口已移除，设备管理迁入设置中心单独 tab");
+  check(/scTabDevices:/.test(pageHtml) && /scSecDevicesHelp:/.test(pageHtml) && (pageHtml.match(/\bscTabDevices:/g) || []).length === 9,
+    "需求 3：设备 tab 文案九语种全覆盖");
+  check(/data-sc-tab/.test(pageHtml) && /SC\.section === "devices" \|\| SC\.loading/.test(pageHtml),
+    "需求 3：设备 tab 隐藏保存/恢复默认（编辑即时生效）");
+  check(!/查看统计/.test(pageHtml) && /data-i18n="viewStats">统计</.test(pageHtml)
+    && !/viewStats:\s*"查看统计"/.test(pageHtml),
+    "需求 2：所有「查看统计」文案统一为「统计」");
+  check(!/仅保存在当前浏览器/.test(pageHtml) && !/不会同步到账号或其他设备/.test(pageHtml)
+    && !/只在当前浏览器生效/.test(pageHtml),
+    "需求 4：本地存储/不同步类说明文案已删除（存储行为不变）");
+  const uxSrc = readFileSync(new URL("../src/worker.js", import.meta.url), "utf8");
+  check(/\/api\/messages\/pin/.test(pageHtml)
+    && /id="fpin"/.test(pageHtml) && /id="dpin"/.test(pageHtml) && /class="pin'/.test(pageHtml)
+    && /id="fstar"/.test(pageHtml) && /id="dstar"/.test(pageHtml)
+    && /handlePinMessage/.test(uxSrc) && /pinned DESC, received_at DESC, id DESC/.test(uxSrc),
+    "需求 1：收藏与置顶各自独立入口/状态/接口，排序只由 pinned 决定");
+  check(/detail-code/.test(pageHtml) && /id="dccopy"/.test(pageHtml) && /\.dc-value/.test(pageHtml)
+    && /var codeCard = code/.test(pageHtml) && /doCopy\(cv\.textContent/.test(pageHtml)
+    && /font-family: var\(--ds-font-mono\)/.test(pageHtml),
+    "需求 5：详情卡片右侧验证码（代码加重样式）+ 所有含码详情均有复制按钮");
+  check((pageHtml.match(/\bcopyCode:/g) || []).length === 9 && (pageHtml.match(/\bdetailCode:/g) || []).length === 9,
+    "需求 5：验证码卡片文案九语种全覆盖");
   check(/viewport-fit=cover/.test(pageHtml) && /apple-mobile-web-app-capable/.test(pageHtml),
     "移动端 viewport 安全区 / PWA meta 就位");
   check(/format-detection" content="telephone=no/.test(pageHtml), "禁用 iOS 号码自动识别，避免吞掉发件号");

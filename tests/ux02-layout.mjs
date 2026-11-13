@@ -5,8 +5,8 @@
  *
  * 覆盖：
  *  A. 侧栏移除、单栏布局、失效选择器清理。
- *  B. 设备筛选迁移到筛选区 + 设备管理弹层仍保留全部动作（接口语义不变）。
- *  C. 顶栏入口（统计 / 设备 / 设置 / 退出 + 移动端 ⋯ 菜单）。
+ *  B. 设备筛选迁移到筛选区 + 设备管理迁入设置中心 tab 后仍保留全部动作（接口语义不变）。
+ *  C. 顶栏入口（统计 / 设置 / 退出 + 移动端 ⋯ 菜单；设备入口已移除）。
  *  D. 首页统计摘要默认隐藏、可开关、可持久化，且不新增 API / 不改口径。
  *  E. 消息卡三行结构、设备标签分组去重、操作常驻可发现。
  *  F. 列表契约（device_id / starred / unread / read / range / q / 游标）未被改动。
@@ -124,12 +124,17 @@ t("B6 危险操作不再使用原生 confirm（仅保留 dsConfirm 的降级兜�
   /if \(!el \|\| !msg \|\| !okBtn \|\| !noBtn\) return Promise\.resolve\(window\.confirm\(/.test(SRC) &&
   /function dsConfirm\(opt\)/.test(SRC));
 
-/* ---------- C. 导航 ---------- */
-t("C1 顶栏含统计 / 设备 / 设置 / 退出",
-  has('id="statsbtn"') && has('id="devbtn"') && has('id="setbtn"') && has('id="logoutbtn"'));
-t("C2 移动端 ⋯ 菜单含四项且与桌面入口同源",
-  has('id="morebtn"') && has('id="navmenu"') && has('id="mnustats"') && has('id="mnudev"') &&
-  has('id="mnuset"') && has('id="mnulogout"'));
+/* ---------- C. 导航（UX-14：设备移入设置中心单独 tab，独立入口移除） ---------- */
+t("C1 顶栏含统计 / 设置 / 退出，设备独立入口已移除",
+  has('id="statsbtn"') && has('id="setbtn"') && has('id="logoutbtn"') &&
+  !has('id="devbtn"') && /key: "devices"/.test(SRC) && /function scBodyDevices/.test(SRC));
+t("C2 移动端 ⋯ 菜单含刷新 / 统计 / 设置 / 退出四项，设备入口已移除",
+  has('id="morebtn"') && has('id="navmenu"') && has('id="mnurefresh"') && has('id="mnustats"') &&
+  has('id="mnuset"') && has('id="mnulogout"') && !has('id="mnudev"'));
+t("C4 设备 tab 就地刷新数据，操作后不关闭设置弹层",
+  /function scRefreshDevices/.test(SRC) && /function deviceAction/.test(SRC) &&
+  /SC\.section === "devices" && \$\("scbody"\)/.test(SRC) &&
+  !/function devAfterChange\(\) \{ if \(DSP_RES\) DSP_RES\(null\); closeModal\(\)/.test(SRC));
 t("C3 移动端菜单可关闭（点外部收起）",
   /document\.addEventListener\("click", function \(ev\) \{[\s\S]{0,260}?close\(\);\s*\}\);/.test(SRC) &&
   /function close\(\) \{ menu\.hidden = true;/.test(SRC));

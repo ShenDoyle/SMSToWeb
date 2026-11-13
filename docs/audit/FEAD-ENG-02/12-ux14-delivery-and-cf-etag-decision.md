@@ -1,0 +1,110 @@
+# 12 · UX-14 六项调整交付 + CF ETag 方案收口
+
+- 日期：2026-11-13
+- 版本：`v1.1.4`（基线 `8c412f2` / v1.1.3）
+- 范围：用户 2026-11-13 下达的 6 项产品调整；未提及的功能与界面保持不变
+- 前置结论沿用：`10-live-cf-eo-analysis.md`（CF/EO 线上实测）、`11-etag-f1-rootcause.md`（F1 零发版诊断）
+
+---
+
+## 一、六项调整交付矩阵
+
+| # | 需求 | 落盘位置 | 实现要点 |
+|---|---|---|---|
+| 1 | 收藏与置顶拆成两个独立功能 | `src/worker.js` / `schema.sql` / `tests/run.mjs` | 新增 `pinned` 列与 `idx_messages_pin_time`；独立接口 `/api/messages/pin`（`handlePinMessage`）；独立列表按钮 `.pin`、筛选 chip `#fpin`、详情按钮 `#dpin`；`starred` 只管收藏筛选，**排序改由 `ORDER BY pinned DESC, received_at DESC, id DESC`**；游标首段由 `starred` 改为 `pinned`；九语种新增 `pin/unpin/pinOnly/pinTip/pinItemTip/pinFail`，`star` 文案去掉「置顶」 |
+| 2 | 「查看统计」→「统计」 | `src/worker.js` | 九语种 `viewStats` 统一改为「统计」/对应本地化短词；HTML 两处静态按钮 `data-i18n="viewStats"` 同步改字 |
+| 3 | 设备移入设置、单独 tab | `src/worker.js` / `tests/ux02-layout.mjs` | 删除顶栏 `#devbtn`、移动端 `#mnudev`、`openDevices()` 弹层；`SET_SECTIONS` 新增 `{ key: "devices" }`；新增 `deviceRowsHtml()` / `deviceAction()` / `scBodyDevices()` / `scRefreshDevices()`；`scRenderBody()` 增分支、`scSectionActions()` 对该 tab 隐藏「保存/恢复默认」；设备操作即时生效后**就地重绘 tab、不再关闭设置弹层**；九语种新增 `scTabDevices / scSecDevicesHelp / scDevicesEmpty` |
+| 4 | 删除「仅保存在当前浏览器」类说明文案 | `src/worker.js` / `tests/run.mjs` | `scSecDisplayHelp`、`scSecMessagesHelp`、`scHomeStatsScope`、`scBrowserPrefsHelp`、`scLangHelp`、`scPageSizeHelp` 九语种置空；`scHead()` 在 desc 为空时不渲染 `<p>`；`scBodyDisplay()` 用 `filter(Boolean).join(" ")`。**仅删文案，localStorage 存储与同步行为零改动** |
+| 5 | 详情卡片右侧验证码 + 复制按钮 | `src/worker.js` | `detailHTML()` 生成 `.detail-code` 右栏（弹层与宽屏面板共用同一渲染层 → 所有含码详情都覆盖）：`dc-label` + `dc-value` + `#dccopy`；样式为等宽字体、24px/700 字重、2px 字距、`--ds-code-*` 强调色；`bindDetail()` 读取 `.dc-value` 调 `doCopy()`；无验证码消息仍是原单栏 `.detail-body`，布局不变；窄屏（≤660px）降级为横向堆叠 |
+| 6 | `sms-gateway.jexsef.workers.dev` ETag 支持 + CF 官方文档分析 | 本报告第三～六节 | **结论：放弃该 ETag 相关方案，保持现状**，不阻塞其余 5 项；详见下文 |
+
+### 改动文件清单
+
+| 文件 | 变更 |
+|---|---|
+| `src/worker.js` | 主源：六项逻辑、i18n、CSS、版本号 `v1.1.3 → v1.1.4` |
+| `schema.sql` | `pinned` 列 + 索引 + 主排序注释 |
+| `platforms/{shared,cloudflare,edgeone,vercel,netlify,deno,node}/*` | `gen_app.py` 同步产物（含 `SCHEMA_SQL` 内嵌块） |
+| `tests/run.mjs` | 适配 pinned 排序/游标、说明文案断言，新增六项需求验收断言（859 项） |
+| `tests/ux02-layout.mjs` | C1/C2 改为「设备入口已移除、迁入设置 tab」，新增 C4 就地刷新断言（59 项） |
+| `docs/audit/FEAD-ENG-02/12-*.md` | 本报告 |
+
+---
+
+## 二、验证结果（v1.1.4）
+
+| 检查 | 结果 |
+|---|---|
+| `node --check src/worker.js` | 通过 |
+| `python platforms/gen_app.py` + `--check` | 六平台产物零漂移；`SCHEMA_SQL` 与根 `schema.sql` 一致；schema 引用校验通过 |
+| `node tests/run.mjs` | **859 通过 / 0 失败** |
+| `tests/p1-auth.mjs` | 23 / 0 |
+| `tests/settings-i18n.mjs` | 64 / 0 |
+| `tests/ux02-layout.mjs` | 59 / 0 |
+| `tests/ux03-settings.mjs` | 47 / 0 |
+| `tests/notify-sensitive-fields.mjs` | 51 / 0 |
+| `tests/etag-fallback.mjs` | 13 / 0 |
+| **合计** | **1116 通过 / 0 失败** |
+
+`npm run test:browser`（Playwright 三套）本机未安装 `playwright` / Chromium，本轮未执行；CI 工作流包含该步骤。
+
+---
+
+## 三、第 6 项：`sms-gateway.jexsef.workers.dev` 实测
+
+```
+$ curl -sSI https://sms-gateway.jexsef.workers.dev/
+HTTP/1.1 502 Bad Gateway
+Connection: close
+Retry-After: 1
+Content-Length: 46
+Content-Type: text/plain; charset=utf-8
+```
+
+该 `workers.dev` 子域当前返回 502，**没有可用的 Worker 响应可供对照**，因此无法用它验证「绕过 Zone 规则后 ETag 是否出现」（这正是报告 11 第五节列的「一锤定音实验」）。此路不通，但**不影响判定**：报告 11 已用零发版诊断独立证明——
+
+| 站点 | 响应头 ETag | 本地复算 SHA-256 | 用本地指纹发 `If-None-Match` |
+|---|---|---|---|
+| EO | 有，且与本地复算一致 | ✓ | **304 / 0 字节** |
+| CF 自定义域名 | **无** | ✓ | **304 / 0 字节** |
+
+即 CF 上的 Worker **确实算出了正确的强 ETag，且 304 判断逻辑正常**，只是响应头在返回客户端前被边缘/Zone 层剥离。问题在平台侧，不在应用代码。
+
+---
+
+## 四、Cloudflare 官方文档核对（2026-11-13 抓取）
+
+| 来源 | 官方原文要点 |
+|---|---|
+| [Cache Rules settings → Respect Strong ETags](https://developers.cloudflare.com/cache/how-to/cache-rules/settings/) | “Turn on or off byte-for-byte equivalency checks between the Cloudflare cache and the origin server. When enabled, Cloudflare will use strong ETag header validation… **If disabled, Cloudflare converts ETag headers into weak ETag headers.**” API 字段 `respect_strong_etags`（boolean） |
+| [Workers Runtime APIs → Cache](https://developers.cloudflare.com/workers/runtime-apis/cache/) | 响应头 `ETag`：“Allows `cache.match()` to evaluate conditional requests with `If-None-Match`.”；请求头 `If-None-Match`：“Results in a `304` response if a matching response is found with an `ETag` header with a value that matches…” 并明确 Cache API 与 CDN 缓存是**两套独立机制** |
+| [Origin Cache Control](https://developers.cloudflare.com/cache/concepts/cache-control/) | “When setting `no-cache` with Origin Cache Control off, Cloudflare does not cache. When setting `no-cache` with Origin Cache Control on, Cloudflare caches and always revalidates.”；`Vary`：“By default, Cloudflare does not consider vary values in caching decisions.” |
+| [Default cache behavior](https://developers.cloudflare.com/cache/concepts/default-cache-behavior/) | `Cache-Control: no-cache` 属于「不缓存」条件之一；“**The Cloudflare CDN does not cache HTML or JSON by default.**” |
+
+### 由官方文档得到的关键判断
+
+1. CF 官方口径是「**强 ETag 转弱**」，而本例观测是「**完全没有 ETag**」。两者不完全吻合，说明除 `respect_strong_etags` 之外，Zone 层还存在移除响应头的动作（Transform Rules / 前置代理 Worker / 边缘规则）。这属于 Zone 配置，应用代码无法自证或覆盖。
+2. 本应用返回的是**认证态动态 HTML**：`Cache-Control: no-cache` + `Vary: Cookie`。按官方默认行为，这类响应不入 CF 边缘缓存，且 CF 默认不缓存 HTML/JSON。因此「靠 ETag 在 CF 边缘完成 304 省流」这条链路，在 CF 上本就不在默认缓存路径里。
+3. 若要强行打通，需要同时：开启 Cache Rules 的 `Respect Strong ETags`、显式配置 `Vary`、让认证页面可缓存、排查剥离头部的 Transform Rules。其中「认证页面进共享缓存」与现有 `Vary: Cookie` 隔离设计直接冲突，存在**串号风险**，收益（约 28KB/次省流）远小于风险与配置成本。
+4. Workers Cache API 的 `ETag`/`If-None-Match` 能力是**另一套机制**（`caches.default`），本项目未使用它，也不适合认证 HTML。
+
+---
+
+## 五、决策：放弃该 ETag 方案，保持现状
+
+按用户指示执行，**不为 ETag 阻塞其余调整**：
+
+- **放弃**：不再尝试让 CF 自定义域名返回强 ETag，不再为此改应用代码、不再追加诊断发版。
+- **保持现状**：
+  - `serveHtml()` 的 SHA-256 强 ETag + `If-None-Match → 304` + `no-cache` + `Vary: Cookie` 全部保留；
+  - v1.1.3 的 `jsEtag` 纯 JS 降级与 `etag_digest_fallback` warn 日志**保留不回滚**——它保障的是「WebCrypto 不可用时仍不丢 ETag」，属独立健壮性价值，与 CF 是否透传 ETag 无关；
+  - `tests/etag-fallback.mjs` 13 项继续留在 `test:node` 与 CI。
+- **实际影响**：页面 200 正常、登录态隔离不变、功能无损；EO 平台 ETag + 304 省流继续生效；仅 CF 侧浏览器拿不到 ETag，每次回源约 28KB 全量响应（省流优化失效）。**当前线上使用不受影响**。
+- **闭环状态**：F1 从「应用缺陷」改判为「平台配置差异」后，代码侧已闭环；平台侧排查不再列入当前迭代的阻塞项。
+
+---
+
+## 六、后续（非本轮）
+
+- U1–U10 六平台统一验收用例（`09-test-plan.md`）按用户指示推迟到 **2.0.0 正式版**再做；本轮线上是真实在用的生产部署，不做大范围真实评测。
+- 若 2.0.0 前决定恢复 CF 省流，只在 CF 控制台侧处理：Cache Rules → `Respect Strong ETags`、Transform Rules 响应头排查、`Vary` 配置；顺序见 `11-etag-f1-rootcause.md` 第五节。**该动作需控制台权限，由用户侧执行，不进应用代码。**

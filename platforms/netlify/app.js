@@ -69,7 +69,7 @@ function escAttr(s) {
 function jsStr(s) {
   return JSON.stringify(s).replace(/</g, "\\u003c");
 }
-const APP_VERSION = "v1.1.3";
+const APP_VERSION = "v1.1.4";
 
 /* 把页面模板中的占位标记替换为实际配置值（用函数替换器，避免值里含 $& 等特殊序列被误解释） */
 function renderHtml(html, env) {
@@ -1425,11 +1425,12 @@ async function handlePush(request, env, url, ctx) {
 /* ---------------- 查询 / 管理 API ---------------- */
 
 /* 稳定游标：starred|received_at|id|<sha256>
+   首段为置顶标记 pinned（与 ORDER BY 首列严格对应；收藏 starred 仅作标记/筛选，不参与排序）。
    末段为「当前筛选条件下星标 ID 集合」的 SHA-256（ID 升序、逗号规范化的确定性摘要），
    可完整区分任意集合差异（不再使用 COUNT/SUM 这类有限统计，避免 {1,4}↔{2,3} 碰撞）。
    旧 3 段游标（无摘要）仍兼容，不做校验。 */
 function encodeCursor(row, fpHash) {
-  return [row.starred ? 1 : 0, row.received_at, row.id, fpHash].join("|");
+  return [row.pinned ? 1 : 0, row.received_at, row.id, fpHash].join("|");
 }
 function decodeCursor(raw) {
   if (!raw) return null;
@@ -1439,15 +1440,15 @@ function decodeCursor(raw) {
     const s0 = parts[0] === "1" ? 1 : (parts[0] === "0" ? 0 : null);
     const id0 = parseInt(parts[2], 10);
     if (s0 === null || !parts[1] || !Number.isInteger(id0) || id0 <= 0) return null;
-    return { starred: s0, receivedAt: parts[1], id: id0, legacy: true };
+    return { pinned: s0, receivedAt: parts[1], id: id0, legacy: true };
   }
   if (parts.length !== 4) return null;
-  const starred = parts[0] === "1" ? 1 : (parts[0] === "0" ? 0 : null);
+  const pinned = parts[0] === "1" ? 1 : (parts[0] === "0" ? 0 : null);
   const receivedAt = parts[1];
   const id = parseInt(parts[2], 10);
-  if (starred === null || !receivedAt || !Number.isInteger(id) || id <= 0) return null;
+  if (pinned === null || !receivedAt || !Number.isInteger(id) || id <= 0) return null;
   if (!/^[0-9a-f]{64}$/.test(parts[3])) return null;
-  return { starred, receivedAt, id, hash: parts[3] };
+  return { pinned, receivedAt, id, hash: parts[3] };
 }
 /* 星标集合的确定性指纹：ID 升序 → 逗号连接 → SHA-256 十六进制 */
 async function starSetHash(idsCsv) {
@@ -1473,6 +1474,7 @@ async function handleListMessages(url, env) {
   const range = (url.searchParams.get("range") || "").trim();
   const rangeDays = { "1d": 1, "7d": 7, "30d": 30 }[range] || 0;
   const starredOnly = url.searchParams.get("starred") === "1";
+  const pinnedOnly = url.searchParams.get("pinned") === "1";
   const unreadOnly = url.searchParams.get("unread") === "1";
   const readOnly = url.searchParams.get("read") === "1";
 
@@ -1495,25 +1497,26 @@ async function handleListMessages(url, env) {
     params.push(`%${q}%`, `%${q}%`);
   }
   if (starredOnly) where.push("m.starred = 1");
+  if (pinnedOnly) where.push("m.pinned = 1");
   if (unreadOnly) where.push("m.read_at IS NULL");
   if (readOnly) where.push("m.read_at IS NOT NULL");
   if (rawCursor && !cursor) return json({ success: false, error: "INVALID_CURSOR" }, 400);
 
-  /* 游标条件与 ORDER BY (starred DESC, received_at DESC, id DESC) 严格对应 */
+  /* 游标条件与 ORDER BY (pinned DESC, received_at DESC, id DESC) 严格对应 */
   const pageWhere = where.slice();
   const pageParams = params.slice();
   if (cursor) {
     pageWhere.push(
-      "(m.starred < ? OR (m.starred = ? AND (m.received_at < ? OR (m.received_at = ? AND m.id < ?))))"
+      "(m.pinned < ? OR (m.pinned = ? AND (m.received_at < ? OR (m.received_at = ? AND m.id < ?))))"
     );
-    pageParams.push(cursor.starred, cursor.starred, cursor.receivedAt, cursor.receivedAt, cursor.id);
+    pageParams.push(cursor.pinned, cursor.pinned, cursor.receivedAt, cursor.receivedAt, cursor.id);
   }
   const whereSql = pageWhere.length ? "WHERE " + pageWhere.join(" AND ") + "" : "";
 
   /* 计数：无筛选或仅按设备时走设备覆盖索引（5 万行 1ms / 0.2ms）；
      一旦叠加 starred/read/source/range/关键词，优化器会选 ANY(device_id) 扫描并逐行回表，
      实测 100-119ms，此时强制全表扫描降到 11-14ms */
-  const countHint = (starredOnly || unreadOnly || readOnly || source || q || rangeDays) ? "NOT INDEXED" : "";
+  const countHint = (starredOnly || pinnedOnly || unreadOnly || readOnly || source || q || rangeDays) ? "NOT INDEXED" : "";
   const totalRow = await env.DB.prepare(
     `SELECT COUNT(*) AS n FROM messages m ${countHint} ${where.length ? "WHERE " + where.join(" AND ") : ""}`
   ).bind(...params).first();
@@ -1531,9 +1534,9 @@ async function handleListMessages(url, env) {
      固定到 idx_messages_star_time 后先按 starred=1 取出少量行再排序，降到约 12ms */
   const starSub = `(SELECT group_concat(x.id, ',') FROM (SELECT m2.id FROM messages m2 INDEXED BY idx_messages_star_time ${whereAlias} AND m2.starred = 1 ORDER BY m2.id) x)`;
 
-  const pageCols = "m.id, m.sender, m.content, m.received_at, m.device_id, m.source, m.starred, m.read_at, "
+  const pageCols = "m.id, m.sender, m.content, m.received_at, m.device_id, m.source, m.starred, m.pinned, m.read_at, "
     + "length(m.content) AS content_len";
-  const cols = "p.id, p.sender, p.content, p.received_at, p.device_id, p.source, p.starred, p.read_at, "
+  const cols = "p.id, p.sender, p.content, p.received_at, p.device_id, p.source, p.starred, p.pinned, p.read_at, "
     + "p.content_len, COALESCE(NULLIF(d.alias, ''), d.device) AS device_name, d.sim, d.device";
   /* 多取 1 条用于判断是否还有下一页（不额外发 COUNT）
      绑定顺序必须与 SQL 文本一致：内层 WHERE（基础筛选 + 游标）→ 内层 LIMIT/OFFSET
@@ -1546,14 +1549,14 @@ async function handleListMessages(url, env) {
     `SELECT ${cols}, s.starids AS _starids
      FROM (
        SELECT ${pageCols}
-       FROM messages m INDEXED BY idx_messages_star_time
+       FROM messages m INDEXED BY idx_messages_pin_time
        ${whereSql}
-       ORDER BY m.starred DESC, m.received_at DESC, m.id DESC
+       ORDER BY m.pinned DESC, m.received_at DESC, m.id DESC
        LIMIT ? OFFSET ?
      ) p
      LEFT JOIN devices d ON d.id = p.device_id
      CROSS JOIN (SELECT ${starSub} AS starids) s
-     ORDER BY p.starred DESC, p.received_at DESC, p.id DESC`
+     ORDER BY p.pinned DESC, p.received_at DESC, p.id DESC`
   ).bind(...pageParams, limit + 1, cursor ? 0 : (page - 1) * limit, ...params).all();
 
   let rows = list.results || [];
@@ -1606,7 +1609,7 @@ async function handleListMessages(url, env) {
 async function handleGetMessage(id, env) {
   const row = await env.DB.prepare(
     `SELECT m.id, m.sender, m.content, m.received_at, m.device_id, m.source,
-            m.starred, m.read_at,
+            m.starred, m.pinned, m.read_at,
             COALESCE(NULLIF(d.alias, ''), d.device) AS device_name, d.sim, d.device
      FROM messages m JOIN devices d ON d.id = m.device_id
      WHERE m.id = ?1 AND m.deleted_at IS NULL`
@@ -1643,6 +1646,7 @@ async function handleExport(url, env) {
   const range = (url.searchParams.get("range") || "").trim();
   const rangeDays = { "1d": 1, "7d": 7, "30d": 30 }[range] || 0;
   const starOnly = url.searchParams.get("starred") === "1";
+  const pinOnlyExport = url.searchParams.get("pinned") === "1";
   const unreadOnly = url.searchParams.get("unread") === "1";
   const readOnly = url.searchParams.get("read") === "1";
   const format = (url.searchParams.get("format") || "csv").toLowerCase() === "json" ? "json" : "csv";
@@ -1657,6 +1661,7 @@ async function handleExport(url, env) {
   }
   if (q) { where.push("(m.content LIKE ? OR m.sender LIKE ?)"); params.push("%" + q + "%", "%" + q + "%"); }
   if (starOnly) where.push("m.starred = 1");
+  if (pinOnlyExport) where.push("m.pinned = 1");
   if (unreadOnly) where.push("m.read_at IS NULL");
   if (readOnly) where.push("m.read_at IS NOT NULL");
   const whereSql = where.length ? "WHERE " + where.join(" AND ") : "";
@@ -1754,6 +1759,15 @@ async function handleStarMessage(request, env) {
   const starred = body && (body.starred === true || body.starred === 1 || body.starred === "1") ? 1 : 0;
   await env.DB.prepare("UPDATE messages SET starred = ?1 WHERE id = ?2").bind(starred, id).run();
   return json({ success: true, starred: starred });
+}
+/* 置顶（独立状态，与收藏 starred 互不影响；幂等，可取消） */
+async function handlePinMessage(request, env) {
+  let body; try { body = await request.json(); } catch { return json({ success: false, error: "invalid json" }, 400); }
+  const id = parseInt(body && body.id, 10);
+  if (!Number.isInteger(id) || id <= 0) return json({ success: false, error: "invalid id" }, 400);
+  const pinned = body && (body.pinned === true || body.pinned === 1 || body.pinned === "1") ? 1 : 0;
+  await env.DB.prepare("UPDATE messages SET pinned = ?1 WHERE id = ?2").bind(pinned, id).run();
+  return json({ success: true, pinned: pinned });
 }
 async function handleReadMessage(request, env) {
   let body; try { body = await request.json(); } catch { return json({ success: false, error: "invalid json" }, 400); }
@@ -2589,7 +2603,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .undo-btn { margin-left: 8px; border: 1px solid currentColor; background: none; color: inherit; border-radius: 6px; padding: 2px 8px; font-size: 12px; cursor: pointer; }
   @media (prefers-reduced-motion: reduce) {
     .card, .card.flash, .toast, .tab, .switch, .switch::after,
-    .sc-tab, .chip, .tbtn, .barrow .bf, .top-actions .tbtn, .msg-actions .star, .msg-actions .del,
+    .sc-tab, .chip, .tbtn, .barrow .bf, .top-actions .tbtn, .msg-actions :is(.star, .pin), .msg-actions .del,
     input, button { animation: none !important; transition: none !important; }
   }
   .headacts { display: flex; gap: 6px; flex: none; }
@@ -2607,8 +2621,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .detail-content { margin-top: 10px; white-space: pre-wrap; word-break: break-word; line-height: 1.7; }
   .detail-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
   /* 收藏 / 未读 */
-  .star { border: none; background: none; color: var(--faint); cursor: pointer; font-size: 15px; padding: 0 2px; margin-left: 2px; }
-  .star.on { color: var(--ds-color-warning); }
+  :is(.star, .pin) { border: none; background: none; color: var(--faint); cursor: pointer; font-size: 15px; padding: 0 2px; margin-left: 2px; }
+  :is(.star, .pin).on { color: var(--ds-color-warning); }
   .undot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--ds-color-unread); margin-left: 6px; vertical-align: middle; }
   .tbtn.on { border-color: var(--accent); color: var(--accent); background: var(--badge-bg); }
   mark { background: var(--ds-code-bg); color: var(--ds-code-text); border-radius: 3px; padding: 0 2px; }
@@ -2644,7 +2658,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .wrap { padding-left: max(16px, env(safe-area-inset-left, 0px));
           padding-right: max(16px, env(safe-area-inset-right, 0px)); }
   /* 触控：去掉移动端 300ms 点击延迟 */
-  button, select, .tab, .opt, .tbtn, .clr, .mx, .star, .del, .tabop, .tabx, .newpill, .undo-btn { touch-action: manipulation; }
+  button, select, .tab, .opt, .tbtn, .clr, .mx, :is(.star, .pin), .del, .tabop, .tabx, .newpill, .undo-btn { touch-action: manipulation; }
   /* iOS Safari 输入框字号 < 16px 会触发自动放大，统一 16px；桌面端仍用紧凑字号 */
   input[type=search], input[type=number], input[type=password], select, textarea { font-size: 16px; }
   .tabs { -webkit-overflow-scrolling: touch; scrollbar-width: thin; }
@@ -2818,7 +2832,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     .tbtn, .pager button { padding: 8px 12px; font-size: 13px; min-height: 36px; }
     .tab { padding: 7px 13px; }
     .tabop, .tabx { padding: 2px 5px; }
-    .star, .del { padding: 4px 6px; }
+    :is(.star, .pin), .del { padding: 4px 6px; }
     /* 设置菜单内触控目标加大，降低误触 */
     .setmenu .tbtn, .setmenu .opt { min-height: 42px; }
     /* 窄屏：桌面右对齐下拉在矮/窄屏易溢出，改底部抽屉（与 .sheet 弹层同风格），
@@ -2974,7 +2988,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .srctag.s-notify { background: var(--ds-color-info); }
   .srctag.s-alert { background: var(--ds-color-warning); }
   .srctag.s-other { background: var(--ds-color-text-secondary); }
-  .star.on { color: var(--ds-color-warning); }
+  :is(.star, .pin).on { color: var(--ds-color-warning); }
   /* ===== V2 仪表盘布局：消息中心（与静态原型对齐） ===== */
   body { background: var(--bg); }
   .wrap { max-width: var(--ds-content-max); padding: 22px 24px 44px; --list-pad: 20px; }
@@ -3088,13 +3102,14 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .card.unread .sender { font-weight: 700; }
   .msg-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; flex-wrap: wrap; }
   /* UX-02B：收藏 / 查看全文 / 删除常驻可见（不再只靠长按·右键），删除保留既有「撤销」保护 */
-  .msg-actions .star, .msg-actions .del, .msg-actions .more { border: 0; background: none;
+  .msg-actions :is(.star, .pin), .msg-actions .del, .msg-actions .more { border: 0; background: none;
                                           color: var(--ds-color-text-tertiary); cursor: pointer;
                                           font-size: 12px; padding: 2px 8px; border-radius: 6px; margin: 0;
                                           min-height: 30px; display: inline-flex; align-items: center;
                                           transition: background var(--ds-duration-fast) var(--ds-ease), color var(--ds-duration-fast) var(--ds-ease); }
-  .msg-actions .star.on { color: var(--ds-color-warning); }
-  .msg-actions .star:hover, .msg-actions .del:hover, .msg-actions .more:hover { background: var(--ds-color-surface-hover); }
+  .msg-actions :is(.star, .pin).on { color: var(--ds-color-warning); }
+  .msg-actions :is(.star, .pin):hover, .msg-actions .del:hover, .msg-actions .more:hover { background: var(--ds-color-surface-hover); }
+  .msg-actions .pin.on { color: var(--ds-color-primary); }
   .msg-actions .del { color: var(--muted); }
   .msg-actions .del:hover { color: var(--ds-color-danger); }
   .msg-actions .more[hidden] { display: none; }
@@ -3230,7 +3245,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     .filter-row select { flex: 0 0 auto; max-width: 104px; min-height: 44px; padding: 4px 6px; font-size: 14px; }
     .filter-row .filterbtn { min-height: 44px; }
     /* 触屏最小可点区域：星标/删除/更多提到 44 命中区（图标视觉尺寸不变） */
-    .msg-actions .star, .msg-actions .del, .msg-actions .more { min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; }
+    .msg-actions :is(.star, .pin), .msg-actions .del, .msg-actions .more { min-width: 44px; min-height: 44px; display: inline-flex; align-items: center; justify-content: center; }
     /* 批量操作条：底部悬浮；两行网格由下方 @media (max-width: 900px) 统一定义，此处不再重复
        （旧实现用 nowrap + overflow-x，390 下「取消」被推到视口外，UX-09 U9-04 已修） */
     .selbar { width: calc(100% - 16px); border-radius: 14px; }
@@ -3294,7 +3309,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .msg-foot .devchip { font-size: 11px; color: var(--ds-color-text-secondary); white-space: nowrap;
                        overflow: hidden; text-overflow: ellipsis; min-width: 0; }
   .msg-foot .devchip::before { content: "·"; margin-right: 5px; opacity: .7; }
-  .msg-rail .star, .msg-rail .del { font-size: 12px; }
+  .msg-rail :is(.star, .pin), .msg-rail .del { font-size: 12px; }
   .undot { width: 7px; height: 7px; border-radius: 50%; background: var(--ds-color-unread); flex: none; }
   .tag.srctag { background: var(--ds-color-bg-subtle); color: var(--muted); }
   /* 未读数字并入「未读」筛选 chip：让首页在不显示统计摘要时仍有待处理量提示 */
@@ -3321,8 +3336,9 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .navmenu button:hover { background: var(--ds-color-bg-subtle); }
   .navmenu button.danger { color: var(--ds-color-danger); }
   .nav-mobile { display: none !important; }
-  /* 设备管理弹层（原侧栏设备卡：筛选已移到筛选区，管理动作保留在此） */
+  /* 设备管理（筛选在筛选区下拉，管理动作在设置中心「设备」tab） */
   .devlist { display: flex; flex-direction: column; }
+  .sc-devlist { margin-top: 4px; }
   .devrow { display: flex; align-items: center; gap: 10px; padding: 13px 0; border-bottom: 1px solid var(--row-border); }
   .devrow:last-child { border-bottom: 0; }
   .devrow .dinfo { min-width: 0; flex: 1; }
@@ -3364,7 +3380,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     .msg-rail { position: absolute; right: 4px; bottom: 4px; }
     /* 没有验证码胶囊时，脚注行仍为右下角操作列预留命中高度（44 命中区 + 4px 边距），正文不被按钮压住 */
     .msg-foot:not(:has(.code-chip)) { min-height: 48px; }
-    .msg-actions .star, .msg-actions .del, .msg-actions .more { min-width: 44px; min-height: 44px; padding: 4px 6px; }
+    .msg-actions :is(.star, .pin), .msg-actions .del, .msg-actions .more { min-width: 44px; min-height: 44px; padding: 4px 6px; }
   }
   /* 平板区间（661–900）：一行放不下「视图标签 + 搜索 + 三个下拉 + 刷新」，
      用网格固定为「标签 | 刷新」/「搜索与筛选」两行，避免刷新被挤到单独第三行 */
@@ -3405,7 +3421,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     .top-actions .tbtn, .toolbar .tbtn, .headacts .tbtn { min-width: 44px; min-height: 44px; }
     .filter-tabs .chip, .filter-row .filterbtn { min-height: 44px; }
     .filters .searchwrap input, .filter-row select { min-height: 44px; }
-    .msg-actions .star, .msg-actions .del, .msg-actions .more { min-width: 44px; min-height: 44px; }
+    .msg-actions :is(.star, .pin), .msg-actions .del, .msg-actions .more { min-width: 44px; min-height: 44px; }
     .code-chip .copy { min-height: 44px; min-width: 52px; }
     .pages button, .jumpwrap input, .jumpwrap button { min-height: 44px; }
     .mx { width: 44px; height: 44px; top: 8px; right: 8px; }
@@ -3462,6 +3478,30 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
                         box-shadow: inset 0 0 0 1px var(--ds-color-primary); pointer-events: none; }
     .card.dsel .sender { color: var(--ds-color-primary); }
   }
+  /* ===== UX-14：详情卡片内右侧验证码（代码加重强调 + 一键复制） =====
+     有验证码时才出现右侧卡片；无验证码的消息仍是原来的单栏正文。 */
+  .detail-main { display: flex; align-items: stretch; gap: 12px; }
+  .detail-main .detail-body { flex: 1 1 auto; min-width: 0; }
+  .detail-code { flex: 0 0 168px; display: flex; flex-direction: column; justify-content: center;
+                 gap: 10px; margin: 12px 0 4px; padding: 14px 12px; text-align: center;
+                 background: var(--ds-code-bg); border: 1px solid var(--ds-code-border);
+                 border-radius: var(--ds-radius-lg); }
+  .detail-code .dc-label { font-size: var(--ds-font-size-xs); color: var(--ds-color-text-secondary); }
+  .detail-code .dc-value { font-family: var(--ds-font-mono); font-size: 24px; font-weight: 700;
+                 letter-spacing: 2px; line-height: 1.3; font-variant-numeric: tabular-nums;
+                 word-break: break-all; color: var(--ds-code-text); }
+  .detail-code .dc-copy { min-height: 32px; padding: 5px 10px; cursor: pointer;
+                 border: 1px solid var(--ds-code-border); border-radius: var(--ds-radius-sm);
+                 background: var(--ds-color-bg-surface); color: var(--ds-code-text);
+                 font-size: 12.5px; font-weight: 600; }
+  .detail-code .dc-copy:hover { border-color: var(--ds-color-primary); color: var(--ds-color-primary); }
+  .detail-code .dc-copy:focus-visible { outline: 2px solid var(--ds-color-focus); outline-offset: 2px; }
+  @media (max-width: 660px) {
+    .detail-main { flex-direction: column; gap: 0; }
+    .detail-code { flex: 0 0 auto; flex-direction: row; align-items: center; justify-content: space-between;
+                   gap: 10px; text-align: left; padding: 10px 12px; margin: 0 0 4px; }
+    .detail-code .dc-value { font-size: 20px; }
+  }
   @media (min-width: 1920px) {
     .layout { grid-template-columns: minmax(0, 54fr) minmax(0, 46fr); }
   }
@@ -3482,7 +3522,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     </div>
     <div class="top-actions">
       <button class="tbtn nav-desktop" id="statsbtn" type="button" data-i18n="viewStats">统计</button>
-      <button class="tbtn nav-desktop" id="devbtn" type="button" data-i18n="navDevices">设备</button>
       <button class="tbtn" id="themebtn" data-i18n-title="themeTip">自动</button>
       <button class="tbtn nav-desktop" id="setbtn" data-i18n-title="settings" data-i18n="settings">⚙ 设置</button>
       <button class="tbtn nav-desktop" id="logoutbtn" type="button" data-i18n-title="scLogoutTip" data-i18n="scLogout">退出</button>
@@ -3492,8 +3531,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   </header>
   <div class="navmenu" id="navmenu" role="menu" hidden>
     <button type="button" role="menuitem" id="mnurefresh" data-i18n="refresh">刷新</button>
-    <button type="button" role="menuitem" id="mnustats" data-i18n="viewStats">查看统计</button>
-    <button type="button" role="menuitem" id="mnudev" data-i18n="navDevices">设备</button>
+    <button type="button" role="menuitem" id="mnustats" data-i18n="viewStats">统计</button>
     <button type="button" role="menuitem" id="mnuset" data-i18n="settings">设置</button>
     <button type="button" role="menuitem" id="mnulogout" class="danger" data-i18n="scLogout">退出登录</button>
   </div>
@@ -3507,6 +3545,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
             <button class="chip" id="funread" type="button"><span data-i18n="unread">未读</span><span class="chipcount" id="unreadcount" hidden>0</span></button>
             <button class="chip" id="fread" type="button" data-i18n="read">已读</button>
             <button class="chip" id="fstar" type="button"><span data-i18n="starOnly">★ 收藏</span></button>
+            <button class="chip" id="fpin" type="button"><span data-i18n="pinOnly">📌 置顶</span></button>
             <span class="toolbar-title"><span class="sr-only" data-i18n="listTitle">短信列表</span><span id="stat"></span></span>
           </div>
           <div class="filter-row">
@@ -3538,7 +3577,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         <span><b id="sttotal">0</b><span data-i18n="statTotal">总数</span></span>
         <span><b id="stunread">0</b><span data-i18n="statUnread">未读</span></span>
         <span><b id="sttoday">0</b><span data-i18n="today">今天</span></span>
-        <button class="mini-link" id="stdetail" type="button" data-i18n="viewStats">查看统计</button>
+        <button class="mini-link" id="stdetail" type="button" data-i18n="viewStats">统计</button>
       </div>
 
       <div class="selbar" id="selbar" role="toolbar" data-i18n-aria="selBarAria" aria-label="批量操作" hidden>
@@ -3643,7 +3682,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     lastIdByDev: {},
     inited: false, unread: 0, limit: 10, range: "", notifiedId: 0,
     cursor: "", seen: {}, loadMoreDepth: 0,
-    selectMode: false, selected: {}, lastQ: "", starOnly: false, unreadOnly: false, readOnly: false, filterMode: "all", lastList: [],
+    selectMode: false, selected: {}, lastQ: "", starOnly: false, pinOnly: false, unreadOnly: false, readOnly: false, filterMode: "all", lastList: [],
     pwdOn: true,
     /* UX-07C：宽屏双栏当前选中消息（仅内存态，不持久化、不写服务端） */
     detailId: 0,
@@ -3724,7 +3763,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       loadFail: "加载失败：{m}", retry: "重试", errOffline: "网络不可用，请检查连接后重试", errUnauth: "登录已过期，请重新登录", relogin: "重新登录", paneLoading: "正在加载…", detailFailSub: "可能是网络中断，或这条消息已被删除", starFail: "收藏失败，请重试", labelSaved: "标签已更新", labelFail: "标签未能保存到本机", markedUnread: "已标记为未读", scTestFailTarget: "{name} 测试失败：{m}", sDndFrom: "免打扰开始时间", sDndTo: "免打扰结束时间",
       del: "删除", unknownNum: "未知号码", codeLabel: "验证码：", copy: "复制", copied: "已复制",
       more: "展开全文", less: "收起", unread: "未读",
-      starItemTip: "收藏/置顶", recvTip: "双击复制收件号", selTip: "选择",
+      starItemTip: "收藏", recvTip: "双击复制收件号", selTip: "选择",
       numLibTip: "常见号码库（仅供参考）",
       confirmDelOne: "删除这条消息？删除后 5 秒内可撤销。", undoAria: "撤销删除，5 秒内有效", deletedOne: "已删除", deletedN: "已删除 {n} 条", undo: "撤销",
       newPill: "↑ {n} 条新消息", gotNew: "收到 {n} 条新消息", codeCopied: "验证码 {c} 已复制",
@@ -3732,7 +3771,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       selCount: "已选 {n} 条", selAll: "全选本页", cancel: "取消", ok: "确定",
       dSource: "来源", dDevice: "设备标签", dRecv: "收件号", dTime: "时间", dLabel: "号码标签", dStatus: "状态",
       notSet: "（未设置）", read: "已读", starredPrefix: "★ 收藏 · ",
-      star: "收藏置顶", unstar: "取消收藏", markUnread: "标为未读", copyAll: "复制全文",
+      pin: "置顶", unpin: "取消置顶", pinOnly: "📌 置顶", pinTip: "只看置顶", pinItemTip: "置顶", pinFail: "置顶失败，请重试",
+      star: "收藏", unstar: "取消收藏", markUnread: "标为未读", copyAll: "复制全文",
       call: "拨号", setLabel: "号码标签",
       labelPrompt: "给 {n} 设置标签（留空清除）",
       sDnd: "免打扰", sDndRange: "免打扰时段",
@@ -3792,7 +3832,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       loadFail: "Failed to load: {m}", retry: "Retry", errOffline: "Network unavailable. Check your connection and try again.", errUnauth: "Your session has expired. Please sign in again.", relogin: "Sign in again", paneLoading: "Loading…", detailFailSub: "The network may be down, or this message was deleted.", starFail: "Could not update the star. Try again.", labelSaved: "Label updated", labelFail: "The label could not be saved on this device", markedUnread: "Marked as unread", scTestFailTarget: "{name} test failed: {m}", sDndFrom: "Do-not-disturb start time", sDndTo: "Do-not-disturb end time",
       del: "Delete", unknownNum: "Unknown", codeLabel: "Code:", copy: "Copy", copied: "Copied",
       more: "Show more", less: "Show less", unread: "Unread",
-      starItemTip: "Star / pin", recvTip: "Double-tap to copy", selTip: "Select",
+      starItemTip: "Star", recvTip: "Double-tap to copy", selTip: "Select",
       numLibTip: "Built-in number directory (reference only)",
       confirmDelOne: "Delete this message? You can undo within 5 seconds.", undoAria: "Undo delete, valid for 5 seconds", deletedOne: "Deleted", deletedN: "{n} deleted", undo: "Undo",
       newPill: "↑ {n} new", gotNew: "{n} new message(s)", codeCopied: "Code {c} copied",
@@ -3800,7 +3840,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       selCount: "{n} selected", selAll: "Select page", cancel: "Cancel", ok: "OK",
       dSource: "Source", dDevice: "Device", dRecv: "Recipient", dTime: "Time", dLabel: "Number label", dStatus: "Status",
       notSet: "(not set)", read: "Read", starredPrefix: "★ Starred · ",
-      star: "Star & pin", unstar: "Unstar", markUnread: "Mark unread", copyAll: "Copy text",
+      pin: "Pin", unpin: "Unpin", pinOnly: "📌 Pinned", pinTip: "Pinned only", pinItemTip: "Pin", pinFail: "Pin failed, please retry",
+      star: "Star", unstar: "Unstar", markUnread: "Mark unread", copyAll: "Copy text",
       call: "Call", setLabel: "Number label",
       labelPrompt: "Label for {n} (leave empty to clear)",
       sDnd: "Do not disturb", sDndRange: "Quiet hours",
@@ -3860,7 +3901,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       loadFail: "載入失敗：{m}", retry: "重試", errOffline: "網路無法使用，請檢查連線後重試", errUnauth: "登入已過期，請重新登入", relogin: "重新登入", paneLoading: "正在載入…", detailFailSub: "可能是網路中斷，或這則訊息已被刪除", starFail: "收藏失敗，請重試", labelSaved: "標籤已更新", labelFail: "標籤無法儲存到本機", markedUnread: "已標記為未讀", scTestFailTarget: "{name} 測試失敗：{m}", sDndFrom: "免打擾開始時間", sDndTo: "免打擾結束時間",
       del: "刪除", unknownNum: "未知號碼", codeLabel: "驗證碼：", copy: "複製", copied: "已複製",
       more: "展開全文", less: "收合", unread: "未讀",
-      starItemTip: "收藏/置頂", recvTip: "雙擊複製收件號", selTip: "選擇",
+      starItemTip: "收藏", recvTip: "雙擊複製收件號", selTip: "選擇",
       numLibTip: "常見號碼庫（僅供參考）",
       confirmDelOne: "刪除這則訊息？刪除後 5 秒內可復原。", undoAria: "復原刪除，5 秒內有效", deletedOne: "已刪除", deletedN: "已刪除 {n} 則", undo: "復原",
       newPill: "↑ {n} 則新訊息", gotNew: "收到 {n} 則新訊息", codeCopied: "驗證碼 {c} 已複製",
@@ -3868,7 +3909,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       selCount: "已選 {n} 則", selAll: "全選本頁", cancel: "取消", ok: "確定",
       dSource: "來源", dDevice: "裝置標籤", dRecv: "收件號", dTime: "時間", dLabel: "號碼標籤", dStatus: "狀態",
       notSet: "（未設定）", read: "已讀", starredPrefix: "★ 收藏 · ",
-      star: "收藏置頂", unstar: "取消收藏", markUnread: "標為未讀", copyAll: "複製全文",
+      pin: "置頂", unpin: "取消置頂", pinOnly: "📌 置頂", pinTip: "只看置頂", pinItemTip: "置頂", pinFail: "置頂失敗，請重試",
+      star: "收藏", unstar: "取消收藏", markUnread: "標為未讀", copyAll: "複製全文",
       call: "撥號", setLabel: "號碼標籤",
       labelPrompt: "為 {n} 設定標籤（留空清除）",
       sDnd: "勿擾", sDndRange: "勿擾時段",
@@ -3928,7 +3970,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       loadFail: "読み込み失敗：{m}", retry: "再試行", errOffline: "ネットワークに接続できません。接続を確認して再試行してください", errUnauth: "ログインの有効期限が切れました。再度ログインしてください", relogin: "再度ログイン", paneLoading: "読み込み中…", detailFailSub: "ネットワーク障害か、このメッセージは削除された可能性があります", starFail: "お気に入りを更新できませんでした。再試行してください", labelSaved: "ラベルを更新しました", labelFail: "ラベルをこの端末に保存できませんでした", markedUnread: "未読にしました", scTestFailTarget: "{name} のテストに失敗しました：{m}", sDndFrom: "おやすみモード開始時刻", sDndTo: "おやすみモード終了時刻",
       del: "削除", unknownNum: "不明な番号", codeLabel: "認証コード：", copy: "コピー", copied: "コピーしました",
       more: "全文を表示", less: "折りたたむ", unread: "未読",
-      starItemTip: "スター/固定表示", recvTip: "ダブルクリックで宛先番号をコピー", selTip: "選択",
+      starItemTip: "スター", recvTip: "ダブルクリックで宛先番号をコピー", selTip: "選択",
       numLibTip: "よくある番号リスト（参考）",
       confirmDelOne: "このメッセージを削除しますか？削除後 5 秒以内なら元に戻せます。", undoAria: "削除を元に戻す（5 秒間有効）", deletedOne: "削除しました", deletedN: "{n} 件削除しました", undo: "元に戻す",
       newPill: "↑ 新着 {n} 件", gotNew: "新着 {n} 件を受信", codeCopied: "認証コード {c} をコピーしました",
@@ -3936,7 +3978,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       selCount: "{n} 件選択中", selAll: "このページを全選択", cancel: "キャンセル", ok: "OK",
       dSource: "送信元", dDevice: "デバイスラベル", dRecv: "宛先番号", dTime: "日時", dLabel: "番号ラベル", dStatus: "状態",
       notSet: "（未設定）", read: "既読", starredPrefix: "★ スター · ",
-      star: "スターと固定", unstar: "スター解除", markUnread: "未読にする", copyAll: "全文をコピー",
+      pin: "固定", unpin: "固定解除", pinOnly: "📌 固定", pinTip: "固定のみ表示", pinItemTip: "固定", pinFail: "固定に失敗しました",
+      star: "スター", unstar: "スター解除", markUnread: "未読にする", copyAll: "全文をコピー",
       call: "発信", setLabel: "番号ラベル",
       labelPrompt: "{n} のラベルを設定（空欄で解除）",
       sDnd: "通知休止", sDndRange: "通知休止時間帯",
@@ -3996,7 +4039,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       loadFail: "불러오기 실패: {m}", retry: "다시 시도", errOffline: "네트워크를 사용할 수 없습니다. 연결을 확인한 뒤 다시 시도하세요", errUnauth: "로그인이 만료되었습니다. 다시 로그인하세요", relogin: "다시 로그인", paneLoading: "불러오는 중…", detailFailSub: "네트워크가 끊겼거나 이 메시지가 삭제되었을 수 있습니다", starFail: "즐겨찾기를 변경하지 못했습니다. 다시 시도하세요", labelSaved: "라벨이 업데이트되었습니다", labelFail: "라벨을 이 기기에 저장하지 못했습니다", markedUnread: "읽지 않음으로 표시했습니다", scTestFailTarget: "{name} 테스트 실패: {m}", sDndFrom: "방해 금지 시작 시간", sDndTo: "방해 금지 종료 시간",
       del: "삭제", unknownNum: "알 수 없는 번호", codeLabel: "인증번호:", copy: "복사", copied: "복사됨",
       more: "전문 펼치기", less: "접기", unread: "읽지 않음",
-      starItemTip: "즐겨찾기/고정", recvTip: "더블클릭으로 수신번호 복사", selTip: "선택",
+      starItemTip: "즐겨찾기", recvTip: "더블클릭으로 수신번호 복사", selTip: "선택",
       numLibTip: "자주 오는 번호 목록(참고용)",
       confirmDelOne: "이 메시지를 삭제할까요? 삭제 후 5초 이내에 실행 취소할 수 있습니다.", undoAria: "삭제 실행 취소, 5초간 유효", deletedOne: "삭제됨", deletedN: "{n}건 삭제됨", undo: "실행 취소",
       newPill: "↑ 새 메시지 {n}건", gotNew: "새 메시지 {n}건 수신", codeCopied: "인증번호 {c} 복사됨",
@@ -4004,7 +4047,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       selCount: "{n}건 선택됨", selAll: "이 페이지 전체 선택", cancel: "취소", ok: "확인",
       dSource: "발신원", dDevice: "기기 라벨", dRecv: "수신번호", dTime: "시간", dLabel: "번호 라벨", dStatus: "상태",
       notSet: "(설정 안 됨)", read: "읽음", starredPrefix: "★ 즐겨찾기 · ",
-      star: "즐겨찾기 및 고정", unstar: "즐겨찾기 해제", markUnread: "읽지 않음으로 표시", copyAll: "전문 복사",
+      pin: "고정", unpin: "고정 해제", pinOnly: "📌 고정", pinTip: "고정만 보기", pinItemTip: "고정", pinFail: "고정에 실패했습니다",
+      star: "즐겨찾기", unstar: "즐겨찾기 해제", markUnread: "읽지 않음으로 표시", copyAll: "전문 복사",
       call: "전화", setLabel: "번호 라벨",
       labelPrompt: "{n} 의 라벨 설정(비우면 해제)",
       sDnd: "방해 금지", sDndRange: "방해 금지 시간대",
@@ -4064,7 +4108,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       loadFail: "Error al cargar: {m}", retry: "Reintentar", errOffline: "Red no disponible. Comprueba la conexión e inténtalo de nuevo.", errUnauth: "La sesión ha caducado. Vuelve a iniciar sesión.", relogin: "Iniciar sesión de nuevo", paneLoading: "Cargando…", detailFailSub: "Puede que la red falle o que este mensaje se haya eliminado.", starFail: "No se pudo actualizar el destacado. Inténtalo de nuevo.", labelSaved: "Etiqueta actualizada", labelFail: "No se pudo guardar la etiqueta en este dispositivo", markedUnread: "Marcado como no leído", scTestFailTarget: "Fallo en la prueba de {name}: {m}", sDndFrom: "Hora de inicio de No molestar", sDndTo: "Hora de fin de No molestar",
       del: "Eliminar", unknownNum: "Desconocido", codeLabel: "Código:", copy: "Copiar", copied: "Copiado",
       more: "Mostrar más", less: "Mostrar menos", unread: "No leído",
-      starItemTip: "Marcar / fijar", recvTip: "Doble toque para copiar", selTip: "Seleccionar",
+      starItemTip: "Marcar", recvTip: "Doble toque para copiar", selTip: "Seleccionar",
       numLibTip: "Directorio de números integrado (solo referencia)",
       confirmDelOne: "¿Eliminar este mensaje? Puedes deshacerlo en 5 segundos.", undoAria: "Deshacer eliminación, válido 5 segundos", deletedOne: "Eliminado", deletedN: "{n} eliminados", undo: "Deshacer",
       newPill: "↑ {n} nuevos", gotNew: "{n} mensaje(s) nuevo(s)", codeCopied: "Código {c} copiado",
@@ -4072,7 +4116,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       selCount: "{n} seleccionados", selAll: "Seleccionar página", cancel: "Cancelar", ok: "Aceptar",
       dSource: "Origen", dDevice: "Dispositivo", dRecv: "Destinatario", dTime: "Hora", dLabel: "Etiqueta del número", dStatus: "Estado",
       notSet: "(sin configurar)", read: "Leído", starredPrefix: "★ Favorito · ",
-      star: "Marcar y fijar", unstar: "Quitar marca", markUnread: "Marcar como no leído", copyAll: "Copiar texto",
+      pin: "Fijar", unpin: "Quitar fijación", pinOnly: "📌 Fijados", pinTip: "Solo fijados", pinItemTip: "Fijar", pinFail: "Error al fijar",
+      star: "Marcar", unstar: "Quitar marca", markUnread: "Marcar como no leído", copyAll: "Copiar texto",
       call: "Llamar", setLabel: "Etiqueta del número",
       labelPrompt: "Etiqueta para {n} (dejar vacío para borrar)",
       sDnd: "No molestar", sDndRange: "Horario silencioso",
@@ -4132,7 +4177,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       loadFail: "Échec du chargement : {m}", retry: "Réessayer", errOffline: "Réseau indisponible. Vérifiez la connexion et réessayez.", errUnauth: "Votre session a expiré. Reconnectez-vous.", relogin: "Se reconnecter", paneLoading: "Chargement…", detailFailSub: "Le réseau est peut-être coupé, ou ce message a été supprimé.", starFail: "Impossible de mettre à jour le favori. Réessayez.", labelSaved: "Étiquette mise à jour", labelFail: "L’étiquette n’a pas pu être enregistrée sur cet appareil", markedUnread: "Marqué comme non lu", scTestFailTarget: "Échec du test de {name} : {m}", sDndFrom: "Heure de début Ne pas déranger", sDndTo: "Heure de fin Ne pas déranger",
       del: "Supprimer", unknownNum: "Inconnu", codeLabel: "Code :", copy: "Copier", copied: "Copié",
       more: "Tout afficher", less: "Réduire", unread: "Non lu",
-      starItemTip: "Favori / épingler", recvTip: "Double-clic pour copier", selTip: "Sélectionner",
+      starItemTip: "Favori", recvTip: "Double-clic pour copier", selTip: "Sélectionner",
       numLibTip: "Annuaire intégré (à titre indicatif)",
       confirmDelOne: "Supprimer ce message ? Vous pouvez annuler dans les 5 secondes.", undoAria: "Annuler la suppression, valable 5 secondes", deletedOne: "Supprimé", deletedN: "{n} supprimés", undo: "Annuler",
       newPill: "↑ {n} nouveaux", gotNew: "{n} nouveau(x) message(s)", codeCopied: "Code {c} copié",
@@ -4140,7 +4185,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       selCount: "{n} sélectionnés", selAll: "Tout sélectionner (page)", cancel: "Annuler", ok: "OK",
       dSource: "Source", dDevice: "Appareil", dRecv: "Destinataire", dTime: "Heure", dLabel: "Étiquette du numéro", dStatus: "Statut",
       notSet: "(non défini)", read: "Lu", starredPrefix: "★ Favori · ",
-      star: "Favori et épingler", unstar: "Retirer le favori", markUnread: "Marquer non lu", copyAll: "Copier le texte",
+      pin: "Épingler", unpin: "Désépingler", pinOnly: "📌 Épinglés", pinTip: "Épinglés uniquement", pinItemTip: "Épingler", pinFail: "Échec de l'épinglage",
+      star: "Favori", unstar: "Retirer le favori", markUnread: "Marquer non lu", copyAll: "Copier le texte",
       call: "Appeler", setLabel: "Étiquette du numéro",
       labelPrompt: "Étiquette pour {n} (laisser vide pour effacer)",
       sDnd: "Ne pas déranger", sDndRange: "Heures silencieuses",
@@ -4200,7 +4246,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       loadFail: "Laden fehlgeschlagen: {m}", retry: "Erneut versuchen", errOffline: "Netzwerk nicht verfügbar. Verbindung prüfen und erneut versuchen.", errUnauth: "Sitzung abgelaufen. Bitte erneut anmelden.", relogin: "Erneut anmelden", paneLoading: "Wird geladen…", detailFailSub: "Möglicherweise ist das Netzwerk gestört oder die Nachricht wurde gelöscht.", starFail: "Markierung konnte nicht aktualisiert werden. Erneut versuchen.", labelSaved: "Label aktualisiert", labelFail: "Label konnte auf diesem Gerät nicht gespeichert werden", markedUnread: "Als ungelesen markiert", scTestFailTarget: "Test für {name} fehlgeschlagen: {m}", sDndFrom: "Beginn der Nicht-stören-Zeit", sDndTo: "Ende der Nicht-stören-Zeit",
       del: "Löschen", unknownNum: "Unbekannt", codeLabel: "Code:", copy: "Kopieren", copied: "Kopiert",
       more: "Mehr anzeigen", less: "Weniger anzeigen", unread: "Ungelesen",
-      starItemTip: "Favorit / anheften", recvTip: "Doppeltipp zum Kopieren", selTip: "Auswählen",
+      starItemTip: "Favorit", recvTip: "Doppeltipp zum Kopieren", selTip: "Auswählen",
       numLibTip: "Integriertes Nummernverzeichnis (nur zur Referenz)",
       confirmDelOne: "Diese Nachricht löschen? Innerhalb von 5 Sekunden rückgängig machbar.", undoAria: "Löschen rückgängig machen, 5 Sekunden gültig", deletedOne: "Gelöscht", deletedN: "{n} gelöscht", undo: "Rückgängig",
       newPill: "↑ {n} neue", gotNew: "{n} neue Nachricht(en)", codeCopied: "Code {c} kopiert",
@@ -4208,7 +4254,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       selCount: "{n} ausgewählt", selAll: "Seite auswählen", cancel: "Abbrechen", ok: "OK",
       dSource: "Quelle", dDevice: "Gerät", dRecv: "Empfänger", dTime: "Zeit", dLabel: "Nummern-Label", dStatus: "Status",
       notSet: "(nicht gesetzt)", read: "Gelesen", starredPrefix: "★ Favorit · ",
-      star: "Favorit & anheften", unstar: "Favorit entfernen", markUnread: "Als ungelesen markieren", copyAll: "Text kopieren",
+      pin: "Anheften", unpin: "Loslösen", pinOnly: "📌 Angeheftet", pinTip: "Nur angeheftete", pinItemTip: "Anheften", pinFail: "Anheften fehlgeschlagen",
+      star: "Favorit", unstar: "Favorit entfernen", markUnread: "Als ungelesen markieren", copyAll: "Text kopieren",
       call: "Anrufen", setLabel: "Nummern-Label",
       labelPrompt: "Label für {n} (leer lassen zum Entfernen)",
       sDnd: "Nicht stören", sDndRange: "Ruhezeit",
@@ -4268,7 +4315,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       loadFail: "Falha ao carregar: {m}", retry: "Tentar novamente", errOffline: "Rede indisponível. Verifique a conexão e tente novamente.", errUnauth: "Sua sessão expirou. Entre novamente.", relogin: "Entrar novamente", paneLoading: "Carregando…", detailFailSub: "A rede pode estar indisponível ou a mensagem foi excluída.", starFail: "Não foi possível atualizar o destaque. Tente novamente.", labelSaved: "Etiqueta atualizada", labelFail: "Não foi possível salvar a etiqueta neste dispositivo", markedUnread: "Marcada como não lida", scTestFailTarget: "Falha no teste de {name}: {m}", sDndFrom: "Hora de início do Não perturbe", sDndTo: "Hora de fim do Não perturbe",
       del: "Excluir", unknownNum: "Desconhecido", codeLabel: "Código:", copy: "Copiar", copied: "Copiado",
       more: "Mostrar mais", less: "Mostrar menos", unread: "Não lida",
-      starItemTip: "Favoritar / fixar", recvTip: "Toque duplo para copiar", selTip: "Selecionar",
+      starItemTip: "Favoritar", recvTip: "Toque duplo para copiar", selTip: "Selecionar",
       numLibTip: "Diretório de números integrado (somente referência)",
       confirmDelOne: "Excluir esta mensagem? Você pode desfazer em 5 segundos.", undoAria: "Desfazer exclusão, válido por 5 segundos", deletedOne: "Excluída", deletedN: "{n} excluídas", undo: "Desfazer",
       newPill: "↑ {n} novas", gotNew: "{n} nova(s) mensagem(ns)", codeCopied: "Código {c} copiado",
@@ -4276,7 +4323,8 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       selCount: "{n} selecionadas", selAll: "Selecionar página", cancel: "Cancelar", ok: "OK",
       dSource: "Origem", dDevice: "Dispositivo", dRecv: "Destinatário", dTime: "Hora", dLabel: "Etiqueta do número", dStatus: "Status",
       notSet: "(não definido)", read: "Lida", starredPrefix: "★ Favorita · ",
-      star: "Favoritar e fixar", unstar: "Remover favorito", markUnread: "Marcar como não lida", copyAll: "Copiar texto",
+      pin: "Fixar", unpin: "Desafixar", pinOnly: "📌 Fixadas", pinTip: "Somente fixadas", pinItemTip: "Fixar", pinFail: "Falha ao fixar",
+      star: "Favoritar", unstar: "Remover favorito", markUnread: "Marcar como não lida", copyAll: "Copiar texto",
       call: "Ligar", setLabel: "Etiqueta do número",
       labelPrompt: "Etiqueta para {n} (deixe vazio para limpar)",
       sDnd: "Não perturbe", sDndRange: "Horário silencioso",
@@ -5774,11 +5822,11 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     "zh-CN": {
       pageSub: "一驿过一驿，驿骑如星流",
       listTitle: "短信列表", refresh: "刷新", settingsOverview: "设置概览", openSettings: "打开设置中心",
-      quickOverview: "快捷概览", viewStats: "查看统计", selectHint: "点工具栏「多选」、右键或长按消息可多选", selModeBtn: "多选", selModeTip: "进入或退出多选模式", selBarAria: "批量操作",
+      quickOverview: "快捷概览", viewStats: "统计", selectHint: "点工具栏「多选」、右键或长按消息可多选", selModeBtn: "多选", selModeTip: "进入或退出多选模式", selBarAria: "批量操作",
       selAllList: "选择当前列表", tagVerify: "验证码", allDevices: "全部设备",
-      scLanguage: "界面语言", scLang: "语言", scLangHelp: "语言偏好保存在当前浏览器，保存后整页重新加载并应用；不影响其他浏览器。",
-      scPageSize: "分页设置", scPerPage: "每页条数", scPageSizeHelp: "每页条数保存在当前浏览器，保存后立即生效。",
-      scBrowserPrefs: "本浏览器偏好", scBrowserPrefsHelp: "消息开关与免打扰只影响当前浏览器，与全局通知规则互不影响。",
+      scLanguage: "界面语言", scLang: "语言", scLangHelp: "",
+      scPageSize: "分页设置", scPerPage: "每页条数", scPageSizeHelp: "",
+      scBrowserPrefs: "本浏览器偏好", scBrowserPrefsHelp: "",
       scNotifyChannels: "通知渠道", scChannelsN: "已配置 {n} 个", scMinN: "{n} 分钟", scDaysN: "{n} 天", statToday: "今日接收",
       scTargetOff: "停用", scTargetRename: "重命名", scTargetLegacy: "该渠道已启用多目标，上面的单目标字段不再参与发送。",
       scAddTarget: "添加目标", scTargetNamePh: "推送名称（如 值班群）", scTargetAdded: "已添加目标，保存后生效",
@@ -5800,11 +5848,11 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     "zh-TW": {
       pageSub: "一驛過一驛，驛騎如星流",
       listTitle: "簡訊列表", refresh: "重新整理", settingsOverview: "設定概覽", openSettings: "開啟設定中心",
-      quickOverview: "快捷概覽", viewStats: "查看統計", selectHint: "點工具列「多選」、右鍵或長按訊息可多選", selModeBtn: "多選", selModeTip: "進入或退出多選模式", selBarAria: "批次操作",
+      quickOverview: "快捷概覽", viewStats: "統計", selectHint: "點工具列「多選」、右鍵或長按訊息可多選", selModeBtn: "多選", selModeTip: "進入或退出多選模式", selBarAria: "批次操作",
       selAllList: "選擇目前清單", tagVerify: "驗證碼", allDevices: "全部裝置",
-      scLanguage: "介面語言", scLang: "語言", scLangHelp: "語言偏好儲存在目前瀏覽器，儲存後整頁重新載入並套用；不影響其他瀏覽器。",
-      scPageSize: "分頁設定", scPerPage: "每頁筆數", scPageSizeHelp: "每頁筆數儲存在目前瀏覽器，儲存後立即生效。",
-      scBrowserPrefs: "本瀏覽器偏好", scBrowserPrefsHelp: "訊息開關與免打擾只影響目前瀏覽器，與全域通知規則互不影響。",
+      scLanguage: "介面語言", scLang: "語言", scLangHelp: "",
+      scPageSize: "分頁設定", scPerPage: "每頁筆數", scPageSizeHelp: "",
+      scBrowserPrefs: "本瀏覽器偏好", scBrowserPrefsHelp: "",
       scNotifyChannels: "通知管道", scChannelsN: "已設定 {n} 個", scMinN: "{n} 分鐘", scDaysN: "{n} 天", statToday: "今日接收",
       scTargetOff: "停用", scTargetRename: "重新命名", scTargetLegacy: "此管道已啟用多目標，上方的單目標欄位不再參與傳送。",
       scAddTarget: "新增目標", scTargetNamePh: "推送名稱（例如 值班群）", scTargetAdded: "已新增目標，儲存後生效",
@@ -5826,11 +5874,11 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     en: {
       pageSub: "From post to post, like shooting stars.",
       listTitle: "Messages", refresh: "Refresh", settingsOverview: "Settings overview", openSettings: "Open settings",
-      quickOverview: "Quick overview", viewStats: "View stats", selectHint: "Use Multi-select in the toolbar, or right-click / long-press a message", selModeBtn: "Multi-select", selModeTip: "Enter or exit multi-select", selBarAria: "Batch actions",
+      quickOverview: "Quick overview", viewStats: "Stats", selectHint: "Use Multi-select in the toolbar, or right-click / long-press a message", selModeBtn: "Multi-select", selModeTip: "Enter or exit multi-select", selBarAria: "Batch actions",
       selAllList: "Select current list", tagVerify: "Verification code", allDevices: "All devices",
-      scLanguage: "Language", scLang: "Language", scLangHelp: "The language preference is stored in this browser and applied after saving with a full reload. Other browsers are unaffected.",
-      scPageSize: "Pagination", scPerPage: "Items per page", scPageSizeHelp: "Page size is stored in this browser and takes effect immediately after saving.",
-      scBrowserPrefs: "Browser preferences", scBrowserPrefsHelp: "Message toggles and quiet hours only affect this browser; global notification rules are unchanged.",
+      scLanguage: "Language", scLang: "Language", scLangHelp: "",
+      scPageSize: "Pagination", scPerPage: "Items per page", scPageSizeHelp: "",
+      scBrowserPrefs: "Browser preferences", scBrowserPrefsHelp: "",
       scNotifyChannels: "Notification channels", scChannelsN: "{n} configured", scMinN: "{n} min", scDaysN: "{n} days", statToday: "Received today",
       scTargetOff: "Disable", scTargetRename: "Rename", scTargetLegacy: "Multiple targets are enabled; the single-target fields above are no longer used for sending.",
       scAddTarget: "Add target", scTargetNamePh: "Push name (e.g. on-call group)", scTargetAdded: "Target added; save to apply",
@@ -5852,11 +5900,11 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     ja: {
       pageSub: "駅から駅へ、星のように駆け流れる",
       listTitle: "メッセージ一覧", refresh: "更新", settingsOverview: "設定の概要", openSettings: "設定センターを開く",
-      quickOverview: "クイック概要", viewStats: "統計を見る", selectHint: "ツールバーの「複数選択」、右クリックまたは長押しで複数選択", selModeBtn: "複数選択", selModeTip: "複数選択モードの開始／終了", selBarAria: "一括操作",
+      quickOverview: "クイック概要", viewStats: "統計", selectHint: "ツールバーの「複数選択」、右クリックまたは長押しで複数選択", selModeBtn: "複数選択", selModeTip: "複数選択モードの開始／終了", selBarAria: "一括操作",
       selAllList: "現在の一覧を選択", tagVerify: "認証コード", allDevices: "すべての端末",
-      scLanguage: "表示言語", scLang: "言語", scLangHelp: "言語設定はこのブラウザに保存され、保存後にページを再読み込みして適用されます。他のブラウザには影響しません。",
-      scPageSize: "ページ設定", scPerPage: "1ページの件数", scPageSizeHelp: "1ページの件数はこのブラウザに保存され、保存後すぐに反映されます。",
-      scBrowserPrefs: "このブラウザの設定", scBrowserPrefsHelp: "メッセージの切り替えと邪魔しない時間はこのブラウザのみに影響します。",
+      scLanguage: "表示言語", scLang: "言語", scLangHelp: "",
+      scPageSize: "ページ設定", scPerPage: "1ページの件数", scPageSizeHelp: "",
+      scBrowserPrefs: "このブラウザの設定", scBrowserPrefsHelp: "",
       scNotifyChannels: "通知チャネル", scChannelsN: "{n} 件設定済み", scMinN: "{n} 分", scDaysN: "{n} 日", statToday: "本日の受信",
       scTargetOff: "無効化", scTargetRename: "名前変更", scTargetLegacy: "このチャネルは複数ターゲットが有効です。上の単一ターゲット項目は送信に使用されません。",
       scAddTarget: "ターゲットを追加", scTargetNamePh: "プッシュ名（例：当番グループ）", scTargetAdded: "ターゲットを追加しました。保存後に有効になります",
@@ -5878,11 +5926,11 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     ko: {
       pageSub: "역에서 역으로, 별처럼 흐르는 발걸음",
       listTitle: "메시지 목록", refresh: "새로고침", settingsOverview: "설정 개요", openSettings: "설정 센터 열기",
-      quickOverview: "빠른 개요", viewStats: "통계 보기", selectHint: "도구 모음의 '다중 선택'을 누르거나 마우스 오른쪽 버튼·길게 눌러 여러 개 선택", selModeBtn: "다중 선택", selModeTip: "다중 선택 모드 시작/종료", selBarAria: "일괄 작업",
+      quickOverview: "빠른 개요", viewStats: "통계", selectHint: "도구 모음의 '다중 선택'을 누르거나 마우스 오른쪽 버튼·길게 눌러 여러 개 선택", selModeBtn: "다중 선택", selModeTip: "다중 선택 모드 시작/종료", selBarAria: "일괄 작업",
       selAllList: "현재 목록 선택", tagVerify: "인증 코드", allDevices: "모든 기기",
-      scLanguage: "표시 언어", scLang: "언어", scLangHelp: "언어 설정은 이 브라우저에 저장되며 저장 후 페이지가 새로고침되어 적용됩니다. 다른 브라우저에는 영향이 없습니다.",
-      scPageSize: "페이지 설정", scPerPage: "페이지당 항목 수", scPageSizeHelp: "페이지당 항목 수는 이 브라우저에 저장되며 저장 후 즉시 적용됩니다.",
-      scBrowserPrefs: "이 브라우저 설정", scBrowserPrefsHelp: "메시지 스위치와 방해 금지 시간은 이 브라우저에만 적용됩니다.",
+      scLanguage: "표시 언어", scLang: "언어", scLangHelp: "",
+      scPageSize: "페이지 설정", scPerPage: "페이지당 항목 수", scPageSizeHelp: "",
+      scBrowserPrefs: "이 브라우저 설정", scBrowserPrefsHelp: "",
       scNotifyChannels: "알림 채널", scChannelsN: "{n}개 설정됨", scMinN: "{n}분", scDaysN: "{n}일", statToday: "오늘 수신",
       scTargetOff: "사용 안 함", scTargetRename: "이름 변경", scTargetLegacy: "이 채널은 다중 대상이 활성화되어 위의 단일 대상 필드는 전송에 사용되지 않습니다.",
       scAddTarget: "대상 추가", scTargetNamePh: "푸시 이름(예: 당직 그룹)", scTargetAdded: "대상이 추가되었습니다. 저장 후 적용됩니다",
@@ -5904,11 +5952,11 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     es: {
       pageSub: "De posta en posta, como estrellas fugaces.",
       listTitle: "Mensajes", refresh: "Actualizar", settingsOverview: "Resumen de ajustes", openSettings: "Abrir ajustes",
-      quickOverview: "Resumen rápido", viewStats: "Ver estadísticas", selectHint: "Usa «Multiselección» en la barra, o clic derecho / pulsación larga", selModeBtn: "Multiselección", selModeTip: "Entrar o salir del modo multiselección", selBarAria: "Acciones en lote",
+      quickOverview: "Resumen rápido", viewStats: "Estadísticas", selectHint: "Usa «Multiselección» en la barra, o clic derecho / pulsación larga", selModeBtn: "Multiselección", selModeTip: "Entrar o salir del modo multiselección", selBarAria: "Acciones en lote",
       selAllList: "Seleccionar lista actual", tagVerify: "Código de verificación", allDevices: "Todos los dispositivos",
-      scLanguage: "Idioma", scLang: "Idioma", scLangHelp: "La preferencia de idioma se guarda en este navegador y se aplica tras guardar con una recarga completa. Otros navegadores no se ven afectados.",
-      scPageSize: "Paginación", scPerPage: "Elementos por página", scPageSizeHelp: "El tamaño de página se guarda en este navegador y se aplica de inmediato al guardar.",
-      scBrowserPrefs: "Preferencias del navegador", scBrowserPrefsHelp: "Los interruptores de mensajes y el horario de silencio solo afectan a este navegador.",
+      scLanguage: "Idioma", scLang: "Idioma", scLangHelp: "",
+      scPageSize: "Paginación", scPerPage: "Elementos por página", scPageSizeHelp: "",
+      scBrowserPrefs: "Preferencias del navegador", scBrowserPrefsHelp: "",
       scNotifyChannels: "Canales de notificación", scChannelsN: "{n} configurados", scMinN: "{n} min", scDaysN: "{n} días", statToday: "Recibidos hoy",
       scTargetOff: "Desactivar", scTargetRename: "Renombrar", scTargetLegacy: "Este canal tiene varios destinos; los campos de destino único de arriba ya no se usan para enviar.",
       scAddTarget: "Añadir destino", scTargetNamePh: "Nombre del envío (p. ej. grupo de guardia)", scTargetAdded: "Destino añadido; guarda para aplicar",
@@ -5930,11 +5978,11 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     fr: {
       pageSub: "De relais en relais, comme un torrent d'étoiles.",
       listTitle: "Messages", refresh: "Actualiser", settingsOverview: "Aperçu des réglages", openSettings: "Ouvrir les réglages",
-      quickOverview: "Aperçu rapide", viewStats: "Voir les statistiques", selectHint: "Utilisez « Sélection multiple » dans la barre, ou clic droit / appui long", selModeBtn: "Sélection multiple", selModeTip: "Entrer ou quitter la sélection multiple", selBarAria: "Actions groupées",
+      quickOverview: "Aperçu rapide", viewStats: "Statistiques", selectHint: "Utilisez « Sélection multiple » dans la barre, ou clic droit / appui long", selModeBtn: "Sélection multiple", selModeTip: "Entrer ou quitter la sélection multiple", selBarAria: "Actions groupées",
       selAllList: "Sélectionner la liste actuelle", tagVerify: "Code de vérification", allDevices: "Tous les appareils",
-      scLanguage: "Langue", scLang: "Langue", scLangHelp: "La langue est enregistrée dans ce navigateur et appliquée après un rechargement complet. Les autres navigateurs ne sont pas affectés.",
-      scPageSize: "Pagination", scPerPage: "Éléments par page", scPageSizeHelp: "La taille de page est enregistrée dans ce navigateur et s'applique immédiatement après l'enregistrement.",
-      scBrowserPrefs: "Préférences du navigateur", scBrowserPrefsHelp: "Les interrupteurs de messages et les heures calmes n'affectent que ce navigateur.",
+      scLanguage: "Langue", scLang: "Langue", scLangHelp: "",
+      scPageSize: "Pagination", scPerPage: "Éléments par page", scPageSizeHelp: "",
+      scBrowserPrefs: "Préférences du navigateur", scBrowserPrefsHelp: "",
       scNotifyChannels: "Canaux de notification", scChannelsN: "{n} configurés", scMinN: "{n} min", scDaysN: "{n} jours", statToday: "Reçus aujourd'hui",
       scTargetOff: "Désactiver", scTargetRename: "Renommer", scTargetLegacy: "Ce canal utilise plusieurs cibles ; les champs de cible unique ci-dessus ne servent plus à l'envoi.",
       scAddTarget: "Ajouter une cible", scTargetNamePh: "Nom de l'envoi (ex. groupe d'astreinte)", scTargetAdded: "Cible ajoutée ; enregistrez pour appliquer",
@@ -5956,11 +6004,11 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     de: {
       pageSub: "Von Station zu Station, wie ein Sternenstrom.",
       listTitle: "Nachrichten", refresh: "Aktualisieren", settingsOverview: "Einstellungsübersicht", openSettings: "Einstellungen öffnen",
-      quickOverview: "Kurzübersicht", viewStats: "Statistik ansehen", selectHint: "„Mehrfachauswahl“ in der Werkzeugleiste oder Rechtsklick / langes Drücken", selModeBtn: "Mehrfachauswahl", selModeTip: "Mehrfachauswahl starten oder beenden", selBarAria: "Sammelaktionen",
+      quickOverview: "Kurzübersicht", viewStats: "Statistik", selectHint: "„Mehrfachauswahl“ in der Werkzeugleiste oder Rechtsklick / langes Drücken", selModeBtn: "Mehrfachauswahl", selModeTip: "Mehrfachauswahl starten oder beenden", selBarAria: "Sammelaktionen",
       selAllList: "Aktuelle Liste auswählen", tagVerify: "Bestätigungscode", allDevices: "Alle Geräte",
-      scLanguage: "Sprache", scLang: "Sprache", scLangHelp: "Die Sprache wird in diesem Browser gespeichert und nach dem Speichern mit vollständigem Neuladen angewendet. Andere Browser sind nicht betroffen.",
-      scPageSize: "Seitengröße", scPerPage: "Einträge pro Seite", scPageSizeHelp: "Die Seitengröße wird in diesem Browser gespeichert und nach dem Speichern sofort angewendet.",
-      scBrowserPrefs: "Browser-Einstellungen", scBrowserPrefsHelp: "Nachrichtenschalter und Ruhezeiten gelten nur für diesen Browser.",
+      scLanguage: "Sprache", scLang: "Sprache", scLangHelp: "",
+      scPageSize: "Seitengröße", scPerPage: "Einträge pro Seite", scPageSizeHelp: "",
+      scBrowserPrefs: "Browser-Einstellungen", scBrowserPrefsHelp: "",
       scNotifyChannels: "Benachrichtigungskanäle", scChannelsN: "{n} konfiguriert", scMinN: "{n} Min.", scDaysN: "{n} Tage", statToday: "Heute erhalten",
       scTargetOff: "Deaktivieren", scTargetRename: "Umbenennen", scTargetLegacy: "Für diesen Kanal sind mehrere Ziele aktiv; die Einzelziel-Felder oben werden nicht mehr zum Senden verwendet.",
       scAddTarget: "Ziel hinzufügen", scTargetNamePh: "Push-Name (z. B. Bereitschaftsgruppe)", scTargetAdded: "Ziel hinzugefügt; zum Anwenden speichern",
@@ -5982,11 +6030,11 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     "pt-BR": {
       pageSub: "De estação em estação, como estrelas cadentes.",
       listTitle: "Mensagens", refresh: "Atualizar", settingsOverview: "Visão dos ajustes", openSettings: "Abrir ajustes",
-      quickOverview: "Visão rápida", viewStats: "Ver estatísticas", selectHint: "Use «Seleção múltipla» na barra, ou clique direito / toque e segure", selModeBtn: "Seleção múltipla", selModeTip: "Entrar ou sair da seleção múltipla", selBarAria: "Ações em lote",
+      quickOverview: "Visão rápida", viewStats: "Estatísticas", selectHint: "Use «Seleção múltipla» na barra, ou clique direito / toque e segure", selModeBtn: "Seleção múltipla", selModeTip: "Entrar ou sair da seleção múltipla", selBarAria: "Ações em lote",
       selAllList: "Selecionar lista atual", tagVerify: "Código de verificação", allDevices: "Todos os dispositivos",
-      scLanguage: "Idioma", scLang: "Idioma", scLangHelp: "A preferência de idioma é salva neste navegador e aplicada após salvar com recarregamento completo. Outros navegadores não são afetados.",
-      scPageSize: "Paginação", scPerPage: "Itens por página", scPageSizeHelp: "O tamanho da página é salvo neste navegador e aplicado imediatamente após salvar.",
-      scBrowserPrefs: "Preferências do navegador", scBrowserPrefsHelp: "Os interruptores de mensagens e o horário de silêncio afetam apenas este navegador.",
+      scLanguage: "Idioma", scLang: "Idioma", scLangHelp: "",
+      scPageSize: "Paginação", scPerPage: "Itens por página", scPageSizeHelp: "",
+      scBrowserPrefs: "Preferências do navegador", scBrowserPrefsHelp: "",
       scNotifyChannels: "Canais de notificação", scChannelsN: "{n} configurados", scMinN: "{n} min", scDaysN: "{n} dias", statToday: "Recebidos hoje",
       scTargetOff: "Desativar", scTargetRename: "Renomear", scTargetLegacy: "Este canal tem vários destinos; os campos de destino único acima não são mais usados no envio.",
       scAddTarget: "Adicionar destino", scTargetNamePh: "Nome do envio (ex. grupo de plantão)", scTargetAdded: "Destino adicionado; salve para aplicar",
@@ -6020,13 +6068,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scNavDisplay: "界面", scNavMessages: "消息", scNavSession: "登录",
       scNavNotify: "通知", scNavBiz: "数据", scNavSecurity: "安全",
       scTabDisplay: "界面与显示", scTabMessages: "消息与提醒",
-      scSecDisplayHelp: "语言、分页与首页显示都只保存在当前浏览器，不会同步到账号或其他设备。",
-      scSecMessagesHelp: "这些开关只影响当前浏览器的新消息提醒，与服务器的通知渠道互不影响。",
+      scSecDisplayHelp: "",
+      scSecMessagesHelp: "",
       scSecSessionHelp: "本浏览器可单独设置登录时长；未单独设置时使用全局默认。",
       scSecNotifyHelp: "通知规则与推送目标保存在服务器，对本部署的所有浏览器生效。",
       scSecBizHelp: "保留与归属地属服务端配置，修改后对全部设备生效。",
       scSecSecurityHelp: "接入令牌与登录防护属服务端安全配置。",
-      scHomeStatsScope: "仅保存在当前浏览器，不会同步到其他浏览器或设备。",
+      scHomeStatsScope: "",
       scCredOn: "已配置", scCredOff: "未配置",
       scClearCred: "清除已保存的凭据",
       scClearWarn: "清除后该渠道需重新填写凭据才能发送。",
@@ -6040,13 +6088,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scNavDisplay: "介面", scNavMessages: "訊息", scNavSession: "登入",
       scNavNotify: "通知", scNavBiz: "資料", scNavSecurity: "安全",
       scTabDisplay: "介面與顯示", scTabMessages: "訊息與提醒",
-      scSecDisplayHelp: "語言、每頁筆數與首頁顯示只儲存在目前瀏覽器，不會同步到其他瀏覽器或裝置。",
-      scSecMessagesHelp: "這些開關只影響目前瀏覽器的新訊息提醒，與伺服器通知管道互不影響。",
+      scSecDisplayHelp: "",
+      scSecMessagesHelp: "",
       scSecSessionHelp: "本瀏覽器可單獨設定登入時長；未設定時使用全域預設。",
       scSecNotifyHelp: "通知規則與推送目標儲存在伺服器，對此部署的所有瀏覽器生效。",
       scSecBizHelp: "保留與號碼歸屬地屬伺服器設定，修改後對所有裝置生效。",
       scSecSecurityHelp: "存取權杖與登入防護屬伺服器安全設定。",
-      scHomeStatsScope: "僅儲存在目前瀏覽器，不會同步到其他瀏覽器或裝置。",
+      scHomeStatsScope: "",
       scCredOn: "已設定", scCredOff: "未設定",
       scClearCred: "清除已儲存的憑據",
       scClearWarn: "清除後此渠道需重新填寫憑據才能傳送。",
@@ -6060,13 +6108,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scNavDisplay: "Display", scNavMessages: "Messages", scNavSession: "Sign-in",
       scNavNotify: "Alerts", scNavBiz: "Data", scNavSecurity: "Security",
       scTabDisplay: "Display & layout", scTabMessages: "Messages & alerts",
-      scSecDisplayHelp: "Language, page size and home display are stored in this browser only — they never sync to other browsers or devices.",
-      scSecMessagesHelp: "These toggles only affect new-message alerts in this browser; server notification channels are unaffected.",
+      scSecDisplayHelp: "",
+      scSecMessagesHelp: "",
       scSecSessionHelp: "This browser can override the session length; otherwise the global default applies.",
       scSecNotifyHelp: "Notification rules and push targets are stored on the server and apply to every browser using this deployment.",
       scSecBizHelp: "Retention and caller area are server-side settings that apply to all devices.",
       scSecSecurityHelp: "Access tokens and sign-in protection are server-side security settings.",
-      scHomeStatsScope: "Stored in this browser only. It does not sync to other browsers or devices.",
+      scHomeStatsScope: "",
       scCredOn: "Configured", scCredOff: "Not configured",
       scClearCred: "Clear saved credential",
       scClearWarn: "After clearing, this channel needs a new credential before it can send.",
@@ -6080,13 +6128,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scNavDisplay: "表示", scNavMessages: "メッセージ", scNavSession: "ログイン",
       scNavNotify: "通知", scNavBiz: "データ", scNavSecurity: "セキュリティ",
       scTabDisplay: "表示とレイアウト", scTabMessages: "メッセージと通知",
-      scSecDisplayHelp: "言語・ページ件数・ホーム表示はこのブラウザにのみ保存され、他のブラウザや端末とは同期されません。",
-      scSecMessagesHelp: "これらのスイッチはこのブラウザの新着通知にのみ影響し、サーバー側の通知チャネルには影響しません。",
+      scSecDisplayHelp: "",
+      scSecMessagesHelp: "",
       scSecSessionHelp: "このブラウザだけログイン有効期間を変更できます。未設定の場合は全体の既定値を使用します。",
       scSecNotifyHelp: "通知ルールとプッシュ先はサーバーに保存され、このデプロイのすべてのブラウザに適用されます。",
       scSecBizHelp: "保存期間と発信地域はサーバー側の設定で、すべての端末に適用されます。",
       scSecSecurityHelp: "アクセストークンとログイン保護はサーバー側のセキュリティ設定です。",
-      scHomeStatsScope: "このブラウザにのみ保存され、他のブラウザや端末とは同期されません。",
+      scHomeStatsScope: "",
       scCredOn: "設定済み", scCredOff: "未設定",
       scClearCred: "保存済みの認証情報を削除",
       scClearWarn: "削除後は再入力するまで、このチャネルから送信できません。",
@@ -6100,13 +6148,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scNavDisplay: "화면", scNavMessages: "메시지", scNavSession: "로그인",
       scNavNotify: "알림", scNavBiz: "데이터", scNavSecurity: "보안",
       scTabDisplay: "화면 및 표시", scTabMessages: "메시지 및 알림",
-      scSecDisplayHelp: "언어, 페이지 수, 홈 표시는 이 브라우저에만 저장되며 다른 브라우저나 기기와 동기화되지 않습니다.",
-      scSecMessagesHelp: "이 스위치는 이 브라우저의 새 메시지 알림에만 적용되며 서버 알림 채널에는 영향을 주지 않습니다.",
+      scSecDisplayHelp: "",
+      scSecMessagesHelp: "",
       scSecSessionHelp: "이 브라우저에서만 로그인 유지 시간을 설정할 수 있으며, 설정하지 않으면 전체 기본값을 사용합니다.",
       scSecNotifyHelp: "알림 규칙과 푸시 대상은 서버에 저장되며 이 배포의 모든 브라우저에 적용됩니다.",
       scSecBizHelp: "보관 기간과 발신 지역은 서버 설정으로 모든 기기에 적용됩니다.",
       scSecSecurityHelp: "액세스 토큰과 로그인 보호는 서버 보안 설정입니다.",
-      scHomeStatsScope: "이 브라우저에만 저장되며 다른 브라우저나 기기와 동기화되지 않습니다.",
+      scHomeStatsScope: "",
       scCredOn: "설정됨", scCredOff: "설정 안 됨",
       scClearCred: "저장된 자격 증명 삭제",
       scClearWarn: "삭제 후에는 자격 증명을 다시 입력해야 전송할 수 있습니다.",
@@ -6120,13 +6168,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scNavDisplay: "Pantalla", scNavMessages: "Mensajes", scNavSession: "Acceso",
       scNavNotify: "Avisos", scNavBiz: "Datos", scNavSecurity: "Seguridad",
       scTabDisplay: "Pantalla y diseño", scTabMessages: "Mensajes y avisos",
-      scSecDisplayHelp: "El idioma, las filas por página y la vista de inicio se guardan solo en este navegador; no se sincronizan con otros navegadores ni dispositivos.",
-      scSecMessagesHelp: "Estos interruptores solo afectan a los avisos de mensajes nuevos en este navegador; los canales del servidor no cambian.",
+      scSecDisplayHelp: "",
+      scSecMessagesHelp: "",
       scSecSessionHelp: "Este navegador puede definir su propia duración de sesión; si no, se usa el valor global.",
       scSecNotifyHelp: "Las reglas y los destinos de envío se guardan en el servidor y afectan a todos los navegadores de esta instalación.",
       scSecBizHelp: "La retención y el origen del número son ajustes del servidor y afectan a todos los dispositivos.",
       scSecSecurityHelp: "Los tokens de acceso y la protección de acceso son ajustes de seguridad del servidor.",
-      scHomeStatsScope: "Se guarda solo en este navegador; no se sincroniza con otros navegadores ni dispositivos.",
+      scHomeStatsScope: "",
       scCredOn: "Configurado", scCredOff: "Sin configurar",
       scClearCred: "Borrar credencial guardada",
       scClearWarn: "Tras borrarla, este canal necesitará una nueva credencial para enviar.",
@@ -6140,13 +6188,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scNavDisplay: "Affichage", scNavMessages: "Messages", scNavSession: "Connexion",
       scNavNotify: "Alertes", scNavBiz: "Données", scNavSecurity: "Sécurité",
       scTabDisplay: "Affichage et mise en page", scTabMessages: "Messages et alertes",
-      scSecDisplayHelp: "La langue, le nombre de lignes et l'affichage de l'accueil sont stockés dans ce navigateur uniquement ; aucune synchronisation avec d'autres navigateurs ou appareils.",
-      scSecMessagesHelp: "Ces interrupteurs n'affectent que les alertes de nouveaux messages dans ce navigateur ; les canaux du serveur ne changent pas.",
+      scSecDisplayHelp: "",
+      scSecMessagesHelp: "",
       scSecSessionHelp: "Ce navigateur peut définir sa propre durée de session ; sinon la valeur globale s'applique.",
       scSecNotifyHelp: "Les règles et les cibles d'envoi sont stockées sur le serveur et s'appliquent à tous les navigateurs de ce déploiement.",
       scSecBizHelp: "La conservation et l'origine du numéro sont des réglages serveur appliqués à tous les appareils.",
       scSecSecurityHelp: "Les jetons d'accès et la protection de connexion sont des réglages de sécurité serveur.",
-      scHomeStatsScope: "Stocké dans ce navigateur uniquement ; aucune synchronisation avec d'autres navigateurs ou appareils.",
+      scHomeStatsScope: "",
       scCredOn: "Configuré", scCredOff: "Non configuré",
       scClearCred: "Effacer l'identifiant enregistré",
       scClearWarn: "Après effacement, ce canal devra recevoir un nouvel identifiant pour envoyer.",
@@ -6160,13 +6208,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scNavDisplay: "Anzeige", scNavMessages: "Meldungen", scNavSession: "Anmeldung",
       scNavNotify: "Hinweise", scNavBiz: "Daten", scNavSecurity: "Sicherheit",
       scTabDisplay: "Anzeige & Layout", scTabMessages: "Meldungen & Hinweise",
-      scSecDisplayHelp: "Sprache, Zeilen pro Seite und Startansicht werden nur in diesem Browser gespeichert – keine Synchronisierung mit anderen Browsern oder Geräten.",
-      scSecMessagesHelp: "Diese Schalter betreffen nur Hinweise auf neue Nachrichten in diesem Browser; die Serverkanäle bleiben unverändert.",
+      scSecDisplayHelp: "",
+      scSecMessagesHelp: "",
       scSecSessionHelp: "Dieser Browser kann eine eigene Sitzungsdauer festlegen; sonst gilt der globale Standard.",
       scSecNotifyHelp: "Regeln und Push-Ziele liegen auf dem Server und gelten für alle Browser dieser Installation.",
       scSecBizHelp: "Aufbewahrung und Nummernherkunft sind Servereinstellungen und gelten für alle Geräte.",
       scSecSecurityHelp: "Zugriffstoken und Anmeldeschutz sind serverseitige Sicherheitseinstellungen.",
-      scHomeStatsScope: "Nur in diesem Browser gespeichert – keine Synchronisierung mit anderen Browsern oder Geräten.",
+      scHomeStatsScope: "",
       scCredOn: "Konfiguriert", scCredOff: "Nicht konfiguriert",
       scClearCred: "Gespeicherte Zugangsdaten löschen",
       scClearWarn: "Nach dem Löschen kann dieser Kanal erst nach erneuter Eingabe senden.",
@@ -6180,13 +6228,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       scNavDisplay: "Tela", scNavMessages: "Mensagens", scNavSession: "Acesso",
       scNavNotify: "Avisos", scNavBiz: "Dados", scNavSecurity: "Segurança",
       scTabDisplay: "Tela e layout", scTabMessages: "Mensagens e avisos",
-      scSecDisplayHelp: "Idioma, itens por página e exibição da página inicial ficam apenas neste navegador; não são sincronizados com outros navegadores ou dispositivos.",
-      scSecMessagesHelp: "Estes interruptores afetam apenas os avisos de novas mensagens neste navegador; os canais do servidor não mudam.",
+      scSecDisplayHelp: "",
+      scSecMessagesHelp: "",
       scSecSessionHelp: "Este navegador pode definir a própria duração de sessão; caso contrário, vale o padrão global.",
       scSecNotifyHelp: "As regras e os destinos de envio ficam no servidor e valem para todos os navegadores desta instalação.",
       scSecBizHelp: "A retenção e a origem do número são ajustes do servidor e valem para todos os dispositivos.",
       scSecSecurityHelp: "Tokens de acesso e proteção de login são ajustes de segurança do servidor.",
-      scHomeStatsScope: "Salvo apenas neste navegador; não sincroniza com outros navegadores ou dispositivos.",
+      scHomeStatsScope: "",
       scCredOn: "Configurado", scCredOff: "Não configurado",
       scClearCred: "Apagar credencial salva",
       scClearWarn: "Após apagar, este canal precisará de nova credencial para enviar.",
@@ -6225,6 +6273,18 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     "de": { scEnvPriority: "In Umgebungsvariablen gesetzte Werte haben Vorrang; hier gespeicherte Einstellungen ergänzen sie nur." },
     "pt-BR": { scEnvPriority: "Itens já definidos nas variáveis de ambiente têm prioridade; o que for salvo aqui é complementar e não os substitui." }
   };
+  /* UX-14：设备 tab 与详情验证码卡片文案（九语种），统一合并进主字典 */
+  var UX14_I18N = {
+    "zh-CN": { scTabDevices: "设备管理", scSecDevicesHelp: "重命名、合并或删除已接入的设备，操作即时生效。", scDevicesEmpty: "还没有接入的设备。", detailCode: "验证码", copyCode: "复制验证码" },
+    "zh-TW": { scTabDevices: "設備管理", scSecDevicesHelp: "重新命名、合併或刪除已接入的裝置，操作即時生效。", scDevicesEmpty: "還沒有接入的裝置。", detailCode: "驗證碼", copyCode: "複製驗證碼" },
+    "en": { scTabDevices: "Device management", scSecDevicesHelp: "Rename, merge or remove connected devices. Changes take effect immediately.", scDevicesEmpty: "No devices connected yet.", detailCode: "Verification code", copyCode: "Copy code" },
+    "ja": { scTabDevices: "端末管理", scSecDevicesHelp: "接続済み端末の名前変更・統合・削除ができます。変更は即時に反映されます。", scDevicesEmpty: "接続済みの端末はありません。", detailCode: "認証コード", copyCode: "コードをコピー" },
+    "ko": { scTabDevices: "기기 관리", scSecDevicesHelp: "연결된 기기의 이름 변경·병합·삭제를 할 수 있습니다. 변경은 즉시 적용됩니다.", scDevicesEmpty: "연결된 기기가 없습니다.", detailCode: "인증번호", copyCode: "코드 복사" },
+    "es": { scTabDevices: "Gestión de dispositivos", scSecDevicesHelp: "Renombra, fusiona o elimina los dispositivos conectados. Los cambios se aplican al instante.", scDevicesEmpty: "Aún no hay dispositivos conectados.", detailCode: "Código de verificación", copyCode: "Copiar código" },
+    "fr": { scTabDevices: "Gestion des appareils", scSecDevicesHelp: "Renommez, fusionnez ou supprimez les appareils connectés. Les modifications sont immédiates.", scDevicesEmpty: "Aucun appareil connecté.", detailCode: "Code de vérification", copyCode: "Copier le code" },
+    "de": { scTabDevices: "Geräteverwaltung", scSecDevicesHelp: "Verbundene Geräte umbenennen, zusammenführen oder entfernen. Änderungen gelten sofort.", scDevicesEmpty: "Noch keine Geräte verbunden.", detailCode: "Bestätigungscode", copyCode: "Code kopieren" },
+    "pt-BR": { scTabDevices: "Gerenciar dispositivos", scSecDevicesHelp: "Renomeie, mescle ou remova os dispositivos conectados. As alterações valem imediatamente.", scDevicesEmpty: "Nenhum dispositivo conectado ainda.", detailCode: "Código de verificação", copyCode: "Copiar código" }
+  };
   (function () {
     for (var _ul in UNIT_I18N) {
       if (!I18N[_ul]) I18N[_ul] = {};
@@ -6233,6 +6293,10 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     for (var _xl in EXTRA_I18N) {
       if (!I18N[_xl]) I18N[_xl] = {};
       for (var _xk in EXTRA_I18N[_xl]) I18N[_xl][_xk] = EXTRA_I18N[_xl][_xk];
+    }
+    for (var _nl in UX14_I18N) {
+      if (!I18N[_nl]) I18N[_nl] = {};
+      for (var _nk in UX14_I18N[_nl]) I18N[_nl][_nk] = UX14_I18N[_nl][_nk];
     }
   })();
 
@@ -7246,6 +7310,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (state.range) p.set("range", state.range);
     if (state.q) p.set("q", state.q);
     if (state.starOnly) p.set("starred", "1");
+    if (state.pinOnly) p.set("pinned", "1");
     if (state.unreadOnly) p.set("unread", "1");
     if (state.readOnly) p.set("read", "1");
     p.set("page", state.page);
@@ -7254,7 +7319,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     p.set("slim", "1");
     return p.toString();
   }
-  /* UX-02A：设备筛选迁到筛选区（#dev 下拉），设备管理迁到独立弹层。
+  /* UX-02A / UX-14：设备筛选在筛选区（#dev 下拉），设备管理在设置中心「设备」tab。
      业务口径不变：state.device 仍是 /api/messages 的 device_id 过滤键。 */
   function loadDevices() {
     return fetch("/api/devices").then(function (r) { return r.json(); }).then(function (res) {
@@ -7274,10 +7339,11 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   }
   function syncDevSelect() { var sel = $("dev"); if (sel) sel.value = String(state.device || 0); }
   function devName(d) { return d.display_name === "未命名设备" ? T("unnamed") : d.display_name; }
-  /* 设备管理弹层：重命名 / 合并 / 删除（沿用原侧栏 tabop 的接口与语义） */
-  function openDevices() {
+  /* 设备管理：内容供设置中心「设备」tab 复用（重命名 / 合并 / 删除沿用原侧栏 tabop 的接口与语义） */
+  function deviceRowsHtml() {
     var list = state.devices || [];
-    var rows = list.map(function (d) {
+    if (!list.length) return '<div class="ds-empty">' + esc(T("scDevicesEmpty")) + '</div>';
+    return list.map(function (d) {
       var sub = (d.sim ? d.sim + " · " : "") + T("devCount", { n: d.msg_count }) + (d.last_at ? " · " + relTime(d.last_at) : "");
       return '<div class="devrow" data-dvid="' + esc(String(d.id)) + '">'
         + '<div class="dinfo"><div class="dn">' + esc(devName(d)) + '</div><div class="ds">' + esc(sub) + '</div></div>'
@@ -7292,23 +7358,33 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         + '>×</button>'
         + '</div></div>';
     }).join("");
-    openModal('<h3>' + esc(T("navDevices")) + '</h3><div class="devlist">' + rows + '</div>');
-    var host = document.querySelector(".devlist");
-    if (host) host.onclick = function (ev) {
-      var b = ev.target.closest ? ev.target.closest("[data-dvact]") : null;
-      if (!b) return;
-      var row = b.closest("[data-dvid]");
-      var id = row ? parseInt(row.getAttribute("data-dvid"), 10) : 0;
-      var d = (state.devices || []).filter(function (x) { return x.id === id; })[0];
-      if (!d) return;
-      var act = b.getAttribute("data-dvact");
-      if (act === "del" && d.msg_count) { dsAlert(T("devDelBlocked", { n: d.msg_count })); return; }
-      if (act === "rename") devRename(d);
-      else if (act === "merge") devMerge(d);
-      else devDelete(d);
-    };
   }
-  function devAfterChange() { if (DSP_RES) DSP_RES(null); closeModal(); refreshAll(); }
+  function deviceAction(ev) {
+    var b = ev.target.closest ? ev.target.closest("[data-dvact]") : null;
+    if (!b) return;
+    var row = b.closest("[data-dvid]");
+    var id = row ? parseInt(row.getAttribute("data-dvid"), 10) : 0;
+    var d = (state.devices || []).filter(function (x) { return x.id === id; })[0];
+    if (!d) return;
+    var act = b.getAttribute("data-dvact");
+    if (act === "del" && d.msg_count) { dsAlert(T("devDelBlocked", { n: d.msg_count })); return; }
+    if (act === "rename") devRename(d);
+    else if (act === "merge") devMerge(d);
+    else devDelete(d);
+  }
+  function scBodyDevices() {
+    return scHead() + '<div class="sc-devlist devlist">' + deviceRowsHtml() + '</div>';
+  }
+  /* Device edits take effect immediately: refresh data, then redraw the tab in place
+     instead of closing the settings dialog (the old standalone modal is gone). */
+  function devAfterChange() {
+    if (DSP_RES) DSP_RES(null);
+    loadSources(); refreshHomeStats(); load();
+    loadDevices().then(function () {
+      syncDevSelect();
+      if (SC.section === "devices" && $("scbody")) scRenderBody();
+    });
+  }
   /* UX-08：设备重命名改为统一输入弹窗——带必填校验、提交中禁用、失败留在弹窗内可重试 */
   function devRename(d) {
     dsPrompt({
@@ -7463,6 +7539,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         '<div class="msg-actions">' +
           '<button class="more" type="button" data-id="' + m.id + '" hidden>' + esc(T("detailBtn")) + '</button>' +
           '<button class="star' + (m.starred ? " on" : "") + '" data-id="' + m.id + '" title="' + esc(T("starItemTip")) + '" aria-label="' + esc(T("starItemTip")) + '">' + (m.starred ? "★" : "☆") + '</button>' +
+          '<button class="pin' + (m.pinned ? " on" : "") + '" data-id="' + m.id + '" title="' + esc(T("pinItemTip")) + '" aria-label="' + esc(T("pinItemTip")) + '">' + (m.pinned ? "📌" : "📍") + '</button>' +
           '<button class="del" data-id="' + m.id + '" title="' + esc(T("del")) + '">' + esc(T("del")) + '</button>' +
         '</div>' +
       '</div>' +
@@ -7487,7 +7564,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
          旧的判定漏掉了顶部 chip（★收藏/未读/已读），导致收藏筛选为空时
          错误显示"还没有收到消息 + 去配置 SmsForwarder"这种"从未收到消息"的文案。 */
       var hasFilter = !!(state.device || state.src || state.range || state.q ||
-        state.starOnly || state.unreadOnly || state.readOnly ||
+        state.starOnly || state.pinOnly || state.unreadOnly || state.readOnly ||
         (state.filterMode && state.filterMode !== "all"));
       if (hasFilter) {
         $("list").innerHTML = '<div class="empty">' + esc(T("emptyFilter")) +
@@ -8010,6 +8087,18 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       })
       .catch(function () { toast(T("starFail"), { type: "error" }); });
   }
+  function togglePin(id, pinned) {
+    return fetch("/api/messages/pin", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: id, pinned: pinned }) })
+      .then(function (r) {
+        if (r.status === 401) { var ue = new Error("unauthorized"); ue.unauth = true; throw ue; }
+        return r.json();
+      })
+      .then(function (d) {
+        if (!d || !d.success) { toast(T("pinFail"), { type: "error" }); return; }
+        load();
+      })
+      .catch(function () { toast(T("pinFail"), { type: "error" }); });
+  }
   function doDelete(ids) {
     fetch("/api/messages/remove", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids: ids }) })
       .then(function (r) { return r.json(); })
@@ -8066,14 +8155,29 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (m.device_name) parts.push('<span>' + esc(m.device_name) + (recv ? ' · ' + esc(recv) : '') + '</span>');
     parts.push('<span id="dstate">' + esc(m.read_at ? T("read") : T("unread")) + '</span>');
     if (m.starred) parts.push('<span class="m-star">★</span>');
+    if (m.pinned) parts.push('<span class="m-pin">📌</span>');
     var acts =
       '<button class="tbtn" id="dcopy">' + esc(T("copyBody")) + '</button>' +
       '<button class="tbtn" id="dstar">' + esc(m.starred ? T("unstar") : T("star")) + '</button>' +
+      '<button class="tbtn" id="dpin">' + esc(m.pinned ? T("unpin") : T("pin")) + '</button>' +
       (isSms && snum ? '<a class="tbtn" href="tel:' + esc(snum) + '">' + esc(T("call")) + '</a>' : '') +
       (isSms && snum ? '<button class="tbtn" id="dlabel">' + esc(T("setLabel")) + '</button>' : '');
     var actsEnd =
       '<button class="tbtn tbtn--danger" id="ddel">' + esc(T("del")) + '</button>' +
       '<button class="tbtn tbtn--accent" id="dunread">' + esc(T("markUnread")) + '</button>';
+    /* UX-14：验证码在详情卡片内右侧独立展示（代码加重强调 + 一键复制）。
+       弹层与宽屏面板共用本渲染层，所以所有含验证码的详情都有同一个复制入口；
+       无验证码的消息仍是原来的单栏正文，布局完全不变。 */
+    var codeCard = code
+      ? '<aside class="detail-code" aria-label="' + esc(T("detailCode")) + '">'
+        + '<div class="dc-label">' + esc(T("detailCode")) + '</div>'
+        + '<div class="dc-value">' + esc(code) + '</div>'
+        + '<button class="dc-copy" id="dccopy" type="button">' + esc(T("copyCode")) + '</button>'
+        + '</aside>'
+      : '';
+    var detailMain = '<div class="detail-main' + (code ? ' has-code' : '') + '">'
+      + '<div class="detail-body">' + (body ? linkify(esc(body)) : '<span class="empty-text">' + esc(T("emptyBody")) + '</span>') + '</div>'
+      + codeCard + '</div>';
     var foot;
     if (mode === "pane") {
       foot = '<div class="dp-foot">' + acts + '<span class="grow"></span>' + actsEnd + '</div>';
@@ -8087,7 +8191,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       : '<h3>' + esc(who) + '</h3>';
     return head +
       '<div class="detail-metarow">' + parts.join('<span class="sep">·</span>') + '</div>' +
-      '<div class="detail-body">' + (body ? linkify(esc(body)) : '<span class="empty-text">' + esc(T("emptyBody")) + '</span>') + '</div>' +
+      detailMain +
       foot;
   }
   /* 打开详情即标记已读；失败回滚本地状态并提示，不做"假成功" */
@@ -8137,8 +8241,25 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         } else closeModal();
       });
     };
+    var pin = q("#dpin");
+    if (pin) pin.onclick = function () {
+      var latest = null;
+      try { latest = typeof msgById === "function" ? msgById(m.id) : null; } catch (e) { latest = null; }
+      var cur = latest && typeof latest.pinned !== "undefined" ? !!latest.pinned : !!m.pinned;
+      togglePin(m.id, !cur).then(function () {
+        if (mode === "pane") {
+          m.pinned = !cur;
+          if (typeof openPane === "function") openPane(m.id);
+        } else closeModal();
+      });
+    };
     var cp = q("#dcopy");
     if (cp) cp.onclick = function () { doCopy(m.content, cp); };
+    var ccb = q("#dccopy");
+    if (ccb) ccb.onclick = function () {
+      var cv = q(".detail-code .dc-value");
+      if (cv) doCopy(cv.textContent || "", ccb);
+    };
     var del = q("#ddel");
     if (del) del.onclick = function () {
       /* UX-09 U9-02：先确认再关闭详情，避免"点了就没了"且无法追问 */
@@ -8666,7 +8787,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   })();
   /* 筛选：全部 / 未读 / 已读 / 星标（单选，与原型筛选 chips 一致） */
   function applyFilterUI(mode) {
-    var map = { fall: "all", funread: "unread", fread: "read", fstar: "starred" };
+    var map = { fall: "all", funread: "unread", fread: "read", fstar: "starred", fpin: "pinned" };
     Object.keys(map).forEach(function (id) {
       var b = $(id);
       if (!b) return;
@@ -8679,6 +8800,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   function setFilterMode(mode) {
     state.filterMode = mode;
     state.starOnly = mode === "starred";
+    state.pinOnly = mode === "pinned";
     state.unreadOnly = mode === "unread";
     state.readOnly = mode === "read";
     state.page = 1; state.cursor = ""; state.loadMoreDepth = 0;
@@ -8693,7 +8815,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var dEl = $("dev"); if (dEl) dEl.value = "0";
     var sEl = $("src"); if (sEl) sEl.value = "";
     var rEl = $("range"); if (rEl) rEl.value = "";
-    state.filterMode = "all"; state.starOnly = false; state.unreadOnly = false; state.readOnly = false;
+    state.filterMode = "all"; state.starOnly = false; state.pinOnly = false; state.unreadOnly = false; state.readOnly = false;
     state.page = 1; state.cursor = ""; state.loadMoreDepth = 0;
     applyFilterUI("all");
     if (typeof syncFilterBtn === "function") syncFilterBtn();
@@ -8703,16 +8825,16 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   $("funread").onclick = function () { setFilterMode("unread"); };
   $("fread").onclick = function () { setFilterMode("read"); };
   $("fstar").onclick = function () { setFilterMode(state.filterMode === "starred" ? "all" : "starred"); };
+  $("fpin").onclick = function () { setFilterMode(state.filterMode === "pinned" ? "all" : "pinned"); };
   $("refreshbtn").onclick = function () { refreshAll(); };
   $("dev").onchange = function () { state.device = parseInt($("dev").value, 10) || 0; state.page = 1; syncFilterBtn(); load(); };
   $("statsbtn").onclick = openStats;
-  $("devbtn").onclick = openDevices;
   $("stdetail").onclick = openStats;
   var doLogoutConfirm = function () {
     dsConfirm({ message: T("scLogoutConfirm"), danger: true }).then(function (go) { if (go) doLogout(); });
   };
   $("logoutbtn").onclick = doLogoutConfirm;
-  /* 移动端「更多」菜单：把统计/设备/设置/退出收进 ⋯，桌面端这些按钮直接可见 */
+  /* 移动端「更多」菜单：把统计/设置/退出收进 ⋯，桌面端这些按钮直接可见 */
   (function navMenu() {
     var btn = $("morebtn"), menu = $("navmenu");
     if (!btn || !menu) return;
@@ -8729,7 +8851,6 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       close();
       if (b.id === "mnurefresh") refreshAll();
       else if (b.id === "mnustats") openStats();
-      else if (b.id === "mnudev") openDevices();
       else if (b.id === "mnuset") openSettingsCenter("display");
       else if (b.id === "mnulogout") doLogoutConfirm();
     };
@@ -8747,6 +8868,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (state.range) p.set("range", state.range);
     if (state.q) p.set("q", state.q);
     if (state.starOnly) p.set("starred", "1");
+    if (state.pinOnly) p.set("pinned", "1");
     if (state.unreadOnly) p.set("unread", "1");
     if (state.readOnly) p.set("read", "1");
     p.set("format", fmt);
@@ -8862,6 +8984,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   var SET_SECTIONS = [
     { key: "display", nav: "scNavDisplay", title: "scTabDisplay", desc: "scSecDisplayHelp" },
     { key: "messages", nav: "scNavMessages", title: "scTabMessages", desc: "scSecMessagesHelp" },
+    { key: "devices", nav: "navDevices", title: "scTabDevices", desc: "scSecDevicesHelp" },
     { key: "session", nav: "scNavSession", title: "scTabSession", desc: "scSecSessionHelp" },
     { key: "notify", nav: "scNavNotify", title: "scTabNotify", desc: "scSecNotifyHelp" },
     { key: "biz", nav: "scNavBiz", title: "scTabBiz", desc: "scSecBizHelp" },
@@ -8934,6 +9057,12 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     });
   }
   /* 打开设置中心：先立刻弹出骨架（不等网络），再填充真实内容，消除空白等待 */
+  function scRefreshDevices() {
+    if (typeof loadDevices !== "function") return;
+    loadDevices().then(function () {
+      if (SC.section === "devices" && $("scbody")) scRenderBody();
+    });
+  }
   function openSettingsCenter(section) {
     SC.section = section || "display";
     SC.dirty = false;
@@ -8944,6 +9073,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     SC.targets = [];
     scRenderShell();
     scLoad();
+    if (SC.section === "devices") scRefreshDevices();
   }
   /* 读取设置：首次进入显示骨架，失败给出可重试的错误态（而不是静默空白） */
   function scLoad() {
@@ -9017,7 +9147,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   /* 安全分组只有说明与令牌入口，没有可提交的配置：
      隐藏「保存/恢复默认」，避免用户点了才收到「此页无需保存」的无效反馈 */
   function scSectionActions() {
-    var secOnly = SC.section === "security" || SC.loading || !!SC.loadError;
+    var secOnly = SC.section === "security" || SC.section === "devices" || SC.loading || !!SC.loadError;
     var s = $("scrsave"), d = $("scrdefault");
     if (s) s.hidden = secOnly;
     if (d) d.hidden = secOnly;
@@ -9090,6 +9220,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     scStatus(null, "");
     scSectionActions();
     scRenderBody();
+    if (next === "devices") scRefreshDevices();
   }
   function scRenderBody() {
     var body = $("scbody");
@@ -9109,6 +9240,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     }
     if (SC.section === "display") body.innerHTML = scHead() + scBodyDisplay();
     else if (SC.section === "messages") body.innerHTML = scHead() + scBodyMessages();
+    else if (SC.section === "devices") body.innerHTML = scBodyDevices();
     else if (SC.section === "session") body.innerHTML = scHead() + scBodySession();
     else if (SC.section === "notify") body.innerHTML = scHead() + scBodyNotify();
     else if (SC.section === "biz") body.innerHTML = scHead() + scBodyBiz();
@@ -9116,6 +9248,10 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     if (SC.section === "session") {
       var sel = $("scbttl"), inp = $("scbttlmin");
       if (sel && inp) sel.onchange = function () { inp.hidden = sel.value !== "custom"; scMarkDirty(true); };
+    }
+    if (SC.section === "devices") {
+      var dl = body.querySelector(".devlist");
+      if (dl) dl.onclick = deviceAction;
     }
     if (SC.section === "notify") scWireNotify();
     if (SC.section === "security") {
@@ -9127,7 +9263,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   }
   function scHead() {
     var x = SET_SECTIONS.filter(function (s) { return s.key === SC.section; })[0];
-    return '<div class="sc-head"><h4>' + T(x.title) + '</h4><p>' + T(x.desc) + '</p></div>';
+    return '<div class="sc-head"><h4>' + T(x.title) + '</h4>' + (T(x.desc) ? '<p>' + T(x.desc) + '</p>' : '') + '</div>';
   }
 
   /* ---- 界面与显示：语言 / 分页 / 首页统计摘要（全部是本浏览器偏好） ---- */
@@ -9141,7 +9277,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     var perItem = scItem(T("scPerPage"), T("scPageSizeHelp"),
       '<select id="sclimit" class="ds-select">' + opts + '</select>', { id: "sclimit", wide: true });
     /* UX-02B 的首页统计摘要默认隐藏；UX-03 从「登录与会话」迁到此处，语义与存储键保持不变 */
-    var homeItem = scItem(T("scHomeStats"), T("scHomeStatsHelp") + " " + T("scHomeStatsScope"),
+    var homeItem = scItem(T("scHomeStats"), [T("scHomeStatsHelp"), T("scHomeStatsScope")].filter(Boolean).join(" "),
       scSwitch("schomestats", !!state.homeStats, "sclb-schomestats"), { id: "schomestats" });
     return scGroup(T("scUiGroup"), "browser", "", langItem + perItem)
       + scGroup(T("scHomeDisplay"), "browser", "", homeItem);
@@ -9918,6 +10054,13 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         return;
       }
     }
+    var pinBtn = ev.target.closest ? ev.target.closest(".pin") : null;
+    if (pinBtn) {
+      var pid = parseInt(pinBtn.getAttribute("data-id"), 10);
+      var pm = msgById(pid);
+      if (pm) togglePin(pid, !pm.pinned);
+      return;
+    }
     var starBtn = ev.target.closest ? ev.target.closest(".star") : null;
     if (starBtn) {
       var sid = parseInt(starBtn.getAttribute("data-id"), 10);
@@ -10602,6 +10745,7 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
   deleted_at  TEXT,
   starred     INTEGER NOT NULL DEFAULT 0,
+  pinned      INTEGER NOT NULL DEFAULT 0,
   read_at     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_messages_device_time ON messages(device_id, received_at DESC);
@@ -10611,12 +10755,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_dedup
   ON messages(device_id, sender, content, received_at);
 -- 来源筛选索引
 CREATE INDEX IF NOT EXISTS idx_messages_source ON messages(source, received_at DESC);
--- 首屏列表主排序（starred DESC, received_at DESC, id DESC）：
+-- 首屏列表主排序（pinned DESC, received_at DESC, id DESC）：置顶与收藏拆分后由 pinned 控制排序
 -- 避免 5 万行以上时 SQLite 选「逐设备回表 + 临时 B 树全量排序」（实测 112ms → 0.1ms）
 -- 注意：不要改成 WHERE deleted_at IS NULL 的部分索引——统计接口聚合 read_at 时会
 -- 被迫走索引 + 随机回表，实测由 39ms 退化到 62ms；普通索引下统计仍走全表扫描
 CREATE INDEX IF NOT EXISTS idx_messages_star_time
   ON messages(starred DESC, received_at DESC, id DESC);
+-- 置顶排序索引（收藏 starred 仅作标记/筛选，不再影响排序）
+CREATE INDEX IF NOT EXISTS idx_messages_pin_time
+  ON messages(pinned DESC, received_at DESC, id DESC);
 -- 设备列表计数/最近消息时间：覆盖索引，避免逐设备回表全扫（实测 104ms → 5.8ms）
 CREATE INDEX IF NOT EXISTS idx_messages_dev_active_time
   ON messages(device_id, deleted_at, received_at);
@@ -11877,6 +12024,9 @@ export async function fetchApp(request, env, ctx) {
       }
       if (path === "/api/messages/star" && request.method === "POST") {
         return await handleStarMessage(request, env);
+      }
+      if (path === "/api/messages/pin" && request.method === "POST") {
+        return await handlePinMessage(request, env);
       }
       if (path === "/api/messages/read" && request.method === "POST") {
         return await handleReadMessage(request, env);
