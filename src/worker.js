@@ -2446,6 +2446,19 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   .meta { display: flex; justify-content: space-between; align-items: center;
           color: var(--muted); font-size: 12px; margin-bottom: 8px; }
   .list { display: flex; flex-direction: column; gap: 8px; }
+  /* UX-20：窄屏首次进入的一次性引导 —— 多选入口已从工具栏移到长按，新用户需要一个提示。
+     关闭后写 localStorage（sms_selhint=1）永不再现；桌面不渲染（没有长按语境）。 */
+  .selhint { display: flex; align-items: center; gap: 10px; margin: 0 0 8px;
+             padding: 7px 8px 7px 12px; border-radius: var(--ds-radius-md);
+             background: var(--ds-color-primary-subtle); border: 1px solid var(--ds-color-border-subtle);
+             font-size: 12px; line-height: 1.5; color: var(--ds-color-text-secondary); }
+  .selhint[hidden] { display: none; }
+  .selhint-tx { flex: 1 1 auto; min-width: 0; }
+  .selhint-x { flex: none; border: 0; background: transparent; color: var(--ds-color-primary);
+               font: inherit; font-weight: 600; padding: 0 10px; border-radius: 6px;
+               min-height: 32px; cursor: pointer; }
+  .selhint-x:hover { background: var(--ds-color-surface-hover); }
+  .selhint-x:focus-visible { outline: 2px solid var(--ds-color-focus); outline-offset: 1px; }
   .daysep { font-size: 12px; color: var(--faint); font-weight: 600; margin: 10px 4px 0; }
   .card { background: var(--card); border: 1px solid var(--card-border); border-radius: 10px; padding: 10px 12px;
           animation: slidein .25s ease-out; }
@@ -3722,6 +3735,11 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
         <button class="tbtn" id="selcancel" data-i18n="cancel">取消</button>
       </div>
 
+      <div class="selhint" id="selhint" role="note" hidden>
+        <span class="selhint-tx" data-i18n="longPressHint">长按卡片即可多选，也可用右上角 ⋯ 菜单</span>
+        <button class="selhint-x" id="selhintx" type="button" data-i18n="gotIt" data-i18n-aria="gotIt" aria-label="知道了">知道了</button>
+      </div>
+
       <div class="list" id="list"><div class="sk"><div class="skc"></div><div class="skc"></div><div class="skc"></div></div></div>
       <div class="pagination">
         <span id="pageinfo"></span>
@@ -3864,6 +3882,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
   var I18N = {
     "zh-CN": {
+      longPressHint: "长按卡片即可多选，也可用右上角 ⋯ 菜单", gotIt: "知道了",
       langBtn: "🌐", langTip: "切换语言",
       ghRepo: "GitHub 仓库", modalClose: "关闭", devices: "设备标签",
       jumpTip: "输入页码后回车跳转", perPageTip: "每页条数",
@@ -3933,6 +3952,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       unnamed: "未命名设备"
     },
     en: {
+      longPressHint: "Long-press a message to select several, or use the ⋯ menu", gotIt: "Got it",
       langBtn: "🌐", langTip: "Switch language",
       ghRepo: "GitHub repository", modalClose: "Close", devices: "Devices",
       jumpTip: "Enter a page number and press Enter", perPageTip: "Items per page",
@@ -4002,6 +4022,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       unnamed: "Unnamed device"
     },
     "zh-TW": {
+      longPressHint: "長按卡片即可多選，也可用右上角 ⋯ 選單", gotIt: "知道了",
       langBtn: "🌐", langTip: "切換語言",
       ghRepo: "GitHub 儲存庫", modalClose: "關閉", devices: "裝置標籤",
       jumpTip: "輸入頁碼後按 Enter 跳轉", perPageTip: "每頁筆數",
@@ -4071,6 +4092,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       unnamed: "未命名裝置"
     },
     ja: {
+      longPressHint: "メッセージを長押しすると複数選択できます（右上の ⋯ メニューからも可）", gotIt: "了解",
       langBtn: "🌐", langTip: "言語切替",
       ghRepo: "GitHub リポジトリ", modalClose: "閉じる", devices: "デバイスラベル",
       jumpTip: "ページ番号を入力して Enter で移動", perPageTip: "1 ページの件数",
@@ -4140,6 +4162,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       unnamed: "名前のないデバイス"
     },
     ko: {
+      longPressHint: "메시지를 길게 눌러 여러 개 선택할 수 있습니다. 오른쪽 위 ⋯ 메뉴에서도 가능합니다", gotIt: "확인",
       langBtn: "🌐", langTip: "언어 전환",
       ghRepo: "GitHub 저장소", modalClose: "닫기", devices: "기기 라벨",
       jumpTip: "페이지 번호 입력 후 Enter", perPageTip: "페이지당 항목 수",
@@ -4209,6 +4232,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       unnamed: "이름 없는 기기"
     },
     es: {
+      longPressHint: "Mantén pulsado un mensaje para seleccionar varios, o usa el menú ⋯", gotIt: "Entendido",
       langBtn: "🌐", langTip: "Cambiar idioma",
       ghRepo: "Repositorio de GitHub", modalClose: "Cerrar", devices: "Dispositivos",
       jumpTip: "Escribe un número de página y pulsa Enter", perPageTip: "Elementos por página",
@@ -4278,6 +4302,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       unnamed: "Dispositivo sin nombre"
     },
     fr: {
+      longPressHint: "Appuyez longuement sur un message pour en sélectionner plusieurs, ou utilisez le menu ⋯", gotIt: "Compris",
       langBtn: "🌐", langTip: "Changer de langue",
       ghRepo: "Dépôt GitHub", modalClose: "Fermer", devices: "Appareils",
       jumpTip: "Saisissez un numéro de page puis Entrée", perPageTip: "Éléments par page",
@@ -4347,6 +4372,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       unnamed: "Appareil sans nom"
     },
     de: {
+      longPressHint: "Nachricht lange drücken, um mehrere auszuwählen – oder das ⋯-Menü nutzen", gotIt: "Verstanden",
       langBtn: "🌐", langTip: "Sprache wechseln",
       ghRepo: "GitHub-Repository", modalClose: "Schließen", devices: "Geräte",
       jumpTip: "Seitennummer eingeben und Enter drücken", perPageTip: "Einträge pro Seite",
@@ -4416,6 +4442,7 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
       unnamed: "Unbenanntes Gerät"
     },
     "pt-BR": {
+      longPressHint: "Toque e segure uma mensagem para selecionar várias, ou use o menu ⋯", gotIt: "Entendi",
       langBtn: "🌐", langTip: "Mudar idioma",
       ghRepo: "Repositório do GitHub", modalClose: "Fechar", devices: "Dispositivos",
       jumpTip: "Digite o número da página e pressione Enter", perPageTip: "Itens por página",
@@ -10324,6 +10351,15 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
     $("selbar").hidden = !state.selectMode;
     var smb = $("selmodebtn");
     if (smb) smb.setAttribute("aria-pressed", state.selectMode ? "true" : "false");
+    /* UX-20：一旦真的进入过多选（长按 / 右键 / 菜单任一路径），说明已经摸到了入口，
+       引导条没有存在必要，直接收起并记成已读，不再等用户点「知道了」 */
+    if (state.selectMode) {
+      var hint = $("selhint");
+      if (hint && !hint.hidden) {
+        hint.hidden = true;
+        try { localStorage.setItem("sms_selhint", "1"); } catch (e) {}
+      }
+    }
     if (!state.selectMode) {
       state.selected = {};
       /* 退出时必须把 DOM 复选框一并复位：只清 state 会留下"已勾选"的残留视觉，
@@ -10412,6 +10448,28 @@ const PAGE_HTML = String.raw`<!DOCTYPE html>
   }, { passive: true });
   $("list").addEventListener("touchend", cancelPress, { passive: true });
   $("list").addEventListener("touchcancel", cancelPress, { passive: true });
+  /* UX-20：窄屏首次进入的一次性引导。多选入口已从工具栏移到「长按 / 右键」，
+     纯图标化的 ⋯ 菜单也不是自明入口，新用户需要一次说明；关掉即写 localStorage 永不再现。
+     只在窄屏（≤660）出现：桌面有可见的「多选」按钮，弹这条反而多余。 */
+  (function () {
+    var el = $("selhint"), btn = $("selhintx");
+    if (!el || !btn) return;
+    var seen = false;
+    try { seen = localStorage.getItem("sms_selhint") === "1"; } catch (e) {}
+    var narrow = false;
+    try { narrow = window.matchMedia("(max-width: 660px)").matches; } catch (e) {}
+    if (!seen && narrow) el.hidden = false;
+    btn.onclick = function () {
+      el.hidden = true;
+      try { localStorage.setItem("sms_selhint", "1"); } catch (e) {}
+      /* 关闭即元素消失，焦点会掉回 body；移到列表容器上，键盘用户不必从头 Tab */
+      var l = $("list");
+      if (l) {
+        l.setAttribute("tabindex", "-1");
+        try { l.focus(); } catch (e) {}
+      }
+    };
+  })();
   $("selcancel").onclick = function () { setSelectMode(false, { focusFrom: $("selmodebtn") }); };
   $("selall").onclick = function () {
     var boxes = $("list").querySelectorAll(".selbox");

@@ -2151,6 +2151,16 @@ async function main() {
   check(/@media \(max-width: 389px\) \{\s*\.card:has\(\.rail-code\) \.msg-main > \.msg-foot \{ display: none; \}/.test(pageHtml)
     && !/@media \(max-width: 360px\) \{[^}]*\.card:has\(\.rail-code\)/.test(pageHtml),
     "UX-18c：有码卡片在 ≤389 让设备名退场（不占位、不补占位文字），390 起恢复");
+  /* UX-20：窄屏一次性多选引导 —— 默认 hidden（桌面与已读用户不会看到闪烁），
+     只在 ≤660 且未读标记时显示，关闭或真正进入多选后写 localStorage 永不再现 */
+  check(/id="selhint" role="note" hidden/.test(pageHtml)
+    && /data-i18n="longPressHint"/.test(pageHtml) && /id="selhintx"/.test(pageHtml)
+    && /localStorage\.setItem\("sms_selhint", "1"\)/.test(pageHtml)
+    && /matchMedia\("\(max-width: 660px\)"\)/.test(pageHtml)
+    && /\.selhint\[hidden\] \{ display: none; \}/.test(pageHtml),
+    "UX-20：窄屏首次进入显示一次多选引导（长按/⋯ 菜单），关闭或进入多选后写入 sms_selhint 不再出现");
+  check((uxSrc.match(/longPressHint:/g) || []).length === 9 && (uxSrc.match(/gotIt:/g) || []).length === 9,
+    "UX-20：九语种都补了 longPressHint / gotIt 文案");
   /* UX-15 后复制验证码并入次要操作格（仍在最前两位），删除与关闭独占一行；语义断言随之更新 */
   check(/id="dunread"/.test(pageHtml) && /code \? icBtn\('button', ' id="dccopy"/.test(pageHtml)
     && /doCopy\(extractCode\(m\.content/.test(pageHtml)
